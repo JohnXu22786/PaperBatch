@@ -187,6 +187,8 @@ public static class IpcJson
         {
             throw new JsonException("IPC request payloads must be JSON objects.");
         }
+
+        StrictJson.RejectDuplicateProperties(request.Payload);
     }
 
     private static void ValidateResponse(IpcResponseEnvelope response)
@@ -209,6 +211,10 @@ public static class IpcJson
             {
                 throw new JsonException("IPC error envelopes must contain bounded token codes and messages.");
             }
+        }
+        else
+        {
+            StrictJson.RejectDuplicateProperties(response.Payload!.Value);
         }
     }
 

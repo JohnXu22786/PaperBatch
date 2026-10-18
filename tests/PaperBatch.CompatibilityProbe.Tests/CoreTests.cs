@@ -325,6 +325,12 @@ internal static class CoreTests
         Assert.Throws<InvalidDataException>(() => IpcJson.ParseRequest(new byte[IpcJson.MaximumMessageBytes + 1]));
 
         var correlationId = Guid.Parse("12345678-1234-5678-1234-567812345678");
+        using var duplicatePayloadDocument = JsonDocument.Parse("{\"runId\":\"run-1\",\"runId\":\"run-2\"}");
+        var duplicateRequest = new IpcRequestEnvelope(1, correlationId, "run.prepare", "duplicate-payload-key", duplicatePayloadDocument.RootElement.Clone());
+        var duplicateResponse = new IpcResponseEnvelope(1, correlationId, duplicatePayloadDocument.RootElement.Clone(), null);
+        Assert.Throws<JsonException>(() => IpcJson.SerializeRequest(duplicateRequest));
+        Assert.Throws<JsonException>(() => IpcJson.SerializeResponse(duplicateResponse));
+
         var goldenError = IpcJson.SerializeResponse(IpcJson.CreateErrorResponse(correlationId, "invalid-request", "Malformed envelope."));
         var golden = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "ipc-error-v1.json")).Trim();
         Assert.Equal(golden, Encoding.UTF8.GetString(goldenError));
