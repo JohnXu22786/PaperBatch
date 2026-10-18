@@ -28,6 +28,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Build core contracts and run-state store
+        run: dotnet build src/PaperBatch.Core/PaperBatch.Core.csproj -p:NuGetAudit=false
+
       - name: Build compatibility probe
         run: dotnet build src/PaperBatch.CompatibilityProbe/PaperBatch.CompatibilityProbe.csproj -p:NuGetAudit=false
 

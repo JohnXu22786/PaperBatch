@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "recipeId": "office-packet",
+  "name": "Office packet",
+  "sources": [
+    {
+      "sourceId": "cover",
+      "location": "./cover.pdf"
+    },
+    {
+      "sourceId": "body",
+      "location": "./report.docx"
+    }
+  ],
+  "settings": {
+    "copies": 1,
+    "colorMode": "color",
+    "duplexMode": "longEdge",
+    "orientation": "auto",
+    "scalingMode": "shrinkToFit",
+    "media": "default",
+    "printerId": null,
+    "trayId": null
+  }
+}

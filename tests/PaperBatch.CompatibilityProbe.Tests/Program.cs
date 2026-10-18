@@ -65,7 +65,20 @@ var tests = new (string Name, Action Run)[]
     ("declared PE export directory range must be file-backed", ExportDirectoryRangeMustBeFileBacked),
     ("explicit PDFium paths distinguish absent from unreadable", PdfiumPathStatusDistinguishesMissingFromUnreadable),
     ("unrelated soffice candidate cannot satisfy LibreOffice evidence", UnrelatedSofficeCandidateCannotSatisfyLibreOfficeEvidence),
-    ("print simulation is deterministic and labeled", PrintSimulationIsDeterministic)
+    ("print simulation is deterministic and labeled", PrintSimulationIsDeterministic),
+    ("prepared-run invariants reject invalid hashes and copy collections", CoreTests.PreparedRunInvariantsRejectInvalidHashesAndCopyCollections),
+    ("run aggregation preserves uncertainty and OS completion", CoreTests.RunAggregationPreservesUncertaintyAndOsCompletion),
+    ("SQLite migrations are idempotent and preserve v1 records", CoreTests.SqliteMigrationsAreIdempotentAndPreserveV1Records),
+    ("SQLite rejects future schema versions without downgrading", CoreTests.SqliteRejectsFutureSchemaVersionsWithoutDowngrading),
+    ("run creation is atomic and persists metadata only", CoreTests.RunCreationIsAtomicAndPersistsMetadataOnly),
+    ("run creation idempotency replays matching requests", CoreTests.RunCreationIdempotencyReplaysMatchingRequests),
+    ("submission intent is durable and idempotent", CoreTests.SubmissionIntentIsDurableAndIdempotent),
+    ("intent and OS receipt writes roll back atomically", CoreTests.IntentAndOsReceiptWritesRollBackAtomically),
+    ("OS receipt is idempotent and not physical completion", CoreTests.OsReceiptIsIdempotentAndNotPhysicalCompletion),
+    ("recipe parser rejects invalid versions and unknown fields", CoreTests.RecipeParserRejectsInvalidVersionsAndUnknownFields),
+    ("recipe serialization matches its golden fixture", CoreTests.RecipeSerializationMatchesGoldenFixture),
+    ("IPC envelopes preserve correlation and negotiate capabilities", CoreTests.IpcEnvelopesPreserveCorrelationAndNegotiateCapabilities),
+    ("IPC rejects malformed and oversized messages", CoreTests.IpcRejectsMalformedAndOversizedMessages)
 };
 
 var failures = 0;

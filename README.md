@@ -4,7 +4,7 @@ PaperBatch is an AGPL-3.0 project for preparing and printing ordered batches of 
 
 ## U0 compatibility probe
 
-The probe targets .NET 10 and has no NuGet dependencies. It reports exact runtime/architecture, optional PDFium binary identity and PE exports, Office-suite executable/product identity/version/bitness evidence, print-spooler/queue/driver inventory, separate route, job-ID, and physical-device output evidence, and the open/complete state of G1.
+The compatibility probe targets .NET 10 and has no NuGet dependencies. The shared core adds a separate .NET 10 library with a pinned SQLite provider for durable run/job metadata. The probe reports exact runtime/architecture, optional PDFium binary identity and PE exports, Office-suite executable/product identity/version/bitness evidence, print-spooler/queue/driver inventory, separate route, job-ID, and physical-device output evidence, and the open/complete state of G1.
 
 ```sh
 dotnet run --project src/PaperBatch.CompatibilityProbe/PaperBatch.CompatibilityProbe.csproj -- collect
@@ -20,13 +20,18 @@ The Python LibreOffice probe requires `--engine-binary` and `--expected-engine-s
 
 ## Tests
 
-The test runner uses only the .NET SDK and project code. In the current Linux executor, run it in the official .NET 10 SDK image with network access disabled:
+The managed test runner includes the core SQLite tests and needs the pinned NuGet packages at least once. Restore the packages into a Docker volume, then run the test runner without network access:
 
 ```sh
-docker --host=unix:///var/run/docker.sock run --rm --network none \
-  -v "$PWD:/src" -w /src \
+docker volume create paperbatch-nuget
+docker --host=unix:///var/run/docker.sock run --rm \
+  -v "$PWD:/src" -v paperbatch-nuget:/root/.nuget/packages -w /src \
   mcr.microsoft.com/dotnet/sdk:10.0 \
-  dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
+  dotnet restore tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
+docker --host=unix:///var/run/docker.sock run --rm --network none \
+  -v "$PWD:/src" -v paperbatch-nuget:/root/.nuget/packages -w /src \
+  mcr.microsoft.com/dotnet/sdk:10.0 \
+  dotnet run --no-restore --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
 python3 -m unittest tests/test_libreoffice_probe.py
 ```
 
@@ -35,3 +40,7 @@ The LibreOffice smoke test creates a deterministic DOCX fixture, exports it to P
 ## Compatibility gate
 
 G1 remains open until native PDFium page-composition and form behavior, separate Microsoft Office/WPS/LibreOffice export evidence, suite-specific coexistence, a Windows queue/driver route, real GDI job-ID correlation, and operator-verified physical device output are all recorded. A successful Linux LibreOfficeDev export or simulator run is useful evidence for its own row only; neither closes G1.
+
+## Core contracts
+
+The engine-neutral run/job models, SQLite schema and migration behavior, recipe JSON v1, and local IPC envelope are described in [docs/architecture/core-contracts.md](docs/architecture/core-contracts.md). This shared core does not implement a renderer, Windows printer backend, or IPC listener, and OS-reported completion is not evidence of physical paper output.
