@@ -332,7 +332,8 @@ public sealed class SqliteRunStore
         ValidateIdempotencyKey(idempotencyKey);
         ArgumentNullException.ThrowIfNull(receipt);
         ValidateReceipt(receipt);
-        var receiptJson = JsonSerializer.Serialize(receipt, JsonOptions);
+        var normalizedReceipt = receipt with { SubmittedAtUtc = receipt.SubmittedAtUtc.ToUniversalTime() };
+        var receiptJson = JsonSerializer.Serialize(normalizedReceipt, JsonOptions);
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
         var job = ReadJob(connection, transaction, jobId)

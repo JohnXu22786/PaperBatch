@@ -351,9 +351,15 @@ internal static class CoreTests
 
         var accepted = store.RecordOsReceipt(jobId, "submit-key", receipt, FixedTime.AddMinutes(2));
         var replay = store.RecordOsReceipt(jobId, "submit-key", receipt, FixedTime.AddMinutes(3));
+        var equivalentOffsetReplay = store.RecordOsReceipt(
+            jobId,
+            "submit-key",
+            receipt with { SubmittedAtUtc = receipt.SubmittedAtUtc.ToOffset(TimeSpan.FromHours(2)) },
+            FixedTime.AddMinutes(3));
 
         Assert.Equal(JobState.AcceptedByOs, accepted.Job.State);
         Assert.True(replay.Replayed);
+        Assert.True(equivalentOffsetReplay.Replayed);
         Assert.Throws<IdempotencyConflictException>(() => store.RecordOsReceipt(
             jobId, "submit-key", receipt with { OsJobId = "job-other" }, FixedTime.AddMinutes(3)));
         Assert.Equal(RunState.AcceptedByOs, store.GetRun("run-1")!.State);
