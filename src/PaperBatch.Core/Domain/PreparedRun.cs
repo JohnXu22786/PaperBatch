@@ -362,18 +362,22 @@ public static class RunStateAggregator
             throw new ArgumentException("A run must contain at least one job state.", nameof(jobStates));
         }
 
-        if (states.Contains(JobState.NeedsReviewUnknown)) return RunState.NeedsReviewUnknown;
-        if (states.Contains(JobState.CancelRequested)) return RunState.CancelRequested;
-        if (states.Contains(JobState.Submitting)) return RunState.Submitting;
-        if (states.Contains(JobState.OsProcessing)) return RunState.OsProcessing;
-        if (states.Contains(JobState.AcceptedByOs)) return RunState.AcceptedByOs;
-        if (states.All(state => state == JobState.Ready)) return RunState.Ready;
-        if (states.All(state => state == JobState.UserConfirmedPaperOutput)) return RunState.UserConfirmedPaperOutput;
-        if (states.All(state => state == JobState.OsReportsComplete)) return RunState.OsReportsComplete;
-        if (states.All(state => state == JobState.CancelObserved)) return RunState.CancelObserved;
-        if (states.All(state => state == JobState.FailedBeforeSubmit)) return RunState.FailedBeforeSubmit;
+        if (states.Any(state => state != states[0])) return RunState.InProgress;
 
-        return RunState.InProgress;
+        return states[0] switch
+        {
+            JobState.Ready => RunState.Ready,
+            JobState.Submitting => RunState.Submitting,
+            JobState.AcceptedByOs => RunState.AcceptedByOs,
+            JobState.OsProcessing => RunState.OsProcessing,
+            JobState.OsReportsComplete => RunState.OsReportsComplete,
+            JobState.FailedBeforeSubmit => RunState.FailedBeforeSubmit,
+            JobState.CancelRequested => RunState.CancelRequested,
+            JobState.CancelObserved => RunState.CancelObserved,
+            JobState.NeedsReviewUnknown => RunState.NeedsReviewUnknown,
+            JobState.UserConfirmedPaperOutput => RunState.UserConfirmedPaperOutput,
+            _ => throw new ArgumentOutOfRangeException(nameof(jobStates), states[0], "Every job state must be defined.")
+        };
     }
 }
 
