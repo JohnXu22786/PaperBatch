@@ -51,6 +51,7 @@ internal static class CoreTests
         Assert.Equal(RunState.InProgress, RunStateAggregator.Aggregate([JobState.OsReportsComplete, JobState.UserConfirmedPaperOutput]));
         Assert.Equal(RunState.InProgress, RunStateAggregator.Aggregate([JobState.AcceptedByOs, JobState.OsReportsComplete]));
         Assert.Equal(RunState.InProgress, RunStateAggregator.Aggregate([JobState.NeedsReviewUnknown, JobState.Ready]));
+        Assert.Throws<ArgumentOutOfRangeException>(() => RunStateAggregator.Aggregate([JobState.Ready, (JobState)999]));
     }
 
     internal static void SqliteMigrationsAreIdempotentAndPreserveV1Records()
@@ -156,6 +157,18 @@ internal static class CoreTests
 
         Assert.Equal(golden, json);
         Assert.Equal(golden, PreparedRunJson.Serialize(PreparedRunJson.Parse(Encoding.UTF8.GetBytes(golden))));
+    }
+
+    internal static void PreparedRunJsonRejectsNullArrayEntries()
+    {
+        var json = PreparedRunJson.Serialize(CreateRun("null-entry-run", "null-entry-segment"));
+        var withNullItem = JsonNode.Parse(json)!.AsObject();
+        withNullItem["run"]!["items"]!.AsArray().Insert(0, null);
+        Assert.Throws<JsonException>(() => PreparedRunJson.Parse(Encoding.UTF8.GetBytes(withNullItem.ToJsonString())));
+
+        var withNullSegment = JsonNode.Parse(json)!.AsObject();
+        withNullSegment["run"]!["segments"]!.AsArray().Insert(0, null);
+        Assert.Throws<JsonException>(() => PreparedRunJson.Parse(Encoding.UTF8.GetBytes(withNullSegment.ToJsonString())));
     }
 
     internal static void DistinctRunsCanReuseSegmentIds()

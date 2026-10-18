@@ -362,6 +362,14 @@ public static class RunStateAggregator
             throw new ArgumentException("A run must contain at least one job state.", nameof(jobStates));
         }
 
+        foreach (var state in states)
+        {
+            if (!Enum.IsDefined(state))
+            {
+                throw new ArgumentOutOfRangeException(nameof(jobStates), state, "Every job state must be defined.");
+            }
+        }
+
         if (states.Any(state => state != states[0])) return RunState.InProgress;
 
         return states[0] switch

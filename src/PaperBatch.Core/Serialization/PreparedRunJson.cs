@@ -70,10 +70,10 @@ public static class PreparedRunJson
         try
         {
             var items = (run.Items ?? throw new JsonException("Prepared-run items are required."))
-                .Select(FromDocument)
+                .Select(item => FromDocument(item ?? throw new JsonException("Prepared-run item entries cannot be null.")))
                 .ToArray();
             var segments = (run.Segments ?? throw new JsonException("Prepared-run segments are required."))
-                .Select(FromDocument)
+                .Select(segment => FromDocument(segment ?? throw new JsonException("Prepared-run segment entries cannot be null.")))
                 .ToArray();
             return PreparedRun.Create(
                 Required(run.RunId, "runId"),
