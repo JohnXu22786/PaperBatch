@@ -18,13 +18,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -39,4 +39,4 @@ jobs:
 
       # The unit suite uses fixtures; pinned-engine LibreOffice export stays opt-in/local.
       - name: Run Python unit tests
-        run: python -m unittest tests/test_libreoffice_probe.py
+        run: python -m unittest discover -s tests -p test_libreoffice_probe.py
