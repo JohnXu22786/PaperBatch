@@ -40,3 +40,26 @@ jobs:
       # The unit suite uses fixtures; pinned-engine LibreOffice export stays opt-in/local.
       - name: Run Python unit tests
         run: python -m unittest discover -s tests -p test_libreoffice_probe.py
+
+  ipp-protocol-fault-lab:
+    name: Ubuntu / pinned IPP protocol-fault lab
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the pinned IPP lab image
+        run: docker build --pull --platform linux/amd64 --file tools/ipp-lab/Dockerfile --tag paperbatch-ipp-lab:ci .
+
+      - name: Run submit, query, cancel, and fault-classification tests
+        run: >-
+          docker run --rm --platform linux/amd64 --network none --read-only
+          --tmpfs /tmp:rw,noexec,nosuid,nodev,size=32m --cap-drop=ALL
+          --security-opt=no-new-privileges --pids-limit=64 --memory=512m --cpus=1
+          paperbatch-ipp-lab:ci python3 -m unittest discover -s tests -p test_ipp_fault_lab.py
+
+      - name: Emit redacted protocol-emulation trace for all scenarios
+        run: >-
+          docker run --rm --platform linux/amd64 --network none --read-only
+          --tmpfs /tmp:rw,noexec,nosuid,nodev,size=32m --cap-drop=ALL
+          --security-opt=no-new-privileges --pids-limit=64 --memory=512m --cpus=1
+          paperbatch-ipp-lab:ci python3 tools/ipp_fault_lab.py run --scenario all
