@@ -86,6 +86,23 @@ internal static class CoreTests
         Assert.Equal(999, ReadUserVersion(databasePath));
     }
 
+    internal static void SqliteRejectsUndefinedPersistedEnumValues()
+    {
+        using var temporary = new TemporaryDirectory();
+        var databasePath = Path.Combine(temporary.Path, "corrupt-state.db");
+        var store = new SqliteRunStore(databasePath);
+        store.Initialize();
+        store.CreateRun(
+            CreateRun("run-1", "segment-1"),
+            "create-key",
+            new RetentionMetadata(FixedTime.AddDays(30), RetainWhileUnresolved: true));
+
+        ExecuteSql(databasePath, "UPDATE runs SET state = '999' WHERE run_id = 'run-1';");
+        Assert.Throws<InvalidDataException>(() => store.GetRun("run-1"));
+        ExecuteSql(databasePath, "UPDATE runs SET state = 'Ready' WHERE run_id = 'run-1'; UPDATE jobs SET state = '999' WHERE job_id = 'segment-1';");
+        Assert.Throws<InvalidDataException>(() => store.GetJob("segment-1"));
+    }
+
     internal static void RunCreationIsAtomicAndPersistsMetadataOnly()
     {
         using var temporary = new TemporaryDirectory();
@@ -256,6 +273,28 @@ internal static class CoreTests
         Assert.Equal(JobState.NeedsReviewUnknown, store.GetTransitions(uncertainJobId)[^1].FromState);
         Assert.True(store.RecordOsReceipt(uncertainJobId, "submit-key-2", recoveredReceipt, FixedTime.AddMinutes(11)).Replayed);
         Assert.Equal(RunState.AcceptedByOs, store.GetRun("run-2")!.State);
+    }
+
+    internal static void UnknownOutcomeCanStillRecordUserConfirmedPaperOutput()
+    {
+        using var temporary = new TemporaryDirectory();
+        var store = new SqliteRunStore(Path.Combine(temporary.Path, "runs.db"));
+        store.Initialize();
+        var created = store.CreateRun(
+            CreateRun("run-1", "segment-1"),
+            "create-key",
+            new RetentionMetadata(FixedTime.AddDays(30), RetainWhileUnresolved: true));
+        var jobId = created.Jobs[0].JobId;
+        store.BeginSubmission(jobId, "submit-key", FixedTime.AddMinutes(1));
+        store.TransitionJob(jobId, JobState.NeedsReviewUnknown, "OS outcome unavailable", FixedTime.AddMinutes(2));
+
+        var confirmed = store.TransitionJob(jobId, JobState.UserConfirmedPaperOutput, "operator verified printed pages", FixedTime.AddMinutes(3));
+
+        Assert.Equal(JobState.UserConfirmedPaperOutput, confirmed.State);
+        Assert.Equal(RunState.UserConfirmedPaperOutput, store.GetRun("run-1")!.State);
+        var transition = store.GetTransitions(jobId)[^1];
+        Assert.Equal(JobState.NeedsReviewUnknown, transition.FromState);
+        Assert.Equal(JobState.UserConfirmedPaperOutput, transition.ToState);
     }
 
     internal static void RecipeParserRejectsInvalidVersionsAndUnknownFields()

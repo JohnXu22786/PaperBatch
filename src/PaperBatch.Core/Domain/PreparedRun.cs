@@ -390,7 +390,7 @@ public static class JobStateTransitions
         (JobState.AcceptedByOs, JobState.OsProcessing or JobState.OsReportsComplete or JobState.CancelRequested or JobState.NeedsReviewUnknown) => true,
         (JobState.OsProcessing, JobState.OsReportsComplete or JobState.CancelRequested or JobState.NeedsReviewUnknown) => true,
         (JobState.CancelRequested, JobState.CancelObserved or JobState.OsProcessing or JobState.OsReportsComplete or JobState.NeedsReviewUnknown) => true,
-        (JobState.NeedsReviewUnknown, JobState.AcceptedByOs or JobState.OsProcessing or JobState.OsReportsComplete or JobState.FailedBeforeSubmit or JobState.CancelObserved) => true,
+        (JobState.NeedsReviewUnknown, JobState.AcceptedByOs or JobState.OsProcessing or JobState.OsReportsComplete or JobState.FailedBeforeSubmit or JobState.CancelObserved or JobState.UserConfirmedPaperOutput) => true,
         (JobState.OsReportsComplete, JobState.UserConfirmedPaperOutput) => true,
         (JobState.CancelObserved, JobState.UserConfirmedPaperOutput) => true,
         _ => false

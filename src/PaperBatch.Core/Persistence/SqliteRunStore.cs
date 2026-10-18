@@ -610,7 +610,9 @@ public sealed class SqliteRunStore
     private static DateTimeOffset ParseTimestamp(string timestamp) => DateTimeOffset.Parse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
 
     private static TEnum ParseEnum<TEnum>(string value) where TEnum : struct, Enum =>
-        Enum.TryParse<TEnum>(value, ignoreCase: false, out var result)
+        Enum.TryParse<TEnum>(value, ignoreCase: false, out var result) &&
+        Enum.IsDefined(result) &&
+        string.Equals(Enum.GetName(result), value, StringComparison.Ordinal)
             ? result
             : throw new InvalidDataException($"Unknown persisted {typeof(TEnum).Name} value '{value}'.");
 
