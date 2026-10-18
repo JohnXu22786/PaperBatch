@@ -178,7 +178,8 @@ internal static class CoreTests
     internal static void OsReceiptIsIdempotentAndNotPhysicalCompletion()
     {
         using var temporary = new TemporaryDirectory();
-        var store = new SqliteRunStore(Path.Combine(temporary.Path, "runs.db"));
+        var databasePath = Path.Combine(temporary.Path, "runs.db");
+        var store = new SqliteRunStore(databasePath);
         store.Initialize();
         var created = store.CreateRun(
             CreateRun("run-1", "segment-1"),
@@ -208,6 +209,29 @@ internal static class CoreTests
         Assert.Throws<InvalidOperationException>(() => store.TransitionJob(jobId, JobState.Submitting, "retry", FixedTime.AddMinutes(6)));
         store.TransitionJob(jobId, JobState.UserConfirmedPaperOutput, "operator confirmed sheet", FixedTime.AddMinutes(7));
         Assert.Equal(RunState.UserConfirmedPaperOutput, store.GetRun("run-1")!.State);
+
+        var uncertain = store.CreateRun(
+            CreateRun("run-2", "segment-2"),
+            "create-key-2",
+            new RetentionMetadata(FixedTime.AddDays(30), RetainWhileUnresolved: true));
+        var uncertainJobId = uncertain.Jobs[0].JobId;
+        store.BeginSubmission(uncertainJobId, "submit-key-2", FixedTime.AddMinutes(8));
+        store.TransitionJob(uncertainJobId, JobState.NeedsReviewUnknown, "receipt missing after restart", FixedTime.AddMinutes(9));
+        var recoveredReceipt = new OsJobReceipt("queue-opaque-id", "job-recovered", "run-nonce-2", FixedTime.AddMinutes(8));
+        ExecuteSql(databasePath, "CREATE TRIGGER reject_reconciled_receipt BEFORE INSERT ON job_transitions WHEN NEW.to_state = 'AcceptedByOs' AND NEW.reason LIKE 'OS receipt recovered%' BEGIN SELECT RAISE(ABORT, 'injected'); END;");
+        Assert.Throws<SqliteException>(() => store.RecordOsReceipt(uncertainJobId, "submit-key-2", recoveredReceipt, FixedTime.AddMinutes(10)));
+        var stillUnknown = store.GetJob(uncertainJobId)!;
+        Assert.Equal(JobState.NeedsReviewUnknown, stillUnknown.State);
+        Assert.True(stillUnknown.OsReceipt is null);
+        Assert.Equal(3, store.GetTransitions(uncertainJobId).Length);
+        ExecuteSql(databasePath, "DROP TRIGGER reject_reconciled_receipt;");
+
+        var reconciled = store.RecordOsReceipt(uncertainJobId, "submit-key-2", recoveredReceipt, FixedTime.AddMinutes(10));
+        Assert.Equal(JobState.AcceptedByOs, reconciled.Job.State);
+        Assert.Equal(recoveredReceipt, reconciled.Job.OsReceipt);
+        Assert.Equal(JobState.NeedsReviewUnknown, store.GetTransitions(uncertainJobId)[^1].FromState);
+        Assert.True(store.RecordOsReceipt(uncertainJobId, "submit-key-2", recoveredReceipt, FixedTime.AddMinutes(11)).Replayed);
+        Assert.Equal(RunState.AcceptedByOs, store.GetRun("run-2")!.State);
     }
 
     internal static void RecipeParserRejectsInvalidVersionsAndUnknownFields()

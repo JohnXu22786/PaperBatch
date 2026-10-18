@@ -296,11 +296,16 @@ public sealed class SqliteRunStore
             return new JobOperationResult(job, Replayed: true);
         }
 
-        if (job.State != JobState.Submitting || !string.Equals(job.IdempotencyKey, idempotencyKey, StringComparison.Ordinal))
+        if (job.State is not (JobState.Submitting or JobState.NeedsReviewUnknown)
+            || !string.Equals(job.IdempotencyKey, idempotencyKey, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("An OS receipt requires the matching durable submission intent.");
         }
 
+        var previousState = job.State;
+        var transitionReason = previousState == JobState.NeedsReviewUnknown
+            ? "OS receipt recovered while reconciling an unresolved submission"
+            : "OS accepted the job";
         var changed = Execute(connection, transaction, """
             UPDATE jobs SET state = $nextState, os_receipt_json = $receiptJson, updated_utc = $updatedUtc
             WHERE job_id = $jobId AND state = $currentState AND submission_key = $idempotencyKey;
@@ -309,14 +314,14 @@ public sealed class SqliteRunStore
             ("$receiptJson", receiptJson),
             ("$updatedUtc", FormatTimestamp(atUtc)),
             ("$jobId", jobId),
-            ("$currentState", JobState.Submitting.ToString()),
+            ("$currentState", previousState.ToString()),
             ("$idempotencyKey", idempotencyKey));
         if (changed != 1)
         {
             throw new InvalidOperationException("OS receipt lost a concurrent state transition.");
         }
 
-        InsertTransition(connection, transaction, jobId, JobState.Submitting, JobState.AcceptedByOs, atUtc, idempotencyKey, "OS accepted the job");
+        InsertTransition(connection, transaction, jobId, previousState, JobState.AcceptedByOs, atUtc, idempotencyKey, transitionReason);
         var updated = ReadJob(connection, transaction, jobId)!;
         RefreshRunState(connection, transaction, job.RunId);
         transaction.Commit();
