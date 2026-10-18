@@ -369,7 +369,7 @@ public static class RunStateAggregator
         if (states.Contains(JobState.AcceptedByOs)) return RunState.AcceptedByOs;
         if (states.All(state => state == JobState.Ready)) return RunState.Ready;
         if (states.All(state => state == JobState.UserConfirmedPaperOutput)) return RunState.UserConfirmedPaperOutput;
-        if (states.All(state => state is JobState.OsReportsComplete or JobState.UserConfirmedPaperOutput)) return RunState.OsReportsComplete;
+        if (states.All(state => state == JobState.OsReportsComplete)) return RunState.OsReportsComplete;
         if (states.All(state => state == JobState.CancelObserved)) return RunState.CancelObserved;
         if (states.All(state => state == JobState.FailedBeforeSubmit)) return RunState.FailedBeforeSubmit;
 

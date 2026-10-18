@@ -46,6 +46,7 @@ internal static class CoreTests
         Assert.True(RunStateAggregator.Aggregate([JobState.OsReportsComplete]) != RunState.UserConfirmedPaperOutput);
         Assert.Equal(RunState.UserConfirmedPaperOutput, RunStateAggregator.Aggregate([JobState.UserConfirmedPaperOutput]));
         Assert.Equal("InProgress", RunStateAggregator.Aggregate([JobState.Ready, JobState.OsReportsComplete]).ToString());
+        Assert.Equal(RunState.InProgress, RunStateAggregator.Aggregate([JobState.OsReportsComplete, JobState.UserConfirmedPaperOutput]));
     }
 
     internal static void SqliteMigrationsAreIdempotentAndPreserveV1Records()
