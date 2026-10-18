@@ -234,12 +234,20 @@ class PinnedEngine:
     runtime_directory_path: str | None = None
     runtime_directory_sha256: str = ""
     engine_file_identity: tuple[int, int] | None = None
+    source_stream: Any = None
 
     def close(self) -> None:
-        self.stream.close()
-        if self.runtime_directory_descriptor is not None:
-            os.close(self.runtime_directory_descriptor)
-            self.runtime_directory_descriptor = None
+        try:
+            self.stream.close()
+        finally:
+            try:
+                if self.source_stream is not None:
+                    self.source_stream.close()
+                    self.source_stream = None
+            finally:
+                if self.runtime_directory_descriptor is not None:
+                    os.close(self.runtime_directory_descriptor)
+                    self.runtime_directory_descriptor = None
 
     def verify_runtime_directory(self) -> str:
         if self.runtime_directory_path is None:
@@ -281,7 +289,10 @@ def runtime_directory_sha256(
         for child in children:
             relative = f"{relative_directory}/{child.name}" if relative_directory else child.name
             comparable = relative.casefold() if os.name == "nt" else relative
-            metadata = child.stat(follow_symlinks=False)
+            # Resolve the entry through the same path-based stat API used on all
+            # platforms. Windows DirEntry metadata can omit file identity data
+            # that fstat reports for the opened handle.
+            metadata = os.stat(child.path, follow_symlinks=False)
             is_reparse_point = bool(
                 getattr(metadata, "st_file_attributes", 0)
                 & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
@@ -328,7 +339,7 @@ def runtime_directory_sha256(
                 ):
                     raise PinnedEngineError("A LibreOffice runtime component changed while its identity was being inspected.")
                 if is_pinned_engine_entry:
-                    current_path = child.stat(follow_symlinks=False)
+                    current_path = os.stat(child.path, follow_symlinks=False)
                     current_is_reparse_point = bool(
                         getattr(current_path, "st_file_attributes", 0)
                         & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
@@ -543,8 +554,6 @@ def open_pinned_engine(executable: Path, expected_sha256: str):
                 fcntl.fcntl(descriptor, 1033, seals)  # F_ADD_SEALS
             except OSError as error:
                 raise PinnedEngineError(f"Could not seal the Linux engine snapshot: {error}") from error
-            source_stream.close()
-            source_stream = None
             launch_target = f"/proc/self/fd/{descriptor}"
             if not os.path.exists(launch_target):
                 raise PinnedEngineError("Linux procfs does not expose the sealed engine snapshot descriptor.")
@@ -599,9 +608,11 @@ def open_pinned_engine(executable: Path, expected_sha256: str):
             str(runtime_directory_path),
             runtime_sha256,
             engine_file_identity,
+            source_stream,
         )
         stream = None
         runtime_directory_descriptor = None
+        source_stream = None
         return result
     except Exception:
         if source_stream is not None:

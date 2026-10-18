@@ -1016,6 +1016,7 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
             candidate.write_bytes(b"candidate")
             with (
                 mock.patch.object(probe_libreoffice_export.sys, "platform", "darwin"),
+                mock.patch.object(probe_libreoffice_export.os, "name", "posix"),
                 mock.patch.object(Path, "open", side_effect=AssertionError("unsupported Unix paths must not be opened")),
             ):
                 with self.assertRaises(probe_libreoffice_export.PinnedEngineError):
@@ -1368,8 +1369,8 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
                     expected_engine_sha256=expected_sha256,
                 )
 
+        self.assertEqual(0, result["exitCode"], result)
         command = run_process.call_args.args[0]
-        self.assertEqual(0, result["exitCode"])
         self.assertTrue(command[0].startswith("\\\\?\\"))
         self.assertEqual(command[0], result["executionTarget"])
 
