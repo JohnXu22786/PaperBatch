@@ -197,7 +197,12 @@ public sealed record PreparedRun
             ValidateItem(item);
             var normalizedItem = item with
             {
-                Source = item.Source with { CapturedAtUtc = item.Source.CapturedAtUtc.ToUniversalTime() }
+                Source = item.Source with
+                {
+                    Sha256 = item.Source.Sha256.ToLowerInvariant(),
+                    CapturedAtUtc = item.Source.CapturedAtUtc.ToUniversalTime()
+                },
+                Render = item.Render with { ArtifactSha256 = item.Render.ArtifactSha256.ToLowerInvariant() }
             };
             if (!itemsById.TryAdd(normalizedItem.ItemId, normalizedItem))
             {

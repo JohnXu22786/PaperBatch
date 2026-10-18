@@ -280,13 +280,25 @@ internal static class CoreTests
                 }
             }],
             run.Segments);
+        var equivalentHashCaseRun = PreparedRun.Create(
+            run.RunId,
+            run.CreatedAtUtc,
+            run.SnapshotFingerprint,
+            [run.Items[0] with
+            {
+                Source = run.Items[0].Source with { Sha256 = run.Items[0].Source.Sha256.ToUpperInvariant() },
+                Render = run.Items[0].Render with { ArtifactSha256 = run.Items[0].Render.ArtifactSha256.ToUpperInvariant() }
+            }],
+            run.Segments);
 
         var first = store.CreateRun(run, "create-key", retention);
         var replay = store.CreateRun(equivalentOffsetRun, "create-key", retention);
+        var hashCaseReplay = store.CreateRun(equivalentHashCaseRun, "create-key", retention);
         var exactReplay = store.CreateRun(run, "create-key", retention);
 
         Assert.True(!first.Replayed);
         Assert.True(replay.Replayed);
+        Assert.True(hashCaseReplay.Replayed);
         Assert.True(exactReplay.Replayed);
         Assert.Equal(first.Run.RunId, replay.Run.RunId);
         Assert.Throws<IdempotencyConflictException>(() => store.CreateRun(
