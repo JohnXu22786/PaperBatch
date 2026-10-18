@@ -205,6 +205,11 @@ public sealed record PreparedRun
         for (var index = 0; index < immutableSegments.Length; index++)
         {
             var segment = immutableSegments[index];
+            if (segment is null)
+            {
+                throw new ArgumentException("A compatible segment cannot be null.", nameof(segments));
+            }
+
             ValidateIdentifier(segment.SegmentId, nameof(segments));
             if (!segmentIds.Add(segment.SegmentId))
             {

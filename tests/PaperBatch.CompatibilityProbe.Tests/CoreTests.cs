@@ -38,6 +38,8 @@ internal static class CoreTests
         Assert.Throws<ArgumentException>(() => PreparedRun.Create(
             "run-incompatible-segment", FixedTime, Hash, [item],
             [CreateSegment(item.ItemId) with { PrintSettings = item.PrintSettings with { ColorMode = ColorMode.Monochrome } }]));
+        Assert.Throws<ArgumentException>(() => PreparedRun.Create(
+            "run-null-segment", FixedTime, Hash, [item], [null!]));
     }
 
     internal static void RunAggregationPreservesUncertaintyAndOsCompletion()
