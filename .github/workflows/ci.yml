@@ -39,4 +39,4 @@ jobs:
 
       # The unit suite uses fixtures; pinned-engine LibreOffice export stays opt-in/local.
       - name: Run Python unit tests
-        run: python -m unittest discover -s tests -p test_libreoffice_probe.py
+        run: python -m unittest discover -s tests -p 'test_*.py'

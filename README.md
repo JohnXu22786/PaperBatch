@@ -20,6 +20,8 @@ The Python LibreOffice probe requires `--engine-binary` and `--expected-engine-s
 
 ## Tests
 
+The deterministic synthetic DOCX, XLSX, PPTX, PDF, and malformed-package seed, its manifest, and regeneration guidance are in [docs/compatibility/u8-synthetic-document-corpus.md](docs/compatibility/u8-synthetic-document-corpus.md).
+
 The test runner uses only the .NET SDK and project code. In the current Linux executor, run it in the official .NET 10 SDK image with network access disabled:
 
 ```sh
@@ -27,7 +29,7 @@ docker --host=unix:///var/run/docker.sock run --rm --network none \
   -v "$PWD:/src" -w /src \
   mcr.microsoft.com/dotnet/sdk:10.0 \
   dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
-python3 -m unittest tests/test_libreoffice_probe.py
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 The LibreOffice smoke test creates a deterministic DOCX fixture, exports it to PDF with a fresh temporary profile, and records hashes. Its bounded parser checks a classic cross-reference table incrementally, validates in-use object offsets, resolves the trailer `/Root` to a catalog object, follows the page tree to at least one page with a non-empty content stream, and decodes text in referenced page content using a referenced ToUnicode `bfchar` map or a simple-font ASCII encoding explicitly named as StandardEncoding or WinAnsiEncoding in the page font resource. ToUnicode decoding accepts fixed one-byte codes for Type1/TrueType fonts and fixed two-byte codes only for Type0 fonts using `/Identity-H` or `/Identity-V`; unsupported encodings, mixed source-code widths, and incomplete two-byte codes cannot verify the phrase. It concatenates `/Contents` arrays in order, skips PDF comments, and samples font size/render mode at each text-show operator before confirming the fixture phrase. Each decoded stream and total decoded page content are limited to 8 MiB; unique decoded page-content streams are cached across pages and capped at 8 MiB per document. Aggregate decoded CMaps across the document are also limited to 8 MiB and cached across pages, and page text parsing stops at 100,000 tokens. CMap parsing rejects a token-limited prefix so later envelope markers cannot be hidden. Page font observations are processed incrementally. On Linux, file content is opened only after a path-only handle confirms a regular-file identity; reads use that pinned handle. To avoid treating arbitrary inline-image bytes as operators, it stops text inspection at an inline-image operator; text after an inline image in the same page content sequence is not considered. It rejects graphics-only output, text using an undefined font resource, zero-size text, render modes 3 and 7, and unreferenced text. This is text-show operator evidence, not proof of visual output: the parser does not check color, transparency, overpainting, clipping geometry, or pixels. It checks the terminal EOF marker but does not support cross-reference streams, all PDF filters, `bfrange` CMaps, or the full PDF specification. The generated PDF may contain run-specific metadata, so its hash identifies that run rather than promising byte-identical output across runs. The test does not cover coexistence with an already running Office/WPS process, Windows COM automation, PDFium behavior, a Windows route/driver, or physical paper output.
