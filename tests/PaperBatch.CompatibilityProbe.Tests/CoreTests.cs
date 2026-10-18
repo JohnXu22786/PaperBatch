@@ -7,6 +7,7 @@ using PaperBatch.Core.Domain;
 using PaperBatch.Core.Ipc;
 using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Recipes;
+using PaperBatch.Core.Serialization;
 
 internal static class CoreTests
 {
@@ -93,12 +94,31 @@ internal static class CoreTests
         var first = CreateRun("run-1", "segment-shared");
         var retention = new RetentionMetadata(FixedTime.AddDays(30), RetainWhileUnresolved: true);
         var created = store.CreateRun(first, "create-key-1", retention);
+        var restored = store.GetPreparedRun(first.RunId);
 
         Assert.Equal(RunState.Ready, created.Run.State);
         Assert.Equal(FixedTime.AddDays(30), created.Run.Retention.ExpiresAtUtc);
         Assert.Equal(1, created.Jobs.Length);
+        Assert.True(restored is not null);
+        Assert.Equal(first.RunId, restored!.RunId);
+        Assert.Equal(first.CreatedAtUtc, restored.CreatedAtUtc);
+        Assert.Equal(first.SnapshotFingerprint, restored.SnapshotFingerprint);
+        Assert.Equal(first.Items[0].ItemId, restored.Items[0].ItemId);
+        Assert.Equal(first.Items[0].Source, restored.Items[0].Source);
+        Assert.Equal(first.Items[0].Render.RendererId, restored.Items[0].Render.RendererId);
+        Assert.Equal(first.Items[0].Render.RendererVersion, restored.Items[0].Render.RendererVersion);
+        Assert.Equal(first.Items[0].Render.ArtifactSha256, restored.Items[0].Render.ArtifactSha256);
+        Assert.Equal(first.Items[0].Render.Capabilities.ContractVersion, restored.Items[0].Render.Capabilities.ContractVersion);
+        Assert.True(first.Items[0].Render.Capabilities.SupportedMediaTypes.SequenceEqual(restored.Items[0].Render.Capabilities.SupportedMediaTypes));
+        Assert.True(first.Items[0].PageMap.SequenceEqual(restored.Items[0].PageMap));
+        Assert.Equal(first.Items[0].PrintSettings, restored.Items[0].PrintSettings);
+        Assert.Equal(first.Segments[0].SegmentId, restored.Segments[0].SegmentId);
+        Assert.Equal(first.Segments[0].PrintSettings, restored.Segments[0].PrintSettings);
+        Assert.True(first.Segments[0].ItemIds.SequenceEqual(restored.Segments[0].ItemIds));
         Assert.True(!created.Run.PreparedRunJson.Contains("document-content-sentinel", StringComparison.Ordinal));
         Assert.True(!created.Run.PreparedRunJson.Contains("password-sentinel", StringComparison.Ordinal));
+        var futureSchema = created.Run.PreparedRunJson.Replace("\"schemaVersion\":1", "\"schemaVersion\":99", StringComparison.Ordinal);
+        Assert.Throws<NotSupportedException>(() => PreparedRunJson.Parse(Encoding.UTF8.GetBytes(futureSchema)));
 
         var collision = CreateRun("run-2", "segment-shared");
         Assert.Throws<SqliteException>(() => store.CreateRun(collision, "create-key-2", retention));

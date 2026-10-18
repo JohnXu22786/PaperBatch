@@ -1,8 +1,10 @@
 using System.Collections.Immutable;
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using PaperBatch.Core.Domain;
+using PaperBatch.Core.Serialization;
 
 namespace PaperBatch.Core.Persistence;
 
@@ -118,7 +120,7 @@ public sealed class SqliteRunStore
             throw new ArgumentException("Retention expiry must be later than the run creation time.", nameof(retention));
         }
 
-        var preparedRunJson = JsonSerializer.Serialize(new StoredPreparedRun(1, preparedRun), JsonOptions);
+        var preparedRunJson = PreparedRunJson.Serialize(preparedRun);
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
 
@@ -176,6 +178,14 @@ public sealed class SqliteRunStore
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         using var connection = OpenConnection();
         return ReadRun(connection, null, runId);
+    }
+
+    public PreparedRun? GetPreparedRun(string runId)
+    {
+        var storedRun = GetRun(runId);
+        return storedRun is null
+            ? null
+            : PreparedRunJson.Parse(Encoding.UTF8.GetBytes(storedRun.PreparedRunJson));
     }
 
     public StoredJob? GetJob(string jobId)
@@ -611,5 +621,4 @@ public sealed class SqliteRunStore
         return options;
     }
 
-    private sealed record StoredPreparedRun(int SchemaVersion, PreparedRun Run);
 }
