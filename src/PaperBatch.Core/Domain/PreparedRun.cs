@@ -191,14 +191,23 @@ public sealed record PreparedRun
         }
 
         var itemsById = new Dictionary<string, PreparedItem>(StringComparer.Ordinal);
+        var normalizedItemsBuilder = ImmutableArray.CreateBuilder<PreparedItem>(immutableItems.Length);
         foreach (var item in immutableItems)
         {
             ValidateItem(item);
-            if (!itemsById.TryAdd(item.ItemId, item))
+            var normalizedItem = item with
             {
-                throw new ArgumentException($"Duplicate prepared item ID '{item.ItemId}'.", nameof(items));
+                Source = item.Source with { CapturedAtUtc = item.Source.CapturedAtUtc.ToUniversalTime() }
+            };
+            if (!itemsById.TryAdd(normalizedItem.ItemId, normalizedItem))
+            {
+                throw new ArgumentException($"Duplicate prepared item ID '{normalizedItem.ItemId}'.", nameof(items));
             }
+
+            normalizedItemsBuilder.Add(normalizedItem);
         }
+
+        var normalizedItems = normalizedItemsBuilder.MoveToImmutable();
 
         var segmentIds = new HashSet<string>(StringComparer.Ordinal);
         var flattenedItemIds = new List<string>();
@@ -248,7 +257,7 @@ public sealed record PreparedRun
             }
         }
 
-        if (!flattenedItemIds.SequenceEqual(immutableItems.Select(item => item.ItemId), StringComparer.Ordinal))
+        if (!flattenedItemIds.SequenceEqual(normalizedItems.Select(item => item.ItemId), StringComparer.Ordinal))
         {
             throw new ArgumentException("Segments must cover each prepared item exactly once and preserve its order.", nameof(segments));
         }
@@ -257,7 +266,7 @@ public sealed record PreparedRun
             runId,
             createdAtUtc.ToUniversalTime(),
             snapshotFingerprint,
-            immutableItems,
+            normalizedItems,
             immutableSegments);
     }
 

@@ -268,12 +268,26 @@ internal static class CoreTests
         store.Initialize();
         var retention = new RetentionMetadata(FixedTime.AddDays(30), RetainWhileUnresolved: true);
         var run = CreateRun("run-1", "segment-1");
+        var equivalentOffsetRun = PreparedRun.Create(
+            run.RunId,
+            run.CreatedAtUtc,
+            run.SnapshotFingerprint,
+            [run.Items[0] with
+            {
+                Source = run.Items[0].Source with
+                {
+                    CapturedAtUtc = run.Items[0].Source.CapturedAtUtc.ToOffset(TimeSpan.FromHours(2))
+                }
+            }],
+            run.Segments);
 
         var first = store.CreateRun(run, "create-key", retention);
-        var replay = store.CreateRun(run, "create-key", retention);
+        var replay = store.CreateRun(equivalentOffsetRun, "create-key", retention);
+        var exactReplay = store.CreateRun(run, "create-key", retention);
 
         Assert.True(!first.Replayed);
         Assert.True(replay.Replayed);
+        Assert.True(exactReplay.Replayed);
         Assert.Equal(first.Run.RunId, replay.Run.RunId);
         Assert.Throws<IdempotencyConflictException>(() => store.CreateRun(
             CreateRun("different-run", "different-segment"), "create-key", retention));
