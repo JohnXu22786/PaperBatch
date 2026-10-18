@@ -73,6 +73,21 @@ public static class JobRecipeJson
             throw new UnsupportedSchemaVersionException(version, CurrentSchemaVersion);
         }
 
+        if (!document.RootElement.TryGetProperty("settings", out var settingsElement) ||
+            settingsElement.ValueKind != JsonValueKind.Object)
+        {
+            throw new JsonException("Recipe settings must be an object.");
+        }
+
+        foreach (var requiredSetting in new[] { "colorMode", "duplexMode", "orientation", "scalingMode" })
+        {
+            if (!settingsElement.TryGetProperty(requiredSetting, out var settingElement) ||
+                settingElement.ValueKind != JsonValueKind.String)
+            {
+                throw new JsonException($"Recipe setting '{requiredSetting}' is required and must be a string.");
+            }
+        }
+
         var recipe = JsonSerializer.Deserialize<JobRecipe>(utf8Json, SerializerOptions)
             ?? throw new JsonException("Recipe JSON produced no value.");
         Validate(recipe);

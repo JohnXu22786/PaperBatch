@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using PaperBatch.Core.Domain;
 using PaperBatch.Core.Ipc;
@@ -246,6 +247,13 @@ internal static class CoreTests
         Assert.Throws<JsonException>(() => JobRecipeJson.Parse(Encoding.UTF8.GetBytes(ValidRecipeJson().Replace("\"schemaVersion\": 1,", "\"schemaVersion\": 1, \"schemaVersion\": 1,", StringComparison.Ordinal))));
         Assert.Throws<JsonException>(() => JobRecipeJson.Parse(Encoding.UTF8.GetBytes("{ invalid }")));
         Assert.Throws<InvalidDataException>(() => JobRecipeJson.Parse(new byte[JobRecipeJson.MaximumRecipeBytes + 1]));
+        foreach (var requiredSetting in new[] { "colorMode", "duplexMode", "orientation", "scalingMode" })
+        {
+            var incomplete = JsonNode.Parse(ValidRecipeJson())!.AsObject();
+            incomplete["settings"]!.AsObject().Remove(requiredSetting);
+            Assert.Throws<JsonException>(() => JobRecipeJson.Parse(Encoding.UTF8.GetBytes(incomplete.ToJsonString())));
+        }
+
         var oversized = CreateRecipe() with
         {
             Sources = Enumerable.Range(0, 500).Select(index => new RecipeSource($"source-{index}", new string('x', 2048))).ToImmutableArray()
