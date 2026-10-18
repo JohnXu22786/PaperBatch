@@ -92,21 +92,23 @@ internal static class CoreTests
         var databasePath = Path.Combine(temporary.Path, "corrupt-state.db");
         var store = new SqliteRunStore(databasePath);
         store.Initialize();
-        store.CreateRun(
+        var created = store.CreateRun(
             CreateRun("run-1", "segment-1"),
             "create-key",
             new RetentionMetadata(FixedTime.AddDays(30), RetainWhileUnresolved: true));
+        var jobId = created.Jobs[0].JobId;
 
         ExecuteSql(databasePath, "UPDATE runs SET state = '999' WHERE run_id = 'run-1';");
         Assert.Throws<InvalidDataException>(() => store.GetRun("run-1"));
-        ExecuteSql(databasePath, "UPDATE runs SET state = 'Ready' WHERE run_id = 'run-1'; UPDATE jobs SET state = '999' WHERE job_id = 'segment-1';");
-        Assert.Throws<InvalidDataException>(() => store.GetJob("segment-1"));
+        ExecuteSql(databasePath, $"UPDATE runs SET state = 'Ready' WHERE run_id = 'run-1'; UPDATE jobs SET state = '999' WHERE job_id = '{jobId}';");
+        Assert.Throws<InvalidDataException>(() => store.GetJob(jobId));
     }
 
     internal static void RunCreationIsAtomicAndPersistsMetadataOnly()
     {
         using var temporary = new TemporaryDirectory();
-        var store = new SqliteRunStore(Path.Combine(temporary.Path, "runs.db"));
+        var databasePath = Path.Combine(temporary.Path, "runs.db");
+        var store = new SqliteRunStore(databasePath);
         store.Initialize();
         var first = CreateRun("run-1", "segment-shared");
         var retention = new RetentionMetadata(FixedTime.AddDays(30), RetainWhileUnresolved: true);
@@ -137,11 +139,39 @@ internal static class CoreTests
         var futureSchema = created.Run.PreparedRunJson.Replace("\"schemaVersion\":1", "\"schemaVersion\":99", StringComparison.Ordinal);
         Assert.Throws<NotSupportedException>(() => PreparedRunJson.Parse(Encoding.UTF8.GetBytes(futureSchema)));
 
-        var collision = CreateRun("run-2", "segment-shared");
-        Assert.Throws<SqliteException>(() => store.CreateRun(collision, "create-key-2", retention));
+        var interrupted = CreateRunWithTwoSegments("run-2", "segment-first", "segment-second");
+        ExecuteSql(databasePath, "CREATE TRIGGER reject_second_job BEFORE INSERT ON jobs WHEN NEW.run_id = 'run-2' AND NEW.segment_index = 1 BEGIN SELECT RAISE(ABORT, 'injected'); END;");
+        Assert.Throws<SqliteException>(() => store.CreateRun(interrupted, "create-key-2", retention));
         Assert.True(store.GetRun("run-2") is null);
         Assert.Equal(1, ReadCount(Path.Combine(temporary.Path, "runs.db"), "runs"));
         Assert.Equal(1, ReadCount(Path.Combine(temporary.Path, "runs.db"), "jobs"));
+        ExecuteSql(databasePath, "DROP TRIGGER reject_second_job;");
+    }
+
+    internal static void PreparedRunSerializationMatchesGoldenFixture()
+    {
+        var preparedRun = CreateRun("golden-run", "golden-segment");
+        var json = PreparedRunJson.Serialize(preparedRun);
+        var golden = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "prepared-run-v1.json")).Trim();
+
+        Assert.Equal(golden, json);
+        Assert.Equal(golden, PreparedRunJson.Serialize(PreparedRunJson.Parse(Encoding.UTF8.GetBytes(golden))));
+    }
+
+    internal static void DistinctRunsCanReuseSegmentIds()
+    {
+        using var temporary = new TemporaryDirectory();
+        var store = new SqliteRunStore(Path.Combine(temporary.Path, "runs.db"));
+        store.Initialize();
+        var retention = new RetentionMetadata(FixedTime.AddDays(30), RetainWhileUnresolved: true);
+        var first = store.CreateRun(CreateRun("run-1", "segment-shared"), "create-key-1", retention);
+        var second = store.CreateRun(CreateRun("run-2", "segment-shared"), "create-key-2", retention);
+
+        Assert.True(first.Jobs[0].JobId != second.Jobs[0].JobId);
+        Assert.Equal("run-1", store.GetJob(first.Jobs[0].JobId)!.RunId);
+        Assert.Equal("run-2", store.GetJob(second.Jobs[0].JobId)!.RunId);
+        store.BeginSubmission(first.Jobs[0].JobId, "submit-key-1", FixedTime.AddMinutes(1));
+        Assert.Equal(JobState.Ready, store.GetJob(second.Jobs[0].JobId)!.State);
     }
 
     internal static void RunCreationIdempotencyReplaysMatchingRequests()
@@ -396,6 +426,15 @@ internal static class CoreTests
         Hash,
         [CreateItem() with { ItemId = "item-1" }],
         [CreateSegment("item-1") with { SegmentId = segmentId }]);
+
+    private static PreparedRun CreateRunWithTwoSegments(string runId, string firstSegmentId, string secondSegmentId)
+    {
+        var firstItem = CreateItem() with { ItemId = "item-1" };
+        var secondItem = CreateItem() with { ItemId = "item-2" };
+        var firstSegment = CreateSegment(firstItem.ItemId) with { SegmentId = firstSegmentId, Index = 0 };
+        var secondSegment = CreateSegment(secondItem.ItemId) with { SegmentId = secondSegmentId, Index = 1 };
+        return PreparedRun.Create(runId, FixedTime, Hash, [firstItem, secondItem], [firstSegment, secondSegment]);
+    }
 
     private static JobRecipe CreateRecipe() => new(
         JobRecipeJson.CurrentSchemaVersion,

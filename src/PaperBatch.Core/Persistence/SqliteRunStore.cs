@@ -153,17 +153,18 @@ public sealed class SqliteRunStore
 
         foreach (var segment in preparedRun.Segments)
         {
+            var jobId = CreateJobId();
             Execute(connection, transaction, """
                 INSERT INTO jobs (job_id, run_id, segment_index, state, created_utc, updated_utc)
                 VALUES ($jobId, $runId, $segmentIndex, $state, $createdUtc, $updatedUtc);
                 """,
-                ("$jobId", segment.SegmentId),
+                ("$jobId", jobId),
                 ("$runId", preparedRun.RunId),
                 ("$segmentIndex", segment.Index),
                 ("$state", JobState.Ready.ToString()),
                 ("$createdUtc", FormatTimestamp(preparedRun.CreatedAtUtc)),
                 ("$updatedUtc", FormatTimestamp(preparedRun.CreatedAtUtc)));
-            InsertTransition(connection, transaction, segment.SegmentId, from: null, JobState.Ready, preparedRun.CreatedAtUtc, idempotencyKey: null, reason: "prepared run created");
+            InsertTransition(connection, transaction, jobId, from: null, JobState.Ready, preparedRun.CreatedAtUtc, idempotencyKey: null, reason: "prepared run created");
         }
 
         var run = new StoredRun(preparedRun.RunId, preparedRun.CreatedAtUtc, RunState.Ready, preparedRunJson, retention);
@@ -606,6 +607,8 @@ public sealed class SqliteRunStore
     }
 
     private static string FormatTimestamp(DateTimeOffset timestamp) => timestamp.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
+    private static string CreateJobId() => Guid.NewGuid().ToString("N");
 
     private static DateTimeOffset ParseTimestamp(string timestamp) => DateTimeOffset.Parse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
 
