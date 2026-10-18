@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-and-test:
-    name: ${{ matrix.os }} / .NET 10 and Python
+    name: ${{ matrix.os }} / .NET 10, Avalonia, and Python
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -24,12 +24,21 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      - name: Restore locked desktop dependencies
+        run: dotnet restore tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --locked-mode -p:NuGetAudit=false
+
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
       - name: Build compatibility probe
         run: dotnet build src/PaperBatch.CompatibilityProbe/PaperBatch.CompatibilityProbe.csproj -p:NuGetAudit=false
+
+      - name: Build Avalonia desktop shell
+        run: dotnet build src/PaperBatch.Desktop/PaperBatch.Desktop.csproj --no-restore -p:NuGetAudit=false
+
+      - name: Run focused headless presentation tests
+        run: dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
 
       - name: Run managed test runner
         run: dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
