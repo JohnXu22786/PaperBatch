@@ -107,6 +107,7 @@ public sealed class SqliteRunStore
         }
 
         _initialized = true;
+        DeleteExpiredRuns(DateTimeOffset.UtcNow);
     }
 
     public RunCreationResult CreateRun(PreparedRun preparedRun, string idempotencyKey, RetentionMetadata retention)
@@ -206,6 +207,47 @@ public sealed class SqliteRunStore
         var jobs = ReadJobsForRun(connection, transaction, runId);
         transaction.Commit();
         return jobs;
+    }
+
+    /// <summary>Deletes expired runs atomically while preserving unresolved OS jobs when their policy requires it.</summary>
+    public ImmutableArray<string> DeleteExpiredRuns(DateTimeOffset nowUtc)
+    {
+        EnsureInitialized();
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+
+        var expiredRuns = new List<(string RunId, bool RetainWhileUnresolved)>();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT run_id, retain_while_unresolved
+                FROM runs
+                WHERE retention_expires_utc <= $nowUtc
+                ORDER BY retention_expires_utc, run_id;
+                """;
+            command.Parameters.AddWithValue("$nowUtc", FormatTimestamp(nowUtc));
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                expiredRuns.Add((reader.GetString(0), reader.GetInt64(1) != 0));
+            }
+        }
+
+        var deletedRunIds = ImmutableArray.CreateBuilder<string>();
+        foreach (var (runId, retainWhileUnresolved) in expiredRuns)
+        {
+            if (retainWhileUnresolved && ReadJobsForRun(connection, transaction, runId).Any(job => IsUnresolvedOsJob(job.State)))
+            {
+                continue;
+            }
+
+            Execute(connection, transaction, "DELETE FROM runs WHERE run_id = $runId;", ("$runId", runId));
+            deletedRunIds.Add(runId);
+        }
+
+        transaction.Commit();
+        return deletedRunIds.ToImmutable();
     }
 
     public ImmutableArray<JobTransition> GetTransitions(string jobId)
@@ -531,6 +573,13 @@ public sealed class SqliteRunStore
         Execute(connection, transaction, "UPDATE runs SET state = $state WHERE run_id = $runId;",
             ("$state", runState.ToString()), ("$runId", runId));
     }
+
+    private static bool IsUnresolvedOsJob(JobState state) => state is
+        JobState.Submitting or
+        JobState.AcceptedByOs or
+        JobState.OsProcessing or
+        JobState.CancelRequested or
+        JobState.NeedsReviewUnknown;
 
     private static void InsertTransition(
         SqliteConnection connection,

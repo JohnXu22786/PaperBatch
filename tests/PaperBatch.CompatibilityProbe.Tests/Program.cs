@@ -75,6 +75,8 @@ var tests = new (string Name, Action Run)[]
     ("prepared-run serialization matches golden fixture", CoreTests.PreparedRunSerializationMatchesGoldenFixture),
     ("prepared-run JSON rejects null array entries", CoreTests.PreparedRunJsonRejectsNullArrayEntries),
     ("distinct runs can reuse segment IDs", CoreTests.DistinctRunsCanReuseSegmentIds),
+    ("expired runs are pruned only when retention allows it", CoreTests.ExpiredRunsArePrunedOnlyWhenRetentionAllowsIt),
+    ("store initialization prunes expired runs", CoreTests.StoreInitializationPrunesExpiredRuns),
     ("run creation idempotency replays matching requests", CoreTests.RunCreationIdempotencyReplaysMatchingRequests),
     ("submission intent is durable and idempotent", CoreTests.SubmissionIntentIsDurableAndIdempotent),
     ("intent and OS receipt writes roll back atomically", CoreTests.IntentAndOsReceiptWritesRollBackAtomically),

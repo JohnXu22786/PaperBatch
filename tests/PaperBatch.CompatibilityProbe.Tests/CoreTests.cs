@@ -187,6 +187,78 @@ internal static class CoreTests
         Assert.Equal(JobState.Ready, store.GetJob(second.Jobs[0].JobId)!.State);
     }
 
+    internal static void ExpiredRunsArePrunedOnlyWhenRetentionAllowsIt()
+    {
+        using var temporary = new TemporaryDirectory();
+        var databasePath = Path.Combine(temporary.Path, "runs.db");
+        var store = new SqliteRunStore(databasePath);
+        store.Initialize();
+        var expiredRetention = new RetentionMetadata(FixedTime.AddDays(1), RetainWhileUnresolved: true);
+        var unresolved = store.CreateRun(CreateRun("unresolved", "segment-unresolved"), "create-unresolved", expiredRetention);
+        store.BeginSubmission(unresolved.Jobs[0].JobId, "submit-unresolved", FixedTime.AddMinutes(1));
+        store.TransitionJob(unresolved.Jobs[0].JobId, JobState.NeedsReviewUnknown, "unknown", FixedTime.AddMinutes(2));
+
+        var resolved = store.CreateRun(CreateRun("resolved", "segment-resolved"), "create-resolved", expiredRetention);
+        store.BeginSubmission(resolved.Jobs[0].JobId, "submit-resolved", FixedTime.AddMinutes(1));
+        store.TransitionJob(resolved.Jobs[0].JobId, JobState.FailedBeforeSubmit, "known pre-submit failure", FixedTime.AddMinutes(2));
+
+        var explicitlyUnretained = store.CreateRun(
+            CreateRun("unretained", "segment-unretained"),
+            "create-unretained",
+            expiredRetention with { RetainWhileUnresolved = false });
+        store.BeginSubmission(explicitlyUnretained.Jobs[0].JobId, "submit-unretained", FixedTime.AddMinutes(1));
+        store.TransitionJob(explicitlyUnretained.Jobs[0].JobId, JobState.NeedsReviewUnknown, "unknown", FixedTime.AddMinutes(2));
+
+        store.CreateRun(
+            CreateRun("future", "segment-future"),
+            "create-future",
+            new RetentionMetadata(FixedTime.AddDays(30), RetainWhileUnresolved: true));
+
+        ExecuteSql(databasePath, "CREATE TRIGGER reject_retention_delete BEFORE DELETE ON runs WHEN OLD.run_id = 'unretained' BEGIN SELECT RAISE(ABORT, 'injected'); END;");
+        Assert.Throws<SqliteException>(() => store.DeleteExpiredRuns(FixedTime.AddDays(2)));
+        Assert.True(store.GetRun("resolved") is not null);
+        Assert.True(store.GetRun("unretained") is not null);
+        ExecuteSql(databasePath, "DROP TRIGGER reject_retention_delete;");
+
+        var firstDeleted = store.DeleteExpiredRuns(FixedTime.AddDays(2));
+
+        Assert.True(firstDeleted.ToHashSet(StringComparer.Ordinal).SetEquals(["resolved", "unretained"]));
+        Assert.True(store.GetRun("resolved") is null);
+        Assert.True(store.GetRun("unretained") is null);
+        Assert.True(store.GetRun("unresolved") is not null);
+        Assert.True(store.GetRun("future") is not null);
+
+        store.TransitionJob(unresolved.Jobs[0].JobId, JobState.UserConfirmedPaperOutput, "operator verified output", FixedTime.AddDays(3));
+        Assert.True(store.DeleteExpiredRuns(FixedTime.AddDays(3)).SequenceEqual(["unresolved"]));
+        Assert.True(store.GetRun("unresolved") is null);
+        Assert.True(store.GetRun("future") is not null);
+        Assert.Equal(JobState.Ready, store.GetJobs("future")[0].State);
+    }
+
+    internal static void StoreInitializationPrunesExpiredRuns()
+    {
+        using var temporary = new TemporaryDirectory();
+        var databasePath = Path.Combine(temporary.Path, "runs.db");
+        var initialStore = new SqliteRunStore(databasePath);
+        initialStore.Initialize();
+        var now = DateTimeOffset.UtcNow;
+        var preparedRun = PreparedRun.Create(
+            "expired-on-restart",
+            now.AddDays(-2),
+            Hash,
+            [CreateItem() with { ItemId = "item-1" }],
+            [CreateSegment("item-1") with { SegmentId = "segment-expired" }]);
+        initialStore.CreateRun(
+            preparedRun,
+            "create-expired",
+            new RetentionMetadata(now.AddDays(-1), RetainWhileUnresolved: true));
+
+        var reopenedStore = new SqliteRunStore(databasePath);
+        reopenedStore.Initialize();
+
+        Assert.True(reopenedStore.GetRun("expired-on-restart") is null);
+    }
+
     internal static void RunCreationIdempotencyReplaysMatchingRequests()
     {
         using var temporary = new TemporaryDirectory();
