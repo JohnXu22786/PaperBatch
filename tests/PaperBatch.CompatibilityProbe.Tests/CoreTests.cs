@@ -137,9 +137,39 @@ internal static class CoreTests
         Assert.Equal(first.Segments[0].SegmentId, restored.Segments[0].SegmentId);
         Assert.Equal(first.Segments[0].PrintSettings, restored.Segments[0].PrintSettings);
         Assert.True(first.Segments[0].ItemIds.SequenceEqual(restored.Segments[0].ItemIds));
-        Assert.True(!created.Run.PreparedRunJson.Contains("document-content-sentinel", StringComparison.Ordinal));
-        Assert.True(!created.Run.PreparedRunJson.Contains("password-sentinel", StringComparison.Ordinal));
-        var futureSchema = created.Run.PreparedRunJson.Replace("\"schemaVersion\":1", "\"schemaVersion\":99", StringComparison.Ordinal);
+        // This persistence boundary accepts metadata only; guard its stored JSON schema, not renderer or password handling.
+        var storedRun = store.GetRun(first.RunId);
+        Assert.True(storedRun is not null);
+        using var persistedMetadata = JsonDocument.Parse(storedRun!.PreparedRunJson);
+        var persistedRoot = persistedMetadata.RootElement;
+        AssertJsonObjectProperties(persistedRoot, "schemaVersion", "run");
+
+        var persistedRun = persistedRoot.GetProperty("run");
+        AssertJsonObjectProperties(persistedRun, "runId", "createdAtUtc", "snapshotFingerprint", "items", "segments");
+        foreach (var item in persistedRun.GetProperty("items").EnumerateArray())
+        {
+            AssertJsonObjectProperties(item, "itemId", "source", "render", "pageMap", "printSettings");
+            AssertJsonObjectProperties(item.GetProperty("source"), "snapshotId", "sha256", "lengthBytes", "capturedAtUtc");
+
+            var render = item.GetProperty("render");
+            AssertJsonObjectProperties(render, "rendererId", "rendererVersion", "artifactId", "artifactSha256", "artifactLengthBytes", "pageCount", "capabilities");
+            AssertJsonObjectProperties(render.GetProperty("capabilities"), "contractVersion", "supportedMediaTypes");
+
+            foreach (var pageMapping in item.GetProperty("pageMap").EnumerateArray())
+            {
+                AssertJsonObjectProperties(pageMapping, "sourcePageNumber", "renderedPageNumber");
+            }
+
+            AssertJsonObjectProperties(item.GetProperty("printSettings"), "copies", "colorMode", "duplexMode", "media", "orientation", "scalingMode", "printerId", "trayId");
+        }
+
+        foreach (var segment in persistedRun.GetProperty("segments").EnumerateArray())
+        {
+            AssertJsonObjectProperties(segment, "segmentId", "index", "itemIds", "compatibilityKey", "printSettings");
+            AssertJsonObjectProperties(segment.GetProperty("printSettings"), "copies", "colorMode", "duplexMode", "media", "orientation", "scalingMode", "printerId", "trayId");
+        }
+
+        var futureSchema = storedRun.PreparedRunJson.Replace("\"schemaVersion\":1", "\"schemaVersion\":99", StringComparison.Ordinal);
         Assert.Throws<NotSupportedException>(() => PreparedRunJson.Parse(Encoding.UTF8.GetBytes(futureSchema)));
 
         var interrupted = CreateRunWithTwoSegments("run-2", "segment-first", "segment-second");
@@ -545,6 +575,16 @@ internal static class CoreTests
         Hash,
         [CreateItem() with { ItemId = "item-1" }],
         [CreateSegment("item-1") with { SegmentId = segmentId }]);
+
+    private static void AssertJsonObjectProperties(JsonElement value, params string[] expected)
+    {
+        Assert.True(value.ValueKind == JsonValueKind.Object);
+        var actual = value.EnumerateObject()
+            .Select(property => property.Name)
+            .OrderBy(propertyName => propertyName, StringComparer.Ordinal);
+        var allowlist = expected.OrderBy(propertyName => propertyName, StringComparer.Ordinal);
+        Assert.True(actual.SequenceEqual(allowlist));
+    }
 
     private static PreparedRun CreateRunWithTwoSegments(string runId, string firstSegmentId, string secondSegmentId)
     {

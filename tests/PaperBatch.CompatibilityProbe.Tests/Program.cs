@@ -71,7 +71,7 @@ var tests = new (string Name, Action Run)[]
     ("SQLite migrations are idempotent and preserve v1 records", CoreTests.SqliteMigrationsAreIdempotentAndPreserveV1Records),
     ("SQLite rejects future schema versions without downgrading", CoreTests.SqliteRejectsFutureSchemaVersionsWithoutDowngrading),
     ("SQLite rejects undefined persisted enum values", CoreTests.SqliteRejectsUndefinedPersistedEnumValues),
-    ("run creation is atomic and persists metadata only", CoreTests.RunCreationIsAtomicAndPersistsMetadataOnly),
+    ("run creation is atomic and persists allowlisted metadata", CoreTests.RunCreationIsAtomicAndPersistsMetadataOnly),
     ("prepared-run serialization matches golden fixture", CoreTests.PreparedRunSerializationMatchesGoldenFixture),
     ("prepared-run JSON rejects null array entries", CoreTests.PreparedRunJsonRejectsNullArrayEntries),
     ("distinct runs can reuse segment IDs", CoreTests.DistinctRunsCanReuseSegmentIds),
