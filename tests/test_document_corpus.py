@@ -65,6 +65,8 @@ class DocumentCorpusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as regenerated_dir:
             generate_document_corpus.generate_corpus(Path(regenerated_dir))
             regenerated_manifest = (Path(regenerated_dir) / "manifest.json").read_bytes()
+        self.assertNotIn(b"\r", manifest_bytes)
+        self.assertNotIn(b"\r", regenerated_manifest)
         self.assertEqual(regenerated_manifest, manifest_bytes)
 
     def test_fixture_structures_match_their_declared_scenarios(self) -> None:
