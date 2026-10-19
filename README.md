@@ -23,7 +23,7 @@ The Python LibreOffice probe requires `--engine-binary` and `--expected-engine-s
 The managed test runner includes the core SQLite tests and needs the pinned NuGet packages at least once. Restore the packages into a Docker volume, then run the test runner without network access:
 
 ```sh
-docker volume create paperbatch-nuget
+docker --host=unix:///var/run/docker.sock volume create paperbatch-nuget
 docker --host=unix:///var/run/docker.sock run --rm \
   -v "$PWD:/src" -v paperbatch-nuget:/root/.nuget/packages -w /src \
   mcr.microsoft.com/dotnet/sdk:10.0 \

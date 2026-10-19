@@ -305,7 +305,7 @@ public sealed record PreparedRun
 
         foreach (var mediaType in item.Render.Capabilities.SupportedMediaTypes)
         {
-            if (string.IsNullOrWhiteSpace(mediaType) || mediaType.Length > 128 || !mediaType.Contains('/', StringComparison.Ordinal))
+            if (string.IsNullOrWhiteSpace(mediaType) || mediaType.Length > 128 || mediaType.Any(char.IsControl) || !IsValidMediaType(mediaType))
             {
                 throw new ArgumentException("Renderer media types must be bounded MIME type identifiers.", nameof(item));
             }
@@ -328,6 +328,31 @@ public sealed record PreparedRun
         }
 
         ValidatePrintSettings(item.PrintSettings, nameof(item));
+    }
+
+    private static bool IsValidMediaType(string value)
+    {
+        var slashIndex = value.IndexOf('/');
+        return slashIndex > 0 && slashIndex < value.Length - 1 && slashIndex == value.LastIndexOf('/') &&
+            IsMimeToken(value.AsSpan(0, slashIndex)) && IsMimeToken(value.AsSpan(slashIndex + 1));
+    }
+
+    private static bool IsMimeToken(ReadOnlySpan<char> value)
+    {
+        if (value.IsEmpty)
+        {
+            return false;
+        }
+
+        foreach (var character in value)
+        {
+            if (!char.IsAsciiLetterOrDigit(character) && "!#$%&'*+-.^_`|~".IndexOf(character) < 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static void ValidatePrintSettings(PrintSettings settings, string parameterName)

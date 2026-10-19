@@ -67,6 +67,7 @@ var tests = new (string Name, Action Run)[]
     ("unrelated soffice candidate cannot satisfy LibreOffice evidence", UnrelatedSofficeCandidateCannotSatisfyLibreOfficeEvidence),
     ("print simulation is deterministic and labeled", PrintSimulationIsDeterministic),
     ("prepared-run invariants reject invalid hashes and copy collections", CoreTests.PreparedRunInvariantsRejectInvalidHashesAndCopyCollections),
+    ("prepared-run validates renderer media type syntax", CoreTests.PreparedRunValidatesRendererMediaTypeSyntax),
     ("run aggregation preserves uncertainty and OS completion", CoreTests.RunAggregationPreservesUncertaintyAndOsCompletion),
     ("SQLite migrations are idempotent and preserve v1 records", CoreTests.SqliteMigrationsAreIdempotentAndPreserveV1Records),
     ("SQLite rejects future schema versions without downgrading", CoreTests.SqliteRejectsFutureSchemaVersionsWithoutDowngrading),

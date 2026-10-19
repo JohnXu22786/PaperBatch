@@ -42,6 +42,47 @@ internal static class CoreTests
             "run-null-segment", FixedTime, Hash, [item], [null!]));
     }
 
+    internal static void PreparedRunValidatesRendererMediaTypeSyntax()
+    {
+        var item = CreateItem();
+        var validMediaTypes = new[] { "application/pdf", "text/plain", "application/vnd.example+json" };
+        foreach (var mediaType in validMediaTypes)
+        {
+            var validItem = item with
+            {
+                Render = item.Render with
+                {
+                    Capabilities = new RendererCapabilities(1, [mediaType])
+                }
+            };
+            PreparedRun.Create("run-valid-media-type", FixedTime, Hash, [validItem], [CreateSegment(item.ItemId)]);
+        }
+
+        var invalidMediaTypes = new[]
+        {
+            "/",
+            "/pdf",
+            "application/",
+            "application//pdf",
+            "application/pdf; charset=utf-8",
+            "application/pd f",
+            "application/pdf\ninvalid",
+            "application/pdf\rinvalid"
+        };
+        foreach (var mediaType in invalidMediaTypes)
+        {
+            var invalidItem = item with
+            {
+                Render = item.Render with
+                {
+                    Capabilities = new RendererCapabilities(1, [mediaType])
+                }
+            };
+            Assert.Throws<ArgumentException>(() => PreparedRun.Create(
+                "run-invalid-media-type", FixedTime, Hash, [invalidItem], [CreateSegment(item.ItemId)]));
+        }
+    }
+
     internal static void RunAggregationPreservesUncertaintyAndOsCompletion()
     {
         Assert.Equal(RunState.NeedsReviewUnknown, RunStateAggregator.Aggregate([JobState.NeedsReviewUnknown]));
