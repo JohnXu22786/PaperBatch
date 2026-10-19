@@ -77,7 +77,7 @@ internal static class CoreTests
     {
         using var temporary = new TemporaryDirectory();
         var databasePath = Path.Combine(temporary.Path, "future.db");
-        using (var connection = new SqliteConnection($"Data Source={databasePath}"))
+        using (var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False"))
         {
             connection.Open();
             using var command = connection.CreateCommand();
@@ -566,7 +566,7 @@ internal static class CoreTests
 
     private static void CreateLegacyV1Database(string path)
     {
-        using var connection = new SqliteConnection($"Data Source={path}");
+        using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = """
@@ -607,7 +607,7 @@ internal static class CoreTests
 
     private static string ReadScalar(string path, string sql)
     {
-        using var connection = new SqliteConnection($"Data Source={path}");
+        using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = sql;
@@ -616,7 +616,7 @@ internal static class CoreTests
 
     private static void ExecuteSql(string path, string sql)
     {
-        using var connection = new SqliteConnection($"Data Source={path}");
+        using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = sql;
