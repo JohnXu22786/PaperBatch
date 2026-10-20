@@ -445,11 +445,11 @@ internal static class RendererTests
         var link = Path.Combine(program, "libfixture.so");
         try
         {
-            File.SetUnixFileMode(program, UnixFileMode.UserRead | UnixFileMode.UserExecute);
             File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserExecute);
             File.SetUnixFileMode(externalLibrary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
             File.SetUnixFileMode(outside, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             Directory.CreateSymbolicLink(link, externalLibrary);
+            File.SetUnixFileMode(program, UnixFileMode.UserRead | UnixFileMode.UserExecute);
             var adapter = CreateLibreOfficeCapabilityProbe(root, program, engine);
             File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserExecute);
             var supported = adapter.CanRenderAsync(new RenderRequest("snapshot", SourceFormat.Docx,
