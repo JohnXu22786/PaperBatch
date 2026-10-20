@@ -14,7 +14,10 @@ public sealed record OsJobReceipt(
     string QueueIdentity,
     string OsJobId,
     string RunNonce,
-    DateTimeOffset SubmittedAtUtc);
+    DateTimeOffset SubmittedAtUtc,
+    string? DriverName = null,
+    string? PortName = null,
+    string? CapabilityFingerprint = null);
 
 public sealed record StoredRun(
     string RunId,
@@ -606,6 +609,9 @@ public sealed class SqliteRunStore
         ValidateOpaqueToken(receipt.QueueIdentity, nameof(receipt.QueueIdentity));
         ValidateOpaqueToken(receipt.OsJobId, nameof(receipt.OsJobId));
         ValidateOpaqueToken(receipt.RunNonce, nameof(receipt.RunNonce));
+        if (receipt.DriverName is not null) ValidateOpaqueToken(receipt.DriverName, nameof(receipt.DriverName));
+        if (receipt.PortName is not null) ValidateOpaqueToken(receipt.PortName, nameof(receipt.PortName));
+        if (receipt.CapabilityFingerprint is not null) ValidateOpaqueToken(receipt.CapabilityFingerprint, nameof(receipt.CapabilityFingerprint));
     }
 
     private static void ValidateOpaqueToken(string value, string parameterName)
