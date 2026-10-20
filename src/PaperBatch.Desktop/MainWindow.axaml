@@ -132,7 +132,7 @@
                       </DataTemplate>
                     </ListBox.ItemTemplate>
                   </ListBox>
-                  <TextBlock Text="Sources are captured and preflighted through shared core services. Prepared runs and rendering are unavailable until preparation and a renderer are configured."
+                  <TextBlock x:Name="QueueDescription" Text="{Binding QueueDescription}"
                              FontSize="11" Foreground="#64748B" TextWrapping="Wrap" />
                 </StackPanel>
               </Border>

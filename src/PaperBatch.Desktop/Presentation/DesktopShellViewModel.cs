@@ -84,7 +84,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     public bool CanImportFiles => _queueSource is IQueueImportPresentationSource { IsAvailable: true };
 
-    public string QueueStateLabel => QueueItems.Count == 0 ? "NO FILES LOADED" : $"{QueueItems.Count} FILES LOADED";
+    public string QueueStateLabel => QueueItems.Count == 0 ? "QUEUE EMPTY" : $"{QueueItems.Count} ITEMS IN QUEUE";
 
     public string PreflightHeading => _workspaceStatus.IsDemo ? "Demo checks only" : "Source preflight";
 

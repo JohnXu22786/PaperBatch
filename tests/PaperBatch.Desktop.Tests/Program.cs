@@ -85,6 +85,7 @@ static void SourceIntakeErrorsRemainVisibleAndAppend()
         Assert.Equal("Needs attention", viewModel.QueueItems[0].Status);
         Assert.Equal("InputVanished", viewModel.PreflightFindings.Single().Title);
         Assert.Equal(2, viewModel.QueueItems.Count);
+        Assert.Equal("2 ITEMS IN QUEUE", viewModel.QueueStateLabel);
         Assert.True(viewModel.CanImportFiles);
     }
     finally
@@ -139,6 +140,8 @@ static void HeadlessShellIsExplicitlyDemoOnly()
         Assert.Contains("Synthetic sample data only", bannerText);
         Assert.Equal("DEMO PREVIEW", window.FindControl<TextBlock>("PreviewHeading")!.Text);
         Assert.Equal("Illustrative sheet face", window.FindControl<TextBlock>("PreviewDescription")!.Text);
+        Assert.Equal("3 ITEMS IN QUEUE", viewModel.QueueStateLabel);
+        Assert.Contains("sample preview", window.FindControl<TextBlock>("QueueDescription")!.Text);
         Assert.Null(window.FindControl<Button>("PrintButton"));
         viewModel.NavigateCommand.Execute("History");
         Assert.Equal("Example activity", window.FindControl<TextBlock>("HistoryTitle")!.Text);
@@ -166,6 +169,8 @@ static void ProductionPresentationIsExplicitlyUnavailable()
     try
     {
         window.Show();
+        Assert.Equal("QUEUE EMPTY", viewModel.QueueStateLabel);
+        Assert.Contains("Source files are captured", window.FindControl<TextBlock>("QueueDescription")!.Text);
         Assert.Equal("FINAL PREVIEW UNAVAILABLE", window.FindControl<TextBlock>("PreviewHeading")!.Text);
         Assert.Equal("No prepared artifact is available.", window.FindControl<TextBlock>("PreviewDescription")!.Text);
         viewModel.NavigateCommand.Execute("History");
