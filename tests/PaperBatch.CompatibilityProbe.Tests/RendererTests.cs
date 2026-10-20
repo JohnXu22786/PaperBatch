@@ -140,9 +140,10 @@ internal static class RendererTests
         var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true,
             typeof(System.Security.Principal.SecurityIdentifier));
         if (rules.Count != 1) throw new InvalidOperationException($"Expected one explicit owner ACL rule, got {rules.Count}.");
+        var onlyRule = rules[0] ?? throw new InvalidOperationException("The explicit owner ACL rule is missing.");
         using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
         var userSid = identity.User ?? throw new InvalidOperationException("The current Windows user SID could not be resolved.");
-        Assert.Equal(userSid.Value, ((System.Security.Principal.SecurityIdentifier)rules[0].IdentityReference).Value);
+        Assert.Equal(userSid.Value, ((System.Security.Principal.SecurityIdentifier)onlyRule.IdentityReference).Value);
     }
 
     public static void ArtifactStoreRejectsNonPdfInput()
