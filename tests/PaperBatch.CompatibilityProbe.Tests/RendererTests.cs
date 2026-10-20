@@ -35,11 +35,12 @@ internal static class RendererTests
         const string pinnedVersion = "LibreOffice 26.2.2.2";
         const string pinnedEngineSha256 = "bcfd617b90f741cd9aa778e70d6aa317ec6c8971e238f602f3f69ea0ad210c0a";
         var enginePath = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_PATH");
+        var launcherPath = Environment.GetEnvironmentVariable("PAPERBATCH_LO_LAUNCHER_PATH");
         var expectedVersion = Environment.GetEnvironmentVariable("PAPERBATCH_LO_EXPECTED_VERSION");
         var expectedHash = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_SHA256");
         var pdfiumPath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH");
         var pdfiumHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_SHA256");
-        if (string.IsNullOrWhiteSpace(enginePath) || string.IsNullOrWhiteSpace(expectedVersion) ||
+        if (string.IsNullOrWhiteSpace(enginePath) || string.IsNullOrWhiteSpace(launcherPath) || string.IsNullOrWhiteSpace(expectedVersion) ||
             string.IsNullOrWhiteSpace(expectedHash) || string.IsNullOrWhiteSpace(pdfiumPath) || string.IsNullOrWhiteSpace(pdfiumHash))
             throw new InvalidOperationException("The pinned LibreOffice CI runtime configuration is incomplete.");
         Assert.Equal(pinnedVersion, expectedVersion);
@@ -65,7 +66,7 @@ internal static class RendererTests
             Directory.CreateDirectory(profile, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             var profileUri = new Uri(profile + Path.DirectorySeparatorChar).AbsoluteUri;
             var programDirectory = Path.GetDirectoryName(Path.GetFullPath(enginePath))!;
-            var unrelatedStart = new ProcessStartInfo(enginePath)
+            var unrelatedStart = new ProcessStartInfo(launcherPath)
             {
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
@@ -73,8 +74,8 @@ internal static class RendererTests
                 CreateNoWindow = true,
                 WorkingDirectory = programDirectory
             };
-            unrelatedStart.Environment["LD_LIBRARY_PATH"] = programDirectory;
-            unrelatedStart.Environment["URE_BOOTSTRAP"] = new Uri(Path.Combine(programDirectory, "fundamentalrc")).AbsoluteUri;
+            unrelatedStart.Environment.Remove("LD_LIBRARY_PATH");
+            unrelatedStart.Environment.Remove("URE_BOOTSTRAP");
             unrelatedStart.ArgumentList.Add("--headless");
             unrelatedStart.ArgumentList.Add("--nologo");
             unrelatedStart.ArgumentList.Add("--nodefault");

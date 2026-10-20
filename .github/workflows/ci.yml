@@ -99,6 +99,7 @@ jobs:
           {
             echo 'PAPERBATCH_REQUIRE_LIBREOFFICE_TEST=1'
             echo "PAPERBATCH_LO_ENGINE_PATH=$lo_engine"
+            echo 'PAPERBATCH_LO_LAUNCHER_PATH=/usr/bin/soffice'
             echo 'PAPERBATCH_LO_EXPECTED_VERSION=LibreOffice 26.2.2.2'
             echo 'PAPERBATCH_LO_ENGINE_SHA256=bcfd617b90f741cd9aa778e70d6aa317ec6c8971e238f602f3f69ea0ad210c0a'
             echo "PAPERBATCH_PDFIUM_TEST_PATH=$pdfium_library"
