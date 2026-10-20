@@ -40,6 +40,8 @@ The UI-only service interfaces are internal to the presentation assembly. They k
 
 ## Tests
 
+The deterministic synthetic DOCX, XLSX, PPTX, PDF, and malformed-package seed, its manifest, and regeneration guidance are in [docs/compatibility/u8-synthetic-document-corpus.md](docs/compatibility/u8-synthetic-document-corpus.md).
+
 The managed test runner includes the core SQLite tests and needs the pinned NuGet packages at least once. Restore the packages into a Docker volume, then run the test runner without network access:
 
 ```sh
