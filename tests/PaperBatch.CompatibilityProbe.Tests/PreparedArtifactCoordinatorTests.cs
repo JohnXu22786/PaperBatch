@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using PaperBatch.Core.Domain;
 using PaperBatch.Core.Intake;
 using PaperBatch.Core.Layout;
@@ -11,6 +12,11 @@ internal static class PreparedArtifactCoordinatorTests
 
     internal static void PipelineComposesOrderedSnapshotsAndPersistsExactFinalPdf()
     {
+        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            Console.WriteLine("SKIP prepared artifact pipeline composition (the PDFium compositor is qualified only on Windows x64).");
+            return;
+        }
         var runtimePath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH");
         var expectedHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_SHA256");
         if (string.IsNullOrWhiteSpace(runtimePath) || string.IsNullOrWhiteSpace(expectedHash)) return;

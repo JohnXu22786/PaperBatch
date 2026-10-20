@@ -163,7 +163,22 @@ public sealed class PreparedArtifactCoordinator(
             Add(item.Render.ArtifactSha256);
         }
         Add(System.Text.Json.JsonSerializer.Serialize(settings));
-        Add(System.Text.Json.JsonSerializer.Serialize(options));
+        Add(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            options.Copies,
+            options.CopyOrder,
+            options.NUp,
+            options.Duplex,
+            options.SeparateFilesOnFront,
+            options.ReverseOrder,
+            options.Fit,
+            options.SheetSize,
+            Ranges = options.Ranges.IsDefault ? Array.Empty<PageRange>() : options.Ranges.ToArray(),
+            options.AddFrontCover,
+            options.AddSeparatorsBetweenFiles,
+            options.SeparatePacketsOnFront,
+            options.MaximumOutputPages
+        }));
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 }

@@ -559,10 +559,10 @@ internal static class RendererTests
         };
         var builder = new StringBuilder("%PDF-1.7\n");
         var offsets = new List<int> { 0 };
-        foreach (var item in objects)
+        for (var index = 0; index < objects.Length; index++)
         {
             offsets.Add(Encoding.ASCII.GetByteCount(builder.ToString()));
-            builder.Append(offsets.Count).Append(" 0 obj\n").Append(item).Append("\nendobj\n");
+            builder.Append(index + 1).Append(" 0 obj\n").Append(objects[index]).Append("\nendobj\n");
         }
         var xref = Encoding.ASCII.GetByteCount(builder.ToString());
         builder.Append("xref\n0 5\n0000000000 65535 f \n");
