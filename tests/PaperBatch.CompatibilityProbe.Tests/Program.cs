@@ -102,6 +102,7 @@ var tests = new List<(string Name, Action Run)>
     ("PDF composition requires explicit static source verification", PdfCompositionTests.CompositionRequiresExplicitStaticSourceInspection),
     ("PDF composition requires source content and output dimensions", PdfCompositionTests.CompositionRequiresEveryCompiledSourceAndOutputSize),
     ("PDF composition requires explicit runtime and digest", PdfCompositionTests.CompositionRequiresAnExplicitDigestAndRuntimePath),
+    ("PDF byte difference diagnostics report structural offsets without content", PdfCompositionTests.PdfDifferenceDiagnosticsReportOffsetsWithoutPdfContent),
     ("layout N-up and fit are deterministic", LayoutTests.NUpAndFitAreDeterministicAndImmutable),
     ("four-up cells have distinct slot rectangles", LayoutTests.FourUpUsesFourDistinctCellRectangles),
     ("page ranges and reversal preserve source mappings", LayoutTests.RangesAndReverseOrderPreserveSelectedMapping),

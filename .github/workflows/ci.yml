@@ -59,14 +59,36 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Continue'
-          $testOutput = & dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false 2>&1
+          $rawOutputPath = Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification-raw.txt'
+          & dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false *> $rawOutputPath
           $testExitCode = $LASTEXITCODE
           if ($testExitCode -ne 0) {
-            $boundedOutput = (($testOutput | ForEach-Object { $_.ToString() }) -join "`n")
+            $reader = [System.IO.StreamReader]::new($rawOutputPath)
+            try {
+              $buffer = [char[]]::new(4096)
+              $head = [System.Text.StringBuilder]::new()
+              $tail = [System.Text.StringBuilder]::new()
+              $totalRead = 0
+              while ($true) {
+                $chunkCount = $reader.Read($buffer, 0, $buffer.Length)
+                if ($chunkCount -eq 0) { break }
+                $totalRead += $chunkCount
+                $headLength = [Math]::Max(0, [Math]::Min(3970 - $head.Length, $chunkCount))
+                if ($headLength -gt 0) { [void]$head.Append($buffer, 0, $headLength) }
+                $tailOffset = $headLength
+                $tailLength = $chunkCount - $tailOffset
+                if ($tailLength -gt 0) {
+                  [void]$tail.Append($buffer, $tailOffset, $tailLength)
+                  if ($tail.Length -gt 12000) { $tail.Remove(0, $tail.Length - 12000) }
+                }
+              }
+              $boundedOutput = $head.ToString() + $tail.ToString()
+              if ($totalRead -gt 16000) { $boundedOutput = $head.ToString() + "`n[... middle omitted ...]`n" + $tail.ToString() }
+            } finally {
+              $reader.Dispose()
+            }
             if ($env:RUNNER_TEMP) { $boundedOutput = $boundedOutput.Replace($env:RUNNER_TEMP, '[RUNNER_TEMP]') }
             if ($env:GITHUB_WORKSPACE) { $boundedOutput = $boundedOutput.Replace($env:GITHUB_WORKSPACE, '[WORKSPACE]') }
-            if ($boundedOutput.Length -gt 16000) { $boundedOutput = $boundedOutput.Substring(0, 16000) + "`n[output truncated]" }
             $diagnosticPath = Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification.txt'
             Set-Content -Path $diagnosticPath -Value $boundedOutput -NoNewline
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## Pinned PDFium verification failure'
@@ -77,7 +99,6 @@ jobs:
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $boundedOutput
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
           }
-          $testOutput | ForEach-Object { Write-Output $_ }
           exit $testExitCode
 
       - name: Upload bounded PDFium failure details
@@ -96,6 +117,7 @@ jobs:
           Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'pdfium-win-x64.tgz')
           Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-test')
           Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification.txt')
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification-raw.txt')
 
       - name: Compile Python sources
         run: python -m compileall -q tools tests

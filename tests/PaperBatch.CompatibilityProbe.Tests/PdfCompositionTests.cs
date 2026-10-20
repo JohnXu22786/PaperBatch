@@ -80,8 +80,241 @@ internal static class PdfCompositionTests
 
         using var repeated = new MemoryStream();
         adapter.ComposePdfAsync(plan, [new PdfCompositionSource("fixture", input, StaticPageContentVerified: true)], repeated).GetAwaiter().GetResult();
-        if (!output.ToArray().SequenceEqual(repeated.ToArray())) throw new InvalidOperationException("Identical compiled inputs did not produce deterministic PDF bytes.");
+        var firstPdf = output.ToArray();
+        var secondPdf = repeated.ToArray();
+        if (!firstPdf.SequenceEqual(secondPdf))
+            throw new InvalidOperationException($"Identical compiled inputs produced different PDF bytes. {DescribePdfDifference(firstPdf, secondPdf)}");
     }
+
+    internal static void PdfDifferenceDiagnosticsReportOffsetsWithoutPdfContent()
+    {
+        var differentLength = DescribePdfDifference(Encoding.ASCII.GetBytes("/ID [<1>]"), Encoding.ASCII.GetBytes("/ID [<12>]"));
+        Assert.Contains("differing byte count: 3", differentLength);
+        Assert.Contains("first differing offsets: 7,8,9", differentLength);
+        Assert.Contains("confined to aligned /ID array: False", differentLength);
+
+        var trailingByte = DescribePdfDifference(Encoding.ASCII.GetBytes("/ID [<1>]"), Encoding.ASCII.GetBytes("/ID [<1>]X"));
+        Assert.Contains("differing byte count: 1", trailingByte);
+        Assert.Contains("first differing offsets: 9", trailingByte);
+        Assert.Contains("confined to aligned /ID array: False", trailingByte);
+
+        var shiftedId = DescribePdfDifference(Encoding.ASCII.GetBytes("/ID [<1>]Z"), Encoding.ASCII.GetBytes("/ID  [<2>]"));
+        Assert.Contains("confined to aligned /ID array: False", shiftedId);
+        Assert.True(!shiftedId.Contains("<1>", StringComparison.Ordinal));
+        Assert.True(!shiftedId.Contains("<2>", StringComparison.Ordinal));
+
+        var longerKey = DescribePdfDifference(Encoding.ASCII.GetBytes("trailer\n<< /IDENTIFIER [<1>] >>"), Encoding.ASCII.GetBytes("trailer\n<< /IDENTIFIER [<2>] >>"));
+        Assert.Contains("confined to aligned /ID array: False", longerKey);
+
+        var streamKey = DescribePdfDifference(Encoding.ASCII.GetBytes("stream\n/ID [<1>]\nendstream\ntrailer\n<< >>"), Encoding.ASCII.GetBytes("stream\n/ID [<2>]\nendstream\ntrailer\n<< >>"));
+        Assert.Contains("confined to aligned /ID array: False", streamKey);
+
+        var commentedKey = DescribePdfDifference(Encoding.ASCII.GetBytes("trailer\n<< % /ID [<1>]\n/Size 1 >>"), Encoding.ASCII.GetBytes("trailer\n<< % /ID [<2>]\n/Size 1 >>"));
+        Assert.Contains("confined to aligned /ID array: False", commentedKey);
+
+        var trailerId = DescribePdfDifference(Encoding.ASCII.GetBytes("trailer\n<< /ID [<1><2>] >>\nstartxref\n0\n%%EOF"), Encoding.ASCII.GetBytes("trailer\n<< /ID [<3><4>] >>\nstartxref\n0\n%%EOF"));
+        Assert.Contains("confined to aligned /ID array: True", trailerId);
+
+        var commentedTrailer = DescribePdfDifference(
+            Encoding.ASCII.GetBytes("trailer\n<< /Size 1 >>\n% trailer\n<< /ID [<1>] >>\nstartxref\n0\n%%EOF"),
+            Encoding.ASCII.GetBytes("trailer\n<< /Size 1 >>\n% trailer\n<< /ID [<2>] >>\nstartxref\n0\n%%EOF"));
+        Assert.Contains("confined to aligned /ID array: False", commentedTrailer);
+
+        var literalId = DescribePdfDifference(
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [(abc]def)(second)] >>\nstartxref\n0\n%%EOF"),
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [(abc]xyz)(second)] >>\nstartxref\n0\n%%EOF"));
+        Assert.Contains("confined to aligned /ID array: True", literalId);
+
+        var commentedArray = DescribePdfDifference(
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<1> % comment ]\n<2>] >>\nstartxref\n0\n%%EOF"),
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<1> % comment ]\n<3>] >>\nstartxref\n0\n%%EOF"));
+        Assert.Contains("confined to aligned /ID array: True", commentedArray);
+    }
+
+    private static string DescribePdfDifference(byte[] first, byte[] second)
+    {
+        var firstIdRange = PdfIdValueRange(first);
+        var secondIdRange = PdfIdValueRange(second);
+        var rangesAlign = firstIdRange is { } a && secondIdRange is { } b && a == b;
+        var differenceCount = Math.Abs(first.Length - second.Length);
+        var firstOffsets = new List<int>(12);
+        var confinedToAlignedId = rangesAlign && first.Length == second.Length;
+        var commonLength = Math.Min(first.Length, second.Length);
+        for (var index = 0; index < commonLength; index++)
+        {
+            if (first[index] == second[index]) continue;
+            differenceCount++;
+            if (firstOffsets.Count < 12) firstOffsets.Add(index);
+            if (!rangesAlign || firstIdRange is not { } range || index < range.Start || index > range.End)
+                confinedToAlignedId = false;
+        }
+        if (first.Length != second.Length && firstOffsets.Count < 12) firstOffsets.Add(commonLength);
+        if (differenceCount == 0) confinedToAlignedId = false;
+        var offsets = string.Join(",", firstOffsets);
+        return $"Output lengths are {first.Length} and {second.Length} bytes; differing byte count: {differenceCount}; first differing offsets: {offsets}; differences confined to aligned /ID array: {confinedToAlignedId}; SHA-256 values are {Convert.ToHexString(SHA256.HashData(first))} and {Convert.ToHexString(SHA256.HashData(second))}.";
+    }
+
+    private static (int Start, int End)? PdfIdValueRange(byte[] pdf)
+    {
+        var trailerMarker = Encoding.ASCII.GetBytes("trailer");
+        var trailerStart = pdf.AsSpan().LastIndexOf(trailerMarker);
+        if (trailerStart < 0) return null;
+
+        if ((trailerStart > 0 && !IsPdfDelimiter(pdf[trailerStart - 1])) ||
+            (trailerStart + trailerMarker.Length < pdf.Length && !IsPdfDelimiter(pdf[trailerStart + trailerMarker.Length]))) return null;
+        var lineStart = trailerStart - 1;
+        while (lineStart >= 0 && pdf[lineStart] is not 10 and not 13) lineStart--;
+        for (var prefixIndex = lineStart + 1; prefixIndex < trailerStart; prefixIndex++)
+            if (pdf[prefixIndex] is not 9 and not 32) return null;
+
+        var index = SkipPdfTrivia(pdf, trailerStart + trailerMarker.Length);
+        if (index + 1 >= pdf.Length || pdf[index] != '<' || pdf[index + 1] != '<') return null;
+        index += 2;
+        var dictionaryDepth = 1;
+        var arrayDepth = 0;
+        (int Start, int End)? idValueRange = null;
+        while (index < pdf.Length)
+        {
+            index = SkipPdfTrivia(pdf, index);
+            if (index >= pdf.Length) return null;
+            var current = pdf[index];
+            if (current == '(')
+            {
+                index = SkipPdfLiteralString(pdf, index);
+                continue;
+            }
+            if (current == '<')
+            {
+                if (index + 1 < pdf.Length && pdf[index + 1] == '<')
+                {
+                    dictionaryDepth++;
+                    index += 2;
+                }
+                else
+                {
+                    var close = pdf.AsSpan(index + 1).IndexOf((byte)'>');
+                    if (close < 0) return null;
+                    index += close + 2;
+                }
+                continue;
+            }
+            if (current == '>' && index + 1 < pdf.Length && pdf[index + 1] == '>')
+            {
+                dictionaryDepth--;
+                if (dictionaryDepth == 0)
+                {
+                    var afterDictionary = SkipPdfTrivia(pdf, index + 2);
+                    var startXref = Encoding.ASCII.GetBytes("startxref");
+                    if (afterDictionary + startXref.Length > pdf.Length ||
+                        !pdf.AsSpan(afterDictionary, startXref.Length).SequenceEqual(startXref) ||
+                        (afterDictionary + startXref.Length < pdf.Length && !IsPdfDelimiter(pdf[afterDictionary + startXref.Length]))) return null;
+                    return idValueRange;
+                }
+                index += 2;
+                continue;
+            }
+            if (current == '[')
+            {
+                arrayDepth++;
+                index++;
+                continue;
+            }
+            if (current == ']')
+            {
+                arrayDepth = Math.Max(0, arrayDepth - 1);
+                index++;
+                continue;
+            }
+            if (current == '/')
+            {
+                var nameStart = index + 1;
+                index = nameStart;
+                while (index < pdf.Length && !IsPdfDelimiter(pdf[index])) index++;
+                if (dictionaryDepth == 1 && arrayDepth == 0 && pdf.AsSpan(nameStart, index - nameStart).SequenceEqual("ID"u8))
+                {
+                    var valueStart = SkipPdfTrivia(pdf, index);
+                    if (valueStart >= pdf.Length || pdf[valueStart] != '[') return null;
+                    var valueEnd = FindPdfArrayEnd(pdf, valueStart);
+                    if (valueEnd < 0) return null;
+                    idValueRange = (valueStart, valueEnd);
+                    index = valueEnd + 1;
+                    continue;
+                }
+                continue;
+            }
+            index++;
+        }
+        return null;
+    }
+
+    private static int SkipPdfTrivia(byte[] pdf, int index)
+    {
+        while (index < pdf.Length)
+        {
+            if (pdf[index] is 0 or 9 or 10 or 12 or 13 or 32)
+            {
+                index++;
+                continue;
+            }
+            if (pdf[index] == '%')
+            {
+                while (index < pdf.Length && pdf[index] is not 10 and not 13) index++;
+                continue;
+            }
+            break;
+        }
+        return index;
+    }
+
+    private static int SkipPdfLiteralString(byte[] pdf, int index)
+    {
+        var depth = 0;
+        while (index < pdf.Length)
+        {
+            var current = pdf[index++];
+            if (current == '\\')
+            {
+                if (index < pdf.Length) index++;
+            }
+            else if (current == '(') depth++;
+            else if (current == ')' && --depth == 0) return index;
+        }
+        return index;
+    }
+
+    private static int FindPdfArrayEnd(byte[] pdf, int start)
+    {
+        var depth = 0;
+        for (var index = start; index < pdf.Length;)
+        {
+            var afterTrivia = SkipPdfTrivia(pdf, index);
+            if (afterTrivia != index)
+            {
+                index = afterTrivia;
+                continue;
+            }
+            if (pdf[index] == '(')
+            {
+                index = SkipPdfLiteralString(pdf, index);
+                continue;
+            }
+            if (pdf[index] == '<' && (index + 1 >= pdf.Length || pdf[index + 1] != '<'))
+            {
+                var close = pdf.AsSpan(index + 1).IndexOf((byte)'>');
+                if (close < 0) return -1;
+                index += close + 2;
+                continue;
+            }
+            if (pdf[index] == '[') depth++;
+            else if (pdf[index] == ']' && --depth == 0) return index;
+            index++;
+        }
+        return -1;
+    }
+
+
+    private static bool IsPdfDelimiter(byte value) =>
+        value is 0 or 9 or 10 or 12 or 13 or 32 or (byte)'(' or (byte)')' or (byte)'<' or (byte)'>' or (byte)'[' or (byte)']' or (byte)'{' or (byte)'}' or (byte)'/' or (byte)'%';
 
     private static byte[] TwoPagePdf()
     {
