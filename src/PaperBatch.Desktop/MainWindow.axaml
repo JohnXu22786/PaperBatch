@@ -3,7 +3,7 @@
         xmlns:presentation="using:PaperBatch.Desktop.Presentation"
         x:Class="PaperBatch.Desktop.MainWindow"
         x:DataType="presentation:DesktopShellViewModel"
-        Title="PaperBatch · sample desktop shell"
+        Title="PaperBatch · desktop"
         Width="1440"
         Height="960"
         MinWidth="1024"
@@ -53,20 +53,20 @@
             <Border Grid.Column="0" Background="#7DD3FC" CornerRadius="2" IsVisible="{Binding IsHistorySection}" />
             <Button x:Name="HistoryNavigation" Grid.Column="1" Classes="navigation" Content="History"
                     Command="{Binding NavigateCommand}" CommandParameter="History"
-                    AutomationProperties.Name="Open sample history" />
+                    AutomationProperties.Name="Open history" />
           </Grid>
           <Grid ColumnDefinitions="4,*">
             <Border Grid.Column="0" Background="#7DD3FC" CornerRadius="2" IsVisible="{Binding IsTemplatesSection}" />
             <Button x:Name="TemplatesNavigation" Grid.Column="1" Classes="navigation" Content="Templates"
                     Command="{Binding NavigateCommand}" CommandParameter="Templates"
-                    AutomationProperties.Name="Open sample templates" />
+                    AutomationProperties.Name="Open templates" />
           </Grid>
         </StackPanel>
 
         <Border DockPanel.Dock="Bottom" Background="#334155" CornerRadius="12" Padding="14" Margin="0,18,0,0">
           <StackPanel Spacing="6">
-            <TextBlock Text="DEMO MODE" FontSize="10" FontWeight="Bold" Foreground="#7DD3FC" />
-            <TextBlock Text="This shell does not open files, connect to printers, save history, or submit jobs."
+            <TextBlock Text="{Binding WorkspaceStatus.Title}" FontSize="10" FontWeight="Bold" Foreground="#7DD3FC" />
+            <TextBlock Text="{Binding WorkspaceStatus.Detail}"
                        FontSize="12" TextWrapping="Wrap" Foreground="#E2E8F0" />
           </StackPanel>
         </Border>
@@ -89,13 +89,15 @@
               CornerRadius="12" Padding="15,11" Margin="0,0,0,18"
               AutomationProperties.Name="Sample data notice">
         <StackPanel Orientation="Horizontal" Spacing="12">
-          <TextBlock Text="SAMPLE DATA" FontSize="11" FontWeight="Bold" Foreground="#805A00" VerticalAlignment="Center" />
-          <TextBlock Text="No files are opened, no printer is queried, and no print job can be submitted."
+          <TextBlock Text="{Binding WorkspaceStatus.Title}" FontSize="11" FontWeight="Bold" Foreground="#805A00" VerticalAlignment="Center" />
+          <TextBlock Text="{Binding WorkspaceStatus.Detail}"
                      FontSize="12" Foreground="#604A16" TextWrapping="Wrap" />
         </StackPanel>
       </Border>
 
       <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="10">
+          <TextBlock Text="{Binding OperationError}" Foreground="#B42318" TextWrapping="Wrap" IsVisible="{Binding HasOperationError}" />
         <Grid>
           <StackPanel IsVisible="{Binding IsQueueSection}">
             <Grid ColumnDefinitions="1.05*,0.95*" RowDefinitions="Auto,Auto">
@@ -104,16 +106,18 @@
                 <StackPanel Spacing="12">
                   <Grid ColumnDefinitions="*,Auto">
                     <StackPanel Spacing="2">
-                      <TextBlock Text="SAMPLE QUEUE" Classes="eyebrow" />
-                      <TextBlock Text="{Binding QueueItems.Count, StringFormat='{}{0} example rows'}" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
+                      <TextBlock Text="QUEUE" Classes="eyebrow" />
+                      <TextBlock Text="{Binding QueueItems.Count, StringFormat='{}{0} queue items'}" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
                     </StackPanel>
                     <Border Grid.Column="1" Background="#EEF2F7" CornerRadius="14" Padding="9,5" VerticalAlignment="Center">
-                      <TextBlock Text="NO FILES LOADED" FontSize="9" FontWeight="SemiBold" Foreground="#475569" />
+                      <TextBlock Text="{Binding QueueStateLabel}" FontSize="9" FontWeight="SemiBold" Foreground="#475569" />
                     </Border>
                   </Grid>
+                  <Button Content="Add documents…" Click="AddDocumentsClick" HorizontalAlignment="Left" IsEnabled="{Binding CanImportFiles}"
+                          AutomationProperties.Name="Add documents to the queue" />
                   <ListBox ItemsSource="{Binding QueueItems}" SelectedItem="{Binding SelectedQueueItem, Mode=TwoWay}"
                            Background="Transparent" BorderThickness="0" Padding="0"
-                           AutomationProperties.Name="Sample document queue">
+                           AutomationProperties.Name="Document queue">
                     <ListBox.ItemTemplate>
                       <DataTemplate x:DataType="presentation:QueueItemSnapshot">
                         <Border Background="#F8FAFC" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="10"
@@ -128,7 +132,7 @@
                       </DataTemplate>
                     </ListBox.ItemTemplate>
                   </ListBox>
-                  <TextBlock Text="Selecting a row updates only the sample preview and sample settings."
+                  <TextBlock x:Name="QueueDescription" Text="{Binding QueueDescription}"
                              FontSize="11" Foreground="#64748B" TextWrapping="Wrap" />
                 </StackPanel>
               </Border>
@@ -137,13 +141,13 @@
                       CornerRadius="15" Padding="18" Margin="8,0,0,14">
                 <StackPanel Spacing="12">
                   <StackPanel Spacing="2">
-                    <TextBlock Text="FINAL PREVIEW SURFACE" Classes="eyebrow" />
-                    <TextBlock Text="Illustrative sheet face" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
+                    <TextBlock x:Name="PreviewHeading" Text="{Binding PreviewHeading}" Classes="eyebrow" />
+                    <TextBlock x:Name="PreviewDescription" Text="{Binding PreviewDescription}" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
                   </StackPanel>
                   <Border Background="#F3F5F8" CornerRadius="12" Padding="16" MinHeight="356"
-                          AutomationProperties.Name="Synthetic final preview">
+                          AutomationProperties.Name="Preview surface">
                     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
-                      <Border Width="220" Height="270" Background="#FFFEFA" BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="2" Padding="22">
+                      <Border Width="220" Height="270" IsVisible="{Binding IsDemoMode}" Background="#FFFEFA" BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="2" Padding="22">
                         <StackPanel Spacing="14">
                           <TextBlock Text="SAMPLE PAGE FACE" FontSize="9" FontWeight="Bold" Foreground="#2563EB" />
                           <TextBlock Text="Illustration only" FontSize="15" FontWeight="SemiBold" Foreground="#172033" />
@@ -157,8 +161,10 @@
                         </StackPanel>
                       </Border>
                       <TextBlock Text="{Binding CurrentPreview.Description}" FontSize="11" Foreground="#526176"
-                                 TextAlignment="Center" TextWrapping="Wrap" />
-                      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="4">
+                                 TextAlignment="Center" TextWrapping="Wrap" IsVisible="{Binding IsDemoMode}" />
+                      <TextBlock Text="{Binding WorkspaceStatus.Detail}" FontSize="12" Foreground="#526176"
+                                 TextAlignment="Center" TextWrapping="Wrap" IsVisible="{Binding IsProductionMode}" />
+                      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="4" IsVisible="{Binding IsDemoMode}">
                         <TextBlock Text="Sample face" FontSize="10" Foreground="#64748B" />
                         <TextBlock Text="{Binding CurrentPreview.PageNumber}" FontSize="10" Foreground="#64748B" />
                         <TextBlock Text="of" FontSize="10" Foreground="#64748B" />
@@ -174,7 +180,7 @@
                 <StackPanel Spacing="11">
                   <StackPanel Spacing="2">
                     <TextBlock Text="EFFECTIVE SETTINGS" Classes="eyebrow" />
-                    <TextBlock Text="Example values and reasons" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
+                    <TextBlock Text="{Binding SettingsHeading}" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
                   </StackPanel>
                   <ItemsControl ItemsSource="{Binding EffectiveSettings}">
                     <ItemsControl.ItemTemplate>
@@ -190,7 +196,7 @@
                       </DataTemplate>
                     </ItemsControl.ItemTemplate>
                   </ItemsControl>
-                  <TextBlock Text="These examples do not describe a connected printer or a completed rules calculation."
+                  <TextBlock Text="{Binding SettingsDescription}"
                              FontSize="10" Foreground="#64748B" TextWrapping="Wrap" />
                 </StackPanel>
               </Border>
@@ -200,7 +206,7 @@
                 <StackPanel Spacing="11">
                   <StackPanel Spacing="2">
                     <TextBlock Text="PREFLIGHT / STATUS" Classes="eyebrow" />
-                    <TextBlock Text="Demo checks only" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
+                    <TextBlock Text="{Binding PreflightHeading}" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
                   </StackPanel>
                   <ItemsControl ItemsSource="{Binding PreflightFindings}">
                     <ItemsControl.ItemTemplate>
@@ -225,9 +231,9 @@
 
           <StackPanel IsVisible="{Binding IsHistorySection}" Spacing="14">
             <StackPanel Spacing="3">
-              <TextBlock Text="HISTORY · SAMPLE VIEW" Classes="eyebrow" />
-              <TextBlock Text="Example activity" FontSize="21" FontWeight="SemiBold" Foreground="#172033" />
-              <TextBlock Text="These rows are illustrative. This shell does not save completed runs or print records."
+              <TextBlock Text="{Binding HistoryEyebrow}" Classes="eyebrow" />
+              <TextBlock x:Name="HistoryTitle" Text="{Binding HistoryTitle}" FontSize="21" FontWeight="SemiBold" Foreground="#172033" />
+              <TextBlock Text="{Binding HistoryDescription}"
                          FontSize="12" Foreground="#526176" TextWrapping="Wrap" />
             </StackPanel>
             <ItemsControl ItemsSource="{Binding HistoryEntries}">
@@ -248,9 +254,9 @@
 
           <StackPanel IsVisible="{Binding IsTemplatesSection}" Spacing="14">
             <StackPanel Spacing="3">
-              <TextBlock Text="TEMPLATES · SAMPLE VIEW" Classes="eyebrow" />
-              <TextBlock Text="Example recipes" FontSize="21" FontWeight="SemiBold" Foreground="#172033" />
-              <TextBlock Text="These sample cards are not saved recipes and do not change application settings."
+              <TextBlock Text="{Binding TemplateEyebrow}" Classes="eyebrow" />
+              <TextBlock x:Name="TemplateTitle" Text="{Binding TemplateTitle}" FontSize="21" FontWeight="SemiBold" Foreground="#172033" />
+              <TextBlock Text="{Binding TemplateDescription}"
                          FontSize="12" Foreground="#526176" TextWrapping="Wrap" />
             </StackPanel>
             <ItemsControl ItemsSource="{Binding Templates}">
@@ -268,6 +274,7 @@
             </ItemsControl>
           </StackPanel>
         </Grid>
+        </StackPanel>
       </ScrollViewer>
     </Grid>
   </Grid>

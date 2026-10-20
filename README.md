@@ -26,7 +26,7 @@ The Python LibreOffice probe requires `--engine-binary` and `--expected-engine-s
 
 ## Desktop shell preview
 
-The initial Avalonia desktop shell is a presentation-only scaffold. Its queue, settings, preview, preflight, history, and template cards use synthetic examples. The page-face illustration is not a document renderer. This build does not open files, query printers, create PDFs, save history, or submit print jobs. Native Office/WPS, PDFium, Windows print-route/driver, and physical-printer evidence remain open; this shell does not satisfy G1.
+The Avalonia app starts in production mode. “Add documents” captures selected files through the shared private snapshot cache and bounded source preflight; unsupported, malformed, or unavailable inputs remain visible with their diagnostic status. U5 does not yet provide a configured renderer or prepared-run orchestration, so production mode does not create prepared runs, final previews, print submissions, history entries, or templates. Synthetic examples are isolated behind the explicit `--demo` launch argument and are visibly labeled. Native Office/WPS, PDFium, Windows print-route/driver, and physical-printer evidence remain open; this shell does not satisfy G1.
 
 Build the desktop app and run its focused headless presentation checks with the .NET 10 SDK:
 
@@ -36,7 +36,7 @@ dotnet build src/PaperBatch.Desktop/PaperBatch.Desktop.csproj --no-restore -p:Nu
 dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
 ```
 
-The UI-only service interfaces are internal to the presentation assembly. They keep the shell independent of future core, persistence, renderer, and printer contracts until those units are ready to connect. Direct and transitive NuGet versions are captured by the project lockfiles; package license metadata was checked and recorded in [docs/dependencies/desktop-ui.md](docs/dependencies/desktop-ui.md).
+The desktop composition references the shared core for snapshot intake, source preflight, and the renderer coordinator. No renderer adapter is registered, and print submission is unavailable. Final-artifact preview and durable run history await prepared-run orchestration and read APIs. Direct and transitive NuGet versions are captured by the project lockfiles; package license metadata was checked and recorded in [docs/dependencies/desktop-ui.md](docs/dependencies/desktop-ui.md).
 
 ## Tests
 
