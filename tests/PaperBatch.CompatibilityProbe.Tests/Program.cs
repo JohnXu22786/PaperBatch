@@ -205,6 +205,17 @@ var tests = new List<(string Name, Action Run)>
 if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH")))
     tests.Add(("PDFium vector composition preserves transformed N-up placement", PdfCompositionTests.NativeCompositionRendersTwoUpFixture));
 
+if (OperatingSystem.IsLinux())
+{
+    tests.Add(("LibreOffice version timeout stops its owned process", RendererTests.LibreOfficeVersionQueryStopsOnTimeout));
+    if (Environment.GetEnvironmentVariable("PAPERBATCH_REQUIRE_LIBREOFFICE_TEST") == "1")
+        tests.Add(("pinned stable LibreOffice renders an immutable synthetic DOCX", RendererTests.PinnedLibreOfficeRendersSyntheticDocx));
+    else
+        Console.WriteLine("SKIP pinned stable LibreOffice integration (CI exact-engine configuration required)");
+}
+else
+    Console.WriteLine("SKIP pinned stable LibreOffice integration (Linux exact-engine CI only)");
+
 var failures = 0;
 foreach (var (name, run) in tests)
 {

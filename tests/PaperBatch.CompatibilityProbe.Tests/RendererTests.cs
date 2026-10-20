@@ -5,9 +5,195 @@ using System.IO.Compression;
 using System.Security.AccessControl;
 using System.Runtime.Versioning;
 using System.Text;
+using System.Diagnostics;
+using System.Security.Cryptography;
 
 internal static class RendererTests
 {
+    [SupportedOSPlatform("linux")]
+    public static void LibreOfficeVersionQueryStopsOnTimeout()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-version-timeout-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var fixture = Path.Combine(root, "hanging-version-engine");
+        File.WriteAllText(fixture, "#!/bin/sh\nexec /bin/sleep 30\n");
+        File.SetUnixFileMode(fixture, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        try
+        {
+            Assert.Throws<TimeoutException>(() => ReadLibreOfficeVersion(fixture, TimeSpan.FromMilliseconds(250)));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [SupportedOSPlatform("linux")]
+    public static void PinnedLibreOfficeRendersSyntheticDocx()
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("The pinned LibreOffice integration runs only on Linux CI.");
+        const string pinnedVersion = "LibreOffice 26.2.2.2";
+        const string pinnedEngineSha256 = "bcfd617b90f741cd9aa778e70d6aa317ec6c8971e238f602f3f69ea0ad210c0a";
+        var enginePath = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_PATH");
+        var expectedVersion = Environment.GetEnvironmentVariable("PAPERBATCH_LO_EXPECTED_VERSION");
+        var expectedHash = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_SHA256");
+        var pdfiumPath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH");
+        var pdfiumHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_SHA256");
+        if (string.IsNullOrWhiteSpace(enginePath) || string.IsNullOrWhiteSpace(expectedVersion) ||
+            string.IsNullOrWhiteSpace(expectedHash) || string.IsNullOrWhiteSpace(pdfiumPath) || string.IsNullOrWhiteSpace(pdfiumHash))
+            throw new InvalidOperationException("The pinned LibreOffice CI runtime configuration is incomplete.");
+        Assert.Equal(pinnedVersion, expectedVersion);
+        Assert.Equal(pinnedEngineSha256, expectedHash);
+        Assert.True(ReadLibreOfficeVersion(enginePath).StartsWith(pinnedVersion, StringComparison.Ordinal));
+
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-integration-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var sourcePath = Path.Combine(root, "synthetic.docx");
+        var originalBytes = CreateSyntheticDocx();
+        File.WriteAllBytes(sourcePath, originalBytes);
+        Process? unrelatedProcess = null;
+        try
+        {
+            var snapshots = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+            var snapshot = snapshots.CaptureAsync(sourcePath).GetAwaiter().GetResult();
+            var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+            var inspector = new PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
+            var adapter = new LibreOfficeRendererAdapter(snapshots, artifacts, inspector, enginePath, expectedHash);
+            var request = new RenderRequest(snapshot.SnapshotId, SourceFormat.Docx, RendererExecutionContext.BackgroundWorker);
+
+            var profile = Path.Combine(root, "unrelated-profile");
+            Directory.CreateDirectory(profile, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            var profileUri = new Uri(profile + Path.DirectorySeparatorChar).AbsoluteUri;
+            var programDirectory = Path.GetDirectoryName(Path.GetFullPath(enginePath))!;
+            var unrelatedStart = new ProcessStartInfo(enginePath)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = programDirectory
+            };
+            unrelatedStart.Environment["LD_LIBRARY_PATH"] = programDirectory;
+            unrelatedStart.Environment["URE_BOOTSTRAP"] = new Uri(Path.Combine(programDirectory, "fundamentalrc")).AbsoluteUri;
+            unrelatedStart.ArgumentList.Add("--headless");
+            unrelatedStart.ArgumentList.Add("--nologo");
+            unrelatedStart.ArgumentList.Add("--nodefault");
+            unrelatedStart.ArgumentList.Add("--nofirststartwizard");
+            unrelatedStart.ArgumentList.Add("-env:UserInstallation=" + profileUri);
+            unrelatedStart.ArgumentList.Add("--accept=pipe,name=paperbatch-unrelated-" + Guid.NewGuid().ToString("N") + ";urp;StarOffice.ServiceManager");
+            unrelatedProcess = Process.Start(unrelatedStart) ?? throw new InvalidOperationException("Could not start the unrelated LibreOffice fixture process.");
+            Thread.Sleep(TimeSpan.FromMilliseconds(500));
+            Assert.False(unrelatedProcess.HasExited);
+
+            var existingOperations = Directory.GetDirectories(Path.GetTempPath(), "paperbatch-lo-*", SearchOption.TopDirectoryOnly)
+                .ToHashSet(StringComparer.Ordinal);
+            Assert.True(adapter.CanRenderAsync(request, CancellationToken.None).AsTask().GetAwaiter().GetResult());
+            var result = adapter.RenderAsync(request, CancellationToken.None).GetAwaiter().GetResult();
+            Assert.Equal(RenderStatus.Succeeded, result.Status);
+            Assert.Equal(1, result.Artifact?.PageCount);
+            Assert.True(Directory.GetDirectories(Path.GetTempPath(), "paperbatch-lo-*", SearchOption.TopDirectoryOnly)
+                .All(existingOperations.Contains));
+            Assert.False(unrelatedProcess.HasExited);
+            Assert.True(originalBytes.SequenceEqual(File.ReadAllBytes(sourcePath)));
+            using (var captured = snapshots.OpenRead(snapshot.SnapshotId))
+                Assert.Equal(snapshot.Sha256, Convert.ToHexString(SHA256.HashData(captured)).ToLowerInvariant());
+
+            var receipt = artifacts.GetReceipt(result.Artifact!.ArtifactId);
+            Assert.Equal("libreoffice", receipt.EngineId);
+            Assert.True(receipt.EngineVersion.StartsWith(pinnedVersion, StringComparison.Ordinal));
+            Assert.Equal(expectedHash, receipt.Options["engine-sha256"]);
+            Assert.Equal("disabled", receipt.Options["macro-policy"]);
+            Assert.Equal("disabled", receipt.Options["link-refresh-policy"]);
+            Assert.Equal("private-temporary", receipt.Options["profile"]);
+            using var exactArtifact = artifacts.OpenRead(result.Artifact.ArtifactId);
+            Assert.Equal(SourcePreflightStatus.Ready, SourceFormatPreflight.Inspect(exactArtifact, ".pdf").Status);
+        }
+        finally
+        {
+            if (unrelatedProcess is not null)
+            {
+                try
+                {
+                    if (!unrelatedProcess.HasExited) unrelatedProcess.Kill(entireProcessTree: true);
+                    if (!unrelatedProcess.WaitForExit(TimeSpan.FromSeconds(10)))
+                        throw new TimeoutException("The unrelated LibreOffice fixture process did not stop during owned test cleanup.");
+                }
+                finally { unrelatedProcess.Dispose(); }
+            }
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static string ReadLibreOfficeVersion(string enginePath, TimeSpan? timeout = null)
+    {
+        var programDirectory = Path.GetDirectoryName(Path.GetFullPath(enginePath))!;
+        var start = new ProcessStartInfo(enginePath)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = false,
+            CreateNoWindow = true,
+            WorkingDirectory = programDirectory
+        };
+        start.Environment["LD_LIBRARY_PATH"] = programDirectory;
+        start.Environment["URE_BOOTSTRAP"] = new Uri(Path.Combine(programDirectory, "fundamentalrc")).AbsoluteUri;
+        start.ArgumentList.Add("--version");
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not query the pinned LibreOffice version.");
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        if (!process.WaitForExit(timeout ?? TimeSpan.FromSeconds(15)))
+        {
+            try
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException) when (process.HasExited) { }
+            if (!process.WaitForExit(TimeSpan.FromSeconds(10)))
+                throw new TimeoutException("The owned LibreOffice version-query process did not stop after timeout.");
+            _ = outputTask.GetAwaiter().GetResult();
+            throw new TimeoutException("The pinned LibreOffice version query timed out.");
+        }
+        var output = outputTask.GetAwaiter().GetResult();
+        Assert.Equal(0, process.ExitCode);
+        return output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? string.Empty;
+    }
+
+    private static byte[] CreateSyntheticDocx()
+    {
+        using var output = new MemoryStream();
+        using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            AddDocxEntry(archive, "[Content_Types].xml", """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+                  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
+                  <Default Extension="xml" ContentType="application/xml" />
+                  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml" />
+                </Types>
+                """);
+            AddDocxEntry(archive, "_rels/.rels", """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml" />
+                </Relationships>
+                """);
+            AddDocxEntry(archive, "word/document.xml", """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:body>
+                    <w:p><w:r><w:t>PaperBatch synthetic LibreOffice fixture.</w:t></w:r></w:p>
+                    <w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+                  </w:body>
+                </w:document>
+                """);
+        }
+        return output.ToArray();
+    }
+
+    private static void AddDocxEntry(ZipArchive archive, string path, string content)
+    {
+        var entry = archive.CreateEntry(path, CompressionLevel.Optimal);
+        using var writer = new StreamWriter(entry.Open(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        writer.Write(content);
+    }
+
     public static void ArtifactStorePersistsStablePdfAndReceipt()
     {
         var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-{Guid.NewGuid():N}");
