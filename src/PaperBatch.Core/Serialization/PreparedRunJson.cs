@@ -8,7 +8,7 @@ namespace PaperBatch.Core.Serialization;
 /// <summary>Versioned persistence codec for immutable prepared-run metadata.</summary>
 public static class PreparedRunJson
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
     public const int MaximumDocumentBytes = 8 * 1024 * 1024;
 
     private static readonly JsonSerializerOptions SerializerOptions = CreateOptions();
@@ -16,7 +16,8 @@ public static class PreparedRunJson
     public static string Serialize(PreparedRun preparedRun)
     {
         ArgumentNullException.ThrowIfNull(preparedRun);
-        var document = new StoredPreparedRun(CurrentSchemaVersion, ToDocument(preparedRun));
+        var version = preparedRun.FinalArtifact is null ? 1 : CurrentSchemaVersion;
+        var document = new StoredPreparedRun(version, ToDocument(preparedRun));
         var bytes = JsonSerializer.SerializeToUtf8Bytes(document, SerializerOptions);
         if (bytes.Length > MaximumDocumentBytes)
         {
@@ -53,7 +54,7 @@ public static class PreparedRunJson
             throw new JsonException("Prepared-run metadata must declare an integer schemaVersion.");
         }
 
-        if (version != CurrentSchemaVersion)
+        if (version is not (1 or CurrentSchemaVersion))
         {
             throw new NotSupportedException($"Prepared-run schema version {version} is not supported; current version is {CurrentSchemaVersion}.");
         }
@@ -66,6 +67,12 @@ public static class PreparedRunJson
         var stored = JsonSerializer.Deserialize<StoredPreparedRun>(utf8Json, SerializerOptions)
             ?? throw new JsonException("Prepared-run metadata produced no value.");
         var run = stored.Run ?? throw new JsonException("Prepared-run metadata has no run value.");
+
+        var hasFinalArtifactField = runElement.TryGetProperty("finalArtifact", out _);
+        if (version == 2 && (!hasFinalArtifactField || run.FinalArtifact is null))
+            throw new JsonException("Prepared-run schema version 2 requires a final artifact identity.");
+        if (version == 1 && hasFinalArtifactField)
+            throw new JsonException("Prepared-run schema version 1 cannot contain a final artifact identity.");
 
         try
         {
@@ -80,7 +87,8 @@ public static class PreparedRunJson
                 run.CreatedAtUtc,
                 Required(run.SnapshotFingerprint, "snapshotFingerprint"),
                 items,
-                segments);
+                segments,
+                run.FinalArtifact is null ? null : FromDocument(run.FinalArtifact));
         }
         catch (ArgumentException exception)
         {
@@ -93,7 +101,17 @@ public static class PreparedRunJson
         run.CreatedAtUtc,
         run.SnapshotFingerprint,
         run.Items.Select(ToDocument).ToArray(),
-        run.Segments.Select(ToDocument).ToArray());
+        run.Segments.Select(ToDocument).ToArray(),
+        run.FinalArtifact is null ? null : ToDocument(run.FinalArtifact));
+
+    private static FinalPdfArtifactDocument ToDocument(FinalPdfArtifact artifact) => new(
+        artifact.ArtifactId, artifact.Sha256, artifact.LengthBytes, artifact.PageCount);
+
+    private static FinalPdfArtifact FromDocument(FinalPdfArtifactDocument artifact) => new(
+        Required(artifact.ArtifactId, "finalArtifact.artifactId"),
+        Required(artifact.Sha256, "finalArtifact.sha256"),
+        artifact.LengthBytes,
+        artifact.PageCount);
 
     private static PreparedItemDocument ToDocument(PreparedItem item) => new(
         item.ItemId,
@@ -196,7 +214,14 @@ public static class PreparedRunJson
         [property: JsonRequired] DateTimeOffset CreatedAtUtc,
         [property: JsonRequired] string? SnapshotFingerprint,
         [property: JsonRequired] PreparedItemDocument[]? Items,
-        [property: JsonRequired] CompatibleSegmentDocument[]? Segments);
+        [property: JsonRequired] CompatibleSegmentDocument[]? Segments,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] FinalPdfArtifactDocument? FinalArtifact);
+
+    private sealed record FinalPdfArtifactDocument(
+        [property: JsonRequired] string? ArtifactId,
+        [property: JsonRequired] string? Sha256,
+        [property: JsonRequired] long LengthBytes,
+        [property: JsonRequired] int PageCount);
 
     private sealed record PreparedItemDocument(
         [property: JsonRequired] string? ItemId,

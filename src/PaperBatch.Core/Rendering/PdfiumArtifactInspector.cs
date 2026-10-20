@@ -1,12 +1,13 @@
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using PaperBatch.Core.Intake;
+using PaperBatch.Core.Layout;
 
 namespace PaperBatch.Core.Rendering;
 
 /// <summary>Reopens generated PDFs with one explicitly pinned PDFium runtime to verify page count.</summary>
 public sealed class PdfiumArtifactInspector
-    : IPdfArtifactInspector
+    : IPdfArtifactInspector, IPdfPageMetadataInspector, IPdfArtifactPreviewRenderer
 {
     private const int MaximumPdfBytes = 512 * 1024 * 1024;
     private const string RuntimeOwnerMarkerName = ".paperbatch-pdfium-runtime-v1";
@@ -88,6 +89,178 @@ public sealed class PdfiumArtifactInspector
         }
     }
 
+    public async Task<IReadOnlyList<PageSize>> GetPageSizesAsync(Stream pdf, CancellationToken cancellationToken)
+        => (await InspectPageSizesAsync(pdf, pageNumber: null, cancellationToken).ConfigureAwait(false)).PageSizes;
+
+    private async Task<(int PageCount, IReadOnlyList<PageSize> PageSizes)> InspectPageSizesAsync(
+        Stream pdf, int? pageNumber, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(pdf);
+        if (!pdf.CanRead) throw new ArgumentException("The PDF stream must be readable.", nameof(pdf));
+        if (!(OperatingSystem.IsLinux() || OperatingSystem.IsWindows()))
+            throw new PlatformNotSupportedException("Pinned PDFium inspection is supported only on Linux and Windows.");
+
+        using var bytes = new MemoryStream();
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var read = await pdf.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+            if (read == 0) break;
+            if (bytes.Length + read > MaximumPdfBytes) throw new InvalidDataException("The PDF exceeds the inspection size limit.");
+            await bytes.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+        }
+        var content = bytes.ToArray();
+        if (content.Length < 5 || content.AsSpan(0, Math.Min(content.Length, 1024)).IndexOf("%PDF-"u8) < 0)
+            throw new InvalidDataException("The artifact is not a PDF.");
+
+        lock (RuntimeGate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var runtimeDirectory = CreatePrivateRuntimeDirectory();
+            IntPtr library = IntPtr.Zero;
+            try
+            {
+                library = NativeLibrary.Load(StagePinnedRuntime(runtimeDirectory));
+                var init = Export<NoArguments>(library, "FPDF_InitLibrary");
+                var destroy = Export<NoArguments>(library, "FPDF_DestroyLibrary");
+                var load = Export<LoadDocument>(library, "FPDF_LoadMemDocument");
+                var close = Export<CloseDocument>(library, "FPDF_CloseDocument");
+                var countPages = Export<GetPageCount>(library, "FPDF_GetPageCount");
+                var loadPage = Export<LoadPage>(library, "FPDF_LoadPage");
+                var closePage = Export<ClosePage>(library, "FPDF_ClosePage");
+                var getWidth = Export<GetPageDimension>(library, "FPDF_GetPageWidthF");
+                var getHeight = Export<GetPageDimension>(library, "FPDF_GetPageHeightF");
+                var pinned = GCHandle.Alloc(content, GCHandleType.Pinned);
+                var initialized = false;
+                IntPtr document = IntPtr.Zero;
+                try
+                {
+                    init();
+                    initialized = true;
+                    document = load(pinned.AddrOfPinnedObject(), content.Length, IntPtr.Zero);
+                    if (document == IntPtr.Zero) throw new InvalidDataException("PDFium could not open the PDF artifact.");
+                    var count = countPages(document);
+                    if (count is <= 0 or > 1_000_000) throw new InvalidDataException("PDFium returned an invalid page count.");
+                    if (pageNumber is { } requestedPage && requestedPage > count)
+                        throw new ArgumentOutOfRangeException(nameof(pageNumber));
+                    var pages = new List<PageSize>(pageNumber is null ? count : 1);
+                    var firstPage = pageNumber is { } requested ? requested - 1 : 0;
+                    var endPage = pageNumber is null ? count : firstPage + 1;
+                    for (var index = firstPage; index < endPage; index++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var page = loadPage(document, index);
+                        if (page == IntPtr.Zero) throw new InvalidDataException("PDFium could not read a PDF page.");
+                        try
+                        {
+                            var size = new PageSize(getWidth(page), getHeight(page));
+                            try { size.Validate(nameof(pdf)); }
+                            catch (ArgumentOutOfRangeException exception) { throw new InvalidDataException("The PDF contains invalid page dimensions.", exception); }
+                            pages.Add(size);
+                        }
+                        finally { closePage(page); }
+                    }
+                    return (count, pages);
+                }
+                finally
+                {
+                    if (document != IntPtr.Zero) close(document);
+                    pinned.Free();
+                    if (initialized) destroy();
+                }
+            }
+            finally
+            {
+                if (library != IntPtr.Zero) NativeLibrary.Free(library);
+                TryDeleteRuntimeDirectory(runtimeDirectory);
+            }
+        }
+    }
+
+    public async Task<PdfRasterPage> RenderPageAsync(Stream pdf, int pageNumber, int maximumDimension, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(pdf);
+        if (!pdf.CanRead) throw new ArgumentException("The PDF stream must be readable.", nameof(pdf));
+        if (pageNumber <= 0) throw new ArgumentOutOfRangeException(nameof(pageNumber));
+        if (maximumDimension is < 64 or > 4096) throw new ArgumentOutOfRangeException(nameof(maximumDimension));
+        if (!pdf.CanSeek) throw new ArgumentException("The PDF stream must support seeking for bounded page preview.", nameof(pdf));
+        var inspected = await InspectPageSizesAsync(pdf, pageNumber, cancellationToken).ConfigureAwait(false);
+        var size = inspected.PageSizes[0];
+        var scale = Math.Min(1d, maximumDimension / Math.Max(size.WidthPoints, size.HeightPoints));
+        var width = Math.Max(1, (int)Math.Round(size.WidthPoints * scale));
+        var height = Math.Max(1, (int)Math.Round(size.HeightPoints * scale));
+        var stride = checked(width * 4);
+        var pixels = new byte[checked(stride * height)];
+
+        pdf.Position = 0;
+        using var bytes = new MemoryStream();
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var read = await pdf.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+            if (read == 0) break;
+            if (bytes.Length + read > MaximumPdfBytes) throw new InvalidDataException("The PDF exceeds the preview size limit.");
+            await bytes.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+        }
+        var content = bytes.ToArray();
+        lock (RuntimeGate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var runtimeDirectory = CreatePrivateRuntimeDirectory();
+            IntPtr library = IntPtr.Zero;
+            try
+            {
+                library = NativeLibrary.Load(StagePinnedRuntime(runtimeDirectory));
+                var init = Export<NoArguments>(library, "FPDF_InitLibrary");
+                var destroy = Export<NoArguments>(library, "FPDF_DestroyLibrary");
+                var load = Export<LoadDocument>(library, "FPDF_LoadMemDocument");
+                var close = Export<CloseDocument>(library, "FPDF_CloseDocument");
+                var loadPage = Export<LoadPage>(library, "FPDF_LoadPage");
+                var closePage = Export<ClosePage>(library, "FPDF_ClosePage");
+                var createBitmap = Export<CreateBitmap>(library, "FPDFBitmap_CreateEx");
+                var destroyBitmap = Export<DestroyBitmap>(library, "FPDFBitmap_Destroy");
+                var renderPage = Export<RenderPage>(library, "FPDF_RenderPageBitmap");
+                var pixelsPin = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+                var contentPin = GCHandle.Alloc(content, GCHandleType.Pinned);
+                var initialized = false;
+                IntPtr document = IntPtr.Zero;
+                IntPtr page = IntPtr.Zero;
+                IntPtr bitmap = IntPtr.Zero;
+                try
+                {
+                    init();
+                    initialized = true;
+                    document = load(contentPin.AddrOfPinnedObject(), content.Length, IntPtr.Zero);
+                    if (document == IntPtr.Zero) throw new InvalidDataException("PDFium could not open the preview artifact.");
+                    page = loadPage(document, pageNumber - 1);
+                    if (page == IntPtr.Zero) throw new InvalidDataException("PDFium could not open the requested preview page.");
+                    bitmap = createBitmap(width, height, 4, pixelsPin.AddrOfPinnedObject(), stride);
+                    if (bitmap == IntPtr.Zero) throw new InvalidDataException("PDFium could not allocate the bounded preview bitmap.");
+                    cancellationToken.ThrowIfCancellationRequested();
+                    renderPage(bitmap, page, 0, 0, width, height, 0, 0);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return new PdfRasterPage(width, height, stride, pixels);
+                }
+                finally
+                {
+                    if (bitmap != IntPtr.Zero) destroyBitmap(bitmap);
+                    if (page != IntPtr.Zero) closePage(page);
+                    if (document != IntPtr.Zero) close(document);
+                    contentPin.Free();
+                    pixelsPin.Free();
+                    if (initialized) destroy();
+                }
+            }
+            finally
+            {
+                if (library != IntPtr.Zero) NativeLibrary.Free(library);
+                TryDeleteRuntimeDirectory(runtimeDirectory);
+            }
+        }
+    }
+
     private string CreatePrivateRuntimeDirectory()
     {
         var directory = Path.Combine(Path.GetTempPath(), "paperbatch-pdfium-" + Guid.NewGuid().ToString("N"));
@@ -138,4 +311,11 @@ public sealed class PdfiumArtifactInspector
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr LoadDocument(IntPtr data, int length, IntPtr password);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void CloseDocument(IntPtr document);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int GetPageCount(IntPtr document);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr LoadPage(IntPtr document, int pageIndex);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void ClosePage(IntPtr page);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate float GetPageDimension(IntPtr page);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr CreateBitmap(int width, int height, int format, IntPtr firstScan, int stride);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void DestroyBitmap(IntPtr bitmap);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void RenderPage(IntPtr bitmap, IntPtr page, int startX, int startY,
+        int sizeX, int sizeY, int rotate, int flags);
 }

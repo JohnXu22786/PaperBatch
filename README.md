@@ -20,7 +20,7 @@ The Python LibreOffice probe requires `--engine-binary` and `--expected-engine-s
 
 ## Desktop shell preview
 
-The Avalonia app starts in production mode. “Add documents” captures selected files through the shared private snapshot cache and bounded source preflight; unsupported, malformed, or unavailable inputs remain visible with their diagnostic status. U5 does not yet provide a configured renderer or prepared-run orchestration, so production mode does not create prepared runs, final previews, print submissions, history entries, or templates. Synthetic examples are isolated behind the explicit `--demo` launch argument and are visibly labeled. Native Office/WPS, PDFium, Windows print-route/driver, and physical-printer evidence remain open; this shell does not satisfy G1.
+The Avalonia app starts in production mode. “Add documents” captures selected files through the shared private snapshot cache and bounded source preflight. PDF pass-through and supported JPEG/PNG raster rendering are registered, and the core exposes the prepared-artifact orchestration contract. A versioned prepared run retains the final PDF identity while its bytes remain in the private content-addressed artifact store. Production desktop preview reads and verifies that exact artifact when a PDFium runtime is explicitly configured. The desktop composition still has no production preparation/settings workflow or real print backend, so it does not submit jobs. Synthetic examples are isolated behind the explicit `--demo` launch argument and are visibly labeled. Native Office/WPS, production PDFium setup, Windows print-route/driver, and physical-printer evidence remain open; this shell does not satisfy G1.
 
 Build the desktop app and run its focused headless presentation checks with the .NET 10 SDK:
 
@@ -30,7 +30,7 @@ dotnet build src/PaperBatch.Desktop/PaperBatch.Desktop.csproj --no-restore -p:Nu
 dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
 ```
 
-The desktop composition references the shared core for snapshot intake, source preflight, and the renderer coordinator. No renderer adapter is registered, and print submission is unavailable. Final-artifact preview and durable run history await prepared-run orchestration and read APIs. Direct and transitive NuGet versions are captured by the project lockfiles; package license metadata was checked and recorded in [docs/dependencies/desktop-ui.md](docs/dependencies/desktop-ui.md).
+The desktop composition references the shared core for snapshot intake, source preflight, and the renderer coordinator. The view model accepts a prepared-run result for artifact-backed preview; app-level preparation/settings flow, durable run history, and real print submission remain unavailable. Direct and transitive NuGet versions are captured by the project lockfiles; package license metadata was checked and recorded in [docs/dependencies/desktop-ui.md](docs/dependencies/desktop-ui.md).
 
 ## Tests
 

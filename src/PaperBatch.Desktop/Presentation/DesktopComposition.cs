@@ -1,3 +1,8 @@
+using System.Runtime.InteropServices;
+using Avalonia;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
+using PaperBatch.Core.Domain;
 using PaperBatch.Core.Intake;
 using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Rendering;
@@ -40,17 +45,23 @@ internal static class DesktopComposition
             new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifactStore)),
             new BuiltInImageRendererAdapter(cache, artifactStore)
         ]);
+        IPdfArtifactPreviewRenderer? previewRenderer = null;
+        var pdfiumPath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH");
+        var pdfiumHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_SHA256");
+        if (!string.IsNullOrWhiteSpace(pdfiumPath) && !string.IsNullOrWhiteSpace(pdfiumHash))
+            previewRenderer = new PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
         var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
         store.Initialize();
 
-        // The registered renderers persist PDF and supported JPEG/PNG artifacts. There is not
-        // yet a prepared-run coordinator, so the UI keeps final preview and submission unavailable.
+        // Renderer artifacts are available. The desktop composition does not invent print settings
+        // or claim that uninspected interactive PDF content is safe for composition.
         _ = intake;
         _ = renderer;
-        var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true);
+        var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
+            artifacts: artifactStore, previewRenderer: previewRenderer);
         return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE",
-                "PDF pass-through and supported JPEG/PNG artifact rendering are available. Prepared-run orchestration, final preview, LibreOffice conversion, and submission remain unavailable.", false));
+                "PDF pass-through and supported JPEG/PNG artifact rendering are available. Final preview needs a registered prepared run and explicitly configured PDFium runtime; LibreOffice conversion and production print submission remain unavailable.", false));
     }
 }
 
@@ -58,6 +69,7 @@ internal sealed class ProductionPresentationSources :
     IQueueImportPresentationSource,
     IEffectiveSettingsPresentationSource,
     IFinalPreviewPresentationSource,
+    IPreparedArtifactPresentationSource,
     IPreflightPresentationSource,
     IHistoryPresentationSource,
     ITemplatePresentationSource
@@ -66,15 +78,23 @@ internal sealed class ProductionPresentationSources :
     private readonly RendererCoordinator _renderer;
     private readonly SourceSnapshotCache? _cache;
     private readonly bool _rendererAvailable;
+    private readonly RenderArtifactStore? _artifacts;
+    private readonly IPdfArtifactPreviewRenderer? _previewRenderer;
+    private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
 
+    public event Action<string>? PreparedArtifactChanged;
+
     public ProductionPresentationSources(SourceIntakeService? intake = null, RendererCoordinator? renderer = null,
-        SourceSnapshotCache? cache = null, bool rendererAvailable = false)
+        SourceSnapshotCache? cache = null, bool rendererAvailable = false,
+        RenderArtifactStore? artifacts = null, IPdfArtifactPreviewRenderer? previewRenderer = null)
     {
         _intake = intake;
         _renderer = renderer ?? new RendererCoordinator(Array.Empty<IRendererAdapter>());
         _cache = cache;
         _rendererAvailable = rendererAvailable;
+        _artifacts = artifacts;
+        _previewRenderer = previewRenderer;
     }
 
     public bool IsAvailable => _intake is not null;
@@ -139,8 +159,47 @@ internal sealed class ProductionPresentationSources :
             ? "Background PDF pass-through and JPEG/PNG artifact rendering are configured; other formats and prepared-run orchestration are unavailable."
             : "No renderer is configured; no setting is treated as effective."),
          new("Printer", "Not selected", "The UI does not choose a default printer or silently substitute one.")];
-    public PreviewSnapshot GetPreview(string queueItemId) =>
-        new(queueItemId, "Final preview unavailable: no prepared artifact exists.", 0, 0);
+    public void RegisterPreparedRun(string queueItemId, PreparedRun run)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(queueItemId);
+        ArgumentNullException.ThrowIfNull(run);
+        if (run.FinalArtifact is null) throw new InvalidOperationException("A prepared run without a final PDF cannot be previewed.");
+        _preparedRunsByQueueItem[queueItemId] = run;
+        PreparedArtifactChanged?.Invoke(queueItemId);
+    }
+
+    public void InvalidatePreparedRun(string queueItemId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(queueItemId);
+        _preparedRunsByQueueItem.Remove(queueItemId);
+        PreparedArtifactChanged?.Invoke(queueItemId);
+    }
+
+    public async Task<PreviewSnapshot> GetPreviewAsync(string queueItemId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_artifacts is null || _previewRenderer is null ||
+            !_preparedRunsByQueueItem.TryGetValue(queueItemId, out var run) || run.FinalArtifact is not { } artifact)
+            return new PreviewSnapshot(queueItemId, "Final preview unavailable: no prepared artifact exists.", 0, 0);
+
+        var receipt = _artifacts.GetReceipt(artifact.ArtifactId).Artifact;
+        if (receipt.Sha256 != artifact.Sha256 || receipt.LengthBytes != artifact.LengthBytes)
+            throw new InvalidDataException("The prepared preview artifact does not match its persisted run identity.");
+        using var pdf = _artifacts.OpenRead(artifact.ArtifactId);
+        var raster = await _previewRenderer.RenderPageAsync(pdf, 1, 1600, cancellationToken).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
+        var image = new WriteableBitmap(new PixelSize(raster.Width, raster.Height), new Vector(96, 96),
+            PixelFormat.Bgra8888, AlphaFormat.Premul);
+        using (var framebuffer = image.Lock())
+        {
+            for (var row = 0; row < raster.Height; row++)
+                Marshal.Copy(raster.BgraPixels, row * raster.Stride,
+                    IntPtr.Add(framebuffer.Address, row * framebuffer.RowBytes), raster.Stride);
+        }
+        return new PreviewSnapshot(queueItemId,
+            $"Prepared PDF · page 1 of {artifact.PageCount}", 1, artifact.PageCount,
+            image, artifact.ArtifactId, artifact.Sha256);
+    }
     public IReadOnlyList<PreflightFindingSnapshot> GetFindings(string queueItemId) =>
         _findings.TryGetValue(queueItemId, out var findings) ? findings.ToArray() :
             [new("Rendering", _rendererAvailable ? "Not run" : "Unavailable", _rendererAvailable

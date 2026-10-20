@@ -147,6 +147,9 @@
                   <Border Background="#F3F5F8" CornerRadius="12" Padding="16" MinHeight="356"
                           AutomationProperties.Name="Preview surface">
                     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
+                      <Image x:Name="PreparedArtifactPageImage" Source="{Binding CurrentPreview.PageImage}"
+                             MaxWidth="280" MaxHeight="320" Stretch="Uniform" IsVisible="{Binding HasPreviewImage}"
+                             AutomationProperties.Name="Prepared PDF artifact page preview" />
                       <Border Width="220" Height="270" IsVisible="{Binding IsDemoMode}" Background="#FFFEFA" BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="2" Padding="22">
                         <StackPanel Spacing="14">
                           <TextBlock Text="SAMPLE PAGE FACE" FontSize="9" FontWeight="Bold" Foreground="#2563EB" />
@@ -162,7 +165,7 @@
                       </Border>
                       <TextBlock Text="{Binding CurrentPreview.Description}" FontSize="11" Foreground="#526176"
                                  TextAlignment="Center" TextWrapping="Wrap" IsVisible="{Binding IsDemoMode}" />
-                      <TextBlock Text="{Binding WorkspaceStatus.Detail}" FontSize="12" Foreground="#526176"
+                      <TextBlock Text="{Binding ProductionPreviewStatus}" FontSize="12" Foreground="#526176"
                                  TextAlignment="Center" TextWrapping="Wrap" IsVisible="{Binding IsProductionMode}" />
                       <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="4" IsVisible="{Binding IsDemoMode}">
                         <TextBlock Text="Sample face" FontSize="10" Foreground="#64748B" />

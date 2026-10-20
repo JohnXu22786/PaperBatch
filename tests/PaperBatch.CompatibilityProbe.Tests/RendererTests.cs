@@ -348,6 +348,33 @@ internal static class RendererTests
         Assert.Equal(userSid.Value, ((System.Security.Principal.SecurityIdentifier)onlyRule.IdentityReference).Value);
     }
 
+    public static void PinnedPdfiumInspectorReportsPageGeometry()
+    {
+        var runtimePath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH");
+        var expectedHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_SHA256");
+        if (string.IsNullOrWhiteSpace(runtimePath) || string.IsNullOrWhiteSpace(expectedHash)) return;
+
+        var inspector = new PdfiumArtifactInspector(runtimePath, expectedHash);
+        var pages = inspector.GetPageSizesAsync(new MemoryStream(OnePagePdf()), CancellationToken.None).GetAwaiter().GetResult();
+        Assert.Equal(1, pages.Count);
+        Assert.Equal(100d, pages[0].WidthPoints);
+        Assert.Equal(100d, pages[0].HeightPoints);
+    }
+
+    public static void PinnedPdfiumPreviewRendersOnlyOneBoundedPage()
+    {
+        var runtimePath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH");
+        var expectedHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_SHA256");
+        if (string.IsNullOrWhiteSpace(runtimePath) || string.IsNullOrWhiteSpace(expectedHash)) return;
+
+        var inspector = new PdfiumArtifactInspector(runtimePath, expectedHash);
+        var page = inspector.RenderPageAsync(new MemoryStream(OnePagePdf()), 1, 512, CancellationToken.None).GetAwaiter().GetResult();
+        Assert.Equal(100, page.Width);
+        Assert.Equal(100, page.Height);
+        Assert.Equal(400, page.Stride);
+        Assert.Equal(40_000, page.BgraPixels.Length);
+    }
+
     public static void ArtifactStoreRejectsNonPdfInput()
     {
         var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-{Guid.NewGuid():N}");
@@ -521,7 +548,7 @@ internal static class RendererTests
         return ~crc;
     }
 
-    private static byte[] OnePagePdf()
+    internal static byte[] OnePagePdf()
     {
         var objects = new[]
         {

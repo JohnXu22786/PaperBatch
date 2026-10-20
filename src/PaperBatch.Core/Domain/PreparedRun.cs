@@ -85,6 +85,9 @@ public sealed record RendererResult(
     int PageCount,
     RendererCapabilities Capabilities);
 
+/// <summary>Identity of the immutable, fully composed PDF for this prepared run.</summary>
+public sealed record FinalPdfArtifact(string ArtifactId, string Sha256, long LengthBytes, int PageCount);
+
 public readonly record struct PageMapping(int SourcePageNumber, int RenderedPageNumber);
 
 public sealed record PrintSettings(
@@ -151,13 +154,15 @@ public sealed record PreparedRun
         DateTimeOffset createdAtUtc,
         string snapshotFingerprint,
         ImmutableArray<PreparedItem> items,
-        ImmutableArray<CompatibleSegment> segments)
+        ImmutableArray<CompatibleSegment> segments,
+        FinalPdfArtifact? finalArtifact)
     {
         RunId = runId;
         CreatedAtUtc = createdAtUtc;
         SnapshotFingerprint = snapshotFingerprint.ToLowerInvariant();
         Items = items;
         Segments = segments;
+        FinalArtifact = finalArtifact;
     }
 
     public string RunId { get; }
@@ -165,13 +170,15 @@ public sealed record PreparedRun
     public string SnapshotFingerprint { get; }
     public ImmutableArray<PreparedItem> Items { get; }
     public ImmutableArray<CompatibleSegment> Segments { get; }
+    public FinalPdfArtifact? FinalArtifact { get; }
 
     public static PreparedRun Create(
         string runId,
         DateTimeOffset createdAtUtc,
         string snapshotFingerprint,
         IEnumerable<PreparedItem> items,
-        IEnumerable<CompatibleSegment> segments)
+        IEnumerable<CompatibleSegment> segments,
+        FinalPdfArtifact? finalArtifact = null)
     {
         ValidateIdentifier(runId, nameof(runId));
         ValidateSha256(snapshotFingerprint, nameof(snapshotFingerprint));
@@ -267,12 +274,22 @@ public sealed record PreparedRun
             throw new ArgumentException("Segments must cover each prepared item exactly once and preserve its order.", nameof(segments));
         }
 
+        if (finalArtifact is not null)
+        {
+            ValidateIdentifier(finalArtifact.ArtifactId, nameof(finalArtifact));
+            ValidateSha256(finalArtifact.Sha256, nameof(finalArtifact));
+            if (finalArtifact.LengthBytes <= 0 || finalArtifact.PageCount <= 0 ||
+                !string.Equals(finalArtifact.ArtifactId, "artifact_" + finalArtifact.Sha256.ToLowerInvariant(), StringComparison.Ordinal))
+                throw new ArgumentException("The final PDF artifact identity, length, and page count are invalid.", nameof(finalArtifact));
+        }
+
         return new PreparedRun(
             runId,
             createdAtUtc.ToUniversalTime(),
             snapshotFingerprint,
             normalizedItems,
-            immutableSegments);
+            immutableSegments,
+            finalArtifact is null ? null : finalArtifact with { Sha256 = finalArtifact.Sha256.ToLowerInvariant() });
     }
 
     private static void ValidateItem(PreparedItem item)

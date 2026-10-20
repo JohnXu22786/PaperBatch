@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows.Input;
+using Avalonia.Threading;
 
 namespace PaperBatch.Desktop.Presentation;
 
@@ -18,6 +19,9 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     private readonly WorkspaceStatusSnapshot _workspaceStatus;
     private string? _operationError;
     private readonly IQueuePresentationSource _queueSource;
+    private CancellationTokenSource? _previewRefreshCancellation;
+    private Task _previewRefreshTask = Task.CompletedTask;
+    private long _previewRequestNumber;
 
     public DesktopShellViewModel(
         IQueuePresentationSource queueSource,
@@ -38,6 +42,8 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         _queueSource = queueSource;
         _settingsSource = settingsSource;
         _previewSource = previewSource;
+        if (_previewSource is IPreparedArtifactPresentationSource preparedArtifacts)
+            preparedArtifacts.PreparedArtifactChanged += OnPreparedArtifactChanged;
         _preflightSource = preflightSource;
         QueueItems = new ObservableCollection<QueueItemSnapshot>(queueSource.GetQueueItems());
         HistoryEntries = historySource.GetHistoryEntries();
@@ -90,9 +96,35 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     public string SettingsHeading => _workspaceStatus.IsDemo ? "Example values and reasons" : "Effective values and provenance";
 
-    public string PreviewHeading => _workspaceStatus.IsDemo ? "DEMO PREVIEW" : "FINAL PREVIEW UNAVAILABLE";
+    public string PreviewHeading => _workspaceStatus.IsDemo ? "DEMO PREVIEW" : HasPreviewImage ? "FINAL PREVIEW · PREPARED ARTIFACT" : "FINAL PREVIEW UNAVAILABLE";
 
-    public string PreviewDescription => _workspaceStatus.IsDemo ? "Illustrative sheet face" : "No prepared artifact is available.";
+    public string PreviewDescription => _workspaceStatus.IsDemo ? "Illustrative sheet face" : HasPreviewImage
+        ? $"Artifact {CurrentPreview!.ArtifactId} · SHA-256 {CurrentPreview.ArtifactSha256}"
+        : "No prepared artifact preview is available.";
+
+    public string ProductionPreviewStatus => HasPreviewImage
+        ? "Rendered from the immutable final PDF saved for this prepared run."
+        : "A configured PDFium preview runtime and prepared final artifact are required.";
+
+    public bool HasPreviewImage => CurrentPreview?.PageImage is not null;
+
+    public Task RefreshPreviewAsync() => _previewRefreshTask = RefreshSelectedItemAsync();
+
+    /// <summary>Publishes the immutable run returned by preparation to this item's preview.</summary>
+    public void RegisterPreparedRun(string queueItemId, PaperBatch.Core.Domain.PreparedRun run)
+    {
+        if (_previewSource is not IPreparedArtifactPresentationSource preparedArtifacts)
+            throw new InvalidOperationException("Prepared-artifact preview is unavailable in this presentation mode.");
+        preparedArtifacts.RegisterPreparedRun(queueItemId, run);
+    }
+
+    /// <summary>Removes the prior run from preview when an item is re-prepared or removed.</summary>
+    public void InvalidatePreparedRun(string queueItemId)
+    {
+        if (_previewSource is not IPreparedArtifactPresentationSource preparedArtifacts)
+            throw new InvalidOperationException("Prepared-artifact preview is unavailable in this presentation mode.");
+        preparedArtifacts.InvalidatePreparedRun(queueItemId);
+    }
 
     public string HistoryEyebrow => _workspaceStatus.IsDemo ? "HISTORY · SAMPLE VIEW" : "HISTORY";
 
@@ -146,7 +178,17 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     public PreviewSnapshot? CurrentPreview
     {
         get => _currentPreview;
-        private set => SetProperty(ref _currentPreview, value);
+        private set
+        {
+            if (ReferenceEquals(_currentPreview, value)) return;
+            var previous = _currentPreview;
+            if (!SetProperty(ref _currentPreview, value)) return;
+            if (previous?.PageImage is { } oldImage && !ReferenceEquals(oldImage, value?.PageImage)) oldImage.Dispose();
+            OnPropertyChanged(nameof(HasPreviewImage));
+            OnPropertyChanged(nameof(PreviewHeading));
+            OnPropertyChanged(nameof(PreviewDescription));
+            OnPropertyChanged(nameof(ProductionPreviewStatus));
+        }
     }
 
     public IReadOnlyList<EffectiveSettingSnapshot> EffectiveSettings
@@ -225,6 +267,16 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     private void RefreshSelectedItem()
     {
+        _previewRefreshTask = RefreshSelectedItemAsync();
+    }
+
+    private async Task RefreshSelectedItemAsync()
+    {
+        _previewRefreshCancellation?.Cancel();
+        _previewRefreshCancellation?.Dispose();
+        var cancellation = new CancellationTokenSource();
+        _previewRefreshCancellation = cancellation;
+        var requestNumber = ++_previewRequestNumber;
         if (SelectedQueueItem is not { } item)
         {
             CurrentPreview = null;
@@ -233,9 +285,36 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
             return;
         }
 
-        CurrentPreview = _previewSource.GetPreview(item.Id);
+        CurrentPreview = null;
         EffectiveSettings = _settingsSource.GetEffectiveSettings(item.Id);
         PreflightFindings = _preflightSource.GetFindings(item.Id);
+        try
+        {
+            var preview = await _previewSource.GetPreviewAsync(item.Id, cancellation.Token);
+            if (cancellation.IsCancellationRequested || requestNumber != _previewRequestNumber)
+            {
+                preview.PageImage?.Dispose();
+                return;
+            }
+            CurrentPreview = preview;
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            if (!cancellation.IsCancellationRequested && requestNumber == _previewRequestNumber)
+                CurrentPreview = new PreviewSnapshot(item.Id, $"Prepared PDF preview unavailable ({exception.GetType().Name}).", 0, 0);
+        }
+    }
+
+    private void OnPreparedArtifactChanged(string queueItemId)
+    {
+        if (string.Equals(SelectedQueueItem?.Id, queueItemId, StringComparison.Ordinal))
+        {
+            if (Dispatcher.UIThread.CheckAccess()) RefreshSelectedItem();
+            else Dispatcher.UIThread.Post(RefreshSelectedItem);
+        }
     }
 
     private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
