@@ -15,6 +15,9 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     private IReadOnlyList<EffectiveSettingSnapshot> _effectiveSettings = [];
     private IReadOnlyList<PreflightFindingSnapshot> _preflightFindings = [];
     private ShellSection _activeSection = ShellSection.Queue;
+    private readonly WorkspaceStatusSnapshot _workspaceStatus;
+    private string? _operationError;
+    private readonly IQueuePresentationSource _queueSource;
 
     public DesktopShellViewModel(
         IQueuePresentationSource queueSource,
@@ -22,7 +25,8 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         IFinalPreviewPresentationSource previewSource,
         IPreflightPresentationSource preflightSource,
         IHistoryPresentationSource historySource,
-        ITemplatePresentationSource templateSource)
+        ITemplatePresentationSource templateSource,
+        WorkspaceStatusSnapshot? workspaceStatus = null)
     {
         ArgumentNullException.ThrowIfNull(queueSource);
         ArgumentNullException.ThrowIfNull(settingsSource);
@@ -31,12 +35,14 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         ArgumentNullException.ThrowIfNull(historySource);
         ArgumentNullException.ThrowIfNull(templateSource);
 
+        _queueSource = queueSource;
         _settingsSource = settingsSource;
         _previewSource = previewSource;
         _preflightSource = preflightSource;
         QueueItems = new ObservableCollection<QueueItemSnapshot>(queueSource.GetQueueItems());
         HistoryEntries = historySource.GetHistoryEntries();
         Templates = templateSource.GetTemplates();
+        _workspaceStatus = workspaceStatus ?? new WorkspaceStatusSnapshot("Demo mode", "Synthetic sample data only.", true);
         NavigateCommand = new RelayCommand(Navigate, CanNavigate);
 
         if (QueueItems.Count > 0)
@@ -54,6 +60,74 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     public IReadOnlyList<TemplateSnapshot> Templates { get; }
 
     public ICommand NavigateCommand { get; }
+
+    public async Task ImportFilesAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        if (_queueSource is not IQueueImportPresentationSource importer)
+            throw new InvalidOperationException("File intake is unavailable in this presentation mode.");
+        var imported = await importer.ImportAsync(paths, cancellationToken).ConfigureAwait(true);
+        foreach (var item in imported)
+        {
+            if (!QueueItems.Any(existing => string.Equals(existing.Id, item.Id, StringComparison.Ordinal)))
+                QueueItems.Add(item);
+        }
+        SelectedQueueItem ??= QueueItems.FirstOrDefault();
+        OnPropertyChanged(nameof(QueueStateLabel));
+    }
+
+    public WorkspaceStatusSnapshot WorkspaceStatus => _workspaceStatus;
+
+    public bool IsDemoMode => _workspaceStatus.IsDemo;
+
+    public bool IsProductionMode => !_workspaceStatus.IsDemo;
+
+    public bool CanImportFiles => _queueSource is IQueueImportPresentationSource { IsAvailable: true };
+
+    public string QueueStateLabel => QueueItems.Count == 0 ? "NO FILES LOADED" : $"{QueueItems.Count} FILES LOADED";
+
+    public string PreflightHeading => _workspaceStatus.IsDemo ? "Demo checks only" : "Source preflight";
+
+    public string SettingsHeading => _workspaceStatus.IsDemo ? "Example values and reasons" : "Effective values and provenance";
+
+    public string PreviewHeading => _workspaceStatus.IsDemo ? "DEMO PREVIEW" : "FINAL PREVIEW UNAVAILABLE";
+
+    public string PreviewDescription => _workspaceStatus.IsDemo ? "Illustrative sheet face" : "No prepared artifact is available.";
+
+    public string HistoryEyebrow => _workspaceStatus.IsDemo ? "HISTORY · SAMPLE VIEW" : "HISTORY";
+
+    public string HistoryTitle => _workspaceStatus.IsDemo ? "Example activity" : "Print history unavailable";
+
+    public string HistoryDescription => _workspaceStatus.IsDemo
+        ? "These rows are illustrative. This shell does not save completed runs or print records."
+        : "No persisted runs are available in the current core read API.";
+
+    public string TemplateEyebrow => _workspaceStatus.IsDemo ? "TEMPLATES · SAMPLE VIEW" : "TEMPLATES";
+
+    public string TemplateTitle => _workspaceStatus.IsDemo ? "Example recipes" : "Saved recipes unavailable";
+
+    public string TemplateDescription => _workspaceStatus.IsDemo
+        ? "These sample cards are not saved recipes and do not change application settings."
+        : "Recipe persistence and application are unavailable in the current core API.";
+
+    public string QueueDescription => _workspaceStatus.IsDemo
+        ? "Selecting a row updates only the sample preview and sample settings."
+        : "Source files are captured and checked by the shared core. Rendering and print submission are unavailable.";
+
+    public string? OperationError
+    {
+        get => _operationError;
+        set
+        {
+            if (SetProperty(ref _operationError, value)) OnPropertyChanged(nameof(HasOperationError));
+        }
+    }
+
+    public bool HasOperationError => !string.IsNullOrWhiteSpace(OperationError);
+
+    public string SettingsDescription => _workspaceStatus.IsDemo
+        ? "These examples do not describe a connected printer or a completed rules calculation."
+        : "Effective settings are unavailable until a prepared run and printer capability snapshot exist.";
 
     public QueueItemSnapshot? SelectedQueueItem
     {
@@ -113,15 +187,18 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     public string ActiveSectionTitle => ActiveSection switch
     {
         ShellSection.Queue => "Queue and review",
-        ShellSection.History => "History · sample view",
-        ShellSection.Templates => "Templates · sample view",
+        ShellSection.History => "History",
+        ShellSection.Templates => "Templates",
         _ => "PaperBatch"
     };
+
+    public static DesktopShellViewModel CreateProduction() => DesktopComposition.CreateProduction();
 
     public static DesktopShellViewModel CreateDemo()
     {
         var sources = new DemoPresentationSources();
-        return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources);
+        return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
+            new WorkspaceStatusSnapshot("DEMO MODE", "Synthetic sample data only. No files, renderers, printers, or jobs are used.", true));
     }
 
     private static bool CanNavigate(object? parameter) => TryGetSection(parameter, out _);

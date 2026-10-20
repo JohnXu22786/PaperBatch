@@ -2,14 +2,19 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using PaperBatch.Desktop;
+using PaperBatch.Core.Intake;
+using PaperBatch.Core.Rendering;
 using PaperBatch.Desktop.Presentation;
 
 var tests = new (string Name, Action Run)[]
 {
     ("selection refreshes preview, settings, and preflight from presentation sources", SelectionRefreshesPresentationSnapshots),
     ("navigation changes the active section", NavigationChangesTheActiveSection),
+    ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
+    ("file picker reports all skipped and mixed local selections", FilePickerClassifiesSkippedSelections),
     ("headless shell identifies demo data and has no print action", HeadlessShellIsExplicitlyDemoOnly),
-    ("presentation assembly does not depend on native backends", PresentationAssemblyHasNoNativeBackendCoupling)
+    ("production presentation exposes unavailable production capabilities without demo rows", ProductionPresentationIsExplicitlyUnavailable),
+    ("presentation assembly keeps native backends behind shared core contracts", PresentationAssemblyReferencesCoreWithoutNativeImports)
 };
 
 AppBuilder.Configure<App>()
@@ -64,6 +69,45 @@ static void SelectionRefreshesPresentationSnapshots()
     Assert.Equal(3, demoViewModel.CurrentPreview.PageCount);
 }
 
+static void SourceIntakeErrorsRemainVisibleAndAppend()
+{
+    var cacheRoot = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-tests", Guid.NewGuid().ToString("N"));
+    var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = cacheRoot });
+    var sources = new ProductionPresentationSources(new SourceIntakeService(cache), new RendererCoordinator([]), cache);
+    var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    try
+    {
+        viewModel.ImportFilesAsync([Path.Combine(cacheRoot, "missing-a.pdf")]).GetAwaiter().GetResult();
+        viewModel.ImportFilesAsync([Path.Combine(cacheRoot, "missing-b.pdf")]).GetAwaiter().GetResult();
+
+        Assert.Equal(2, viewModel.QueueItems.Count);
+        Assert.Equal("Needs attention", viewModel.QueueItems[0].Status);
+        Assert.Equal("InputVanished", viewModel.PreflightFindings.Single().Title);
+        Assert.Equal(2, viewModel.QueueItems.Count);
+        Assert.True(viewModel.CanImportFiles);
+    }
+    finally
+    {
+        if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
+    }
+}
+
+static void FilePickerClassifiesSkippedSelections()
+{
+    var allSkipped = MainWindow.ClassifySelectedPaths([null, "", "   "]);
+    Assert.Empty(allSkipped.Paths);
+    Assert.Equal(3, allSkipped.SkippedCount);
+    Assert.Contains("3 selected item(s)", allSkipped.SkippedMessage(noItemsAdded: true));
+    Assert.Contains("No items were added", allSkipped.SkippedMessage(noItemsAdded: true));
+
+    var mixed = MainWindow.ClassifySelectedPaths(["/tmp/accepted.pdf", null]);
+    Assert.Equal("/tmp/accepted.pdf", mixed.Paths.Single());
+    Assert.Equal(1, mixed.SkippedCount);
+    Assert.Contains("1 selected item(s)", mixed.SkippedMessage(noItemsAdded: false));
+    Assert.True(!mixed.SkippedMessage(noItemsAdded: false).Contains("No items were added", StringComparison.Ordinal));
+}
+
 static void NavigationChangesTheActiveSection()
 {
     var viewModel = CreateViewModel(new FakeQueueSource([]), new FakePreviewSource(), new FakeSettingsSource(), new FakePreflightSource());
@@ -82,7 +126,8 @@ static void NavigationChangesTheActiveSection()
 
 static void HeadlessShellIsExplicitlyDemoOnly()
 {
-    var window = new MainWindow(DesktopShellViewModel.CreateDemo());
+    var viewModel = DesktopShellViewModel.CreateDemo();
+    var window = new MainWindow(viewModel);
     try
     {
         window.Show();
@@ -90,9 +135,15 @@ static void HeadlessShellIsExplicitlyDemoOnly()
         var banner = window.FindControl<Border>("SampleDataBanner");
         Assert.NotNull(banner);
         var bannerText = string.Join(" ", ((StackPanel)banner!.Child!).Children.OfType<TextBlock>().Select(textBlock => textBlock.Text));
-        Assert.Contains("SAMPLE DATA", bannerText);
-        Assert.Contains("No files are opened", bannerText);
+        Assert.Contains("DEMO MODE", bannerText);
+        Assert.Contains("Synthetic sample data only", bannerText);
+        Assert.Equal("DEMO PREVIEW", window.FindControl<TextBlock>("PreviewHeading")!.Text);
+        Assert.Equal("Illustrative sheet face", window.FindControl<TextBlock>("PreviewDescription")!.Text);
         Assert.Null(window.FindControl<Button>("PrintButton"));
+        viewModel.NavigateCommand.Execute("History");
+        Assert.Equal("Example activity", window.FindControl<TextBlock>("HistoryTitle")!.Text);
+        viewModel.NavigateCommand.Execute("Templates");
+        Assert.Equal("Example recipes", window.FindControl<TextBlock>("TemplateTitle")!.Text);
     }
     finally
     {
@@ -100,7 +151,35 @@ static void HeadlessShellIsExplicitlyDemoOnly()
     }
 }
 
-static void PresentationAssemblyHasNoNativeBackendCoupling()
+static void ProductionPresentationIsExplicitlyUnavailable()
+{
+    var sources = new ProductionPresentationSources();
+    Assert.Empty(sources.GetQueueItems());
+    Assert.Contains("unavailable", sources.GetPreview("missing").Description);
+    Assert.Contains("No renderer", sources.GetFindings("missing").Single().Detail);
+    Assert.Empty(sources.GetHistoryEntries());
+    Assert.Empty(sources.GetTemplates());
+
+    var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    var window = new MainWindow(viewModel);
+    try
+    {
+        window.Show();
+        Assert.Equal("FINAL PREVIEW UNAVAILABLE", window.FindControl<TextBlock>("PreviewHeading")!.Text);
+        Assert.Equal("No prepared artifact is available.", window.FindControl<TextBlock>("PreviewDescription")!.Text);
+        viewModel.NavigateCommand.Execute("History");
+        Assert.Equal("Print history unavailable", window.FindControl<TextBlock>("HistoryTitle")!.Text);
+        viewModel.NavigateCommand.Execute("Templates");
+        Assert.Equal("Saved recipes unavailable", window.FindControl<TextBlock>("TemplateTitle")!.Text);
+    }
+    finally
+    {
+        window.Close();
+    }
+}
+
+static void PresentationAssemblyReferencesCoreWithoutNativeImports()
 {
     var assembly = typeof(DesktopShellViewModel).Assembly;
     string[] forbiddenReferenceTokens =
@@ -110,10 +189,10 @@ static void PresentationAssemblyHasNoNativeBackendCoupling()
         "Microsoft.Data.Sqlite",
         "Microsoft.Office",
         "Pdfium",
-        "PaperBatch.Core",
         "PaperBatch.Storage"
     ];
     var references = assembly.GetReferencedAssemblies().Select(reference => reference.Name ?? string.Empty).ToArray();
+    Assert.True(references.Any(reference => reference == "PaperBatch.Core"));
     var forbiddenReferences = references.Where(reference => forbiddenReferenceTokens.Any(token => reference.Contains(token, StringComparison.OrdinalIgnoreCase))).ToArray();
     Assert.Empty(forbiddenReferences);
 

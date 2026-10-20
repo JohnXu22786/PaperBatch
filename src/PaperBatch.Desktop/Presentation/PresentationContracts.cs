@@ -19,9 +19,17 @@ internal sealed record HistoryEntrySnapshot(string Title, string Summary, string
 
 internal sealed record TemplateSnapshot(string Name, string Summary, string SettingsSummary);
 
+internal sealed record WorkspaceStatusSnapshot(string Title, string Detail, bool IsDemo);
+
 internal interface IQueuePresentationSource
 {
     IReadOnlyList<QueueItemSnapshot> GetQueueItems();
+}
+
+internal interface IQueueImportPresentationSource : IQueuePresentationSource
+{
+    bool IsAvailable { get; }
+    Task<IReadOnlyList<QueueItemSnapshot>> ImportAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default);
 }
 
 internal interface IEffectiveSettingsPresentationSource
