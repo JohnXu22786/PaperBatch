@@ -27,6 +27,9 @@ internal static class PdfiumSmoke
         "FPDFBitmap_GetStride", "FPDFBitmap_Destroy"
     ];
 
+    public static bool ShouldFailNativeProof(PdfiumSmokeRun result) =>
+        !result.CompositionPassed || result.PageEditStatus != "verified" || result.FormStatus == "failed";
+
     private static readonly string[] FormExports =
     [
         "FPDF_GetFormType", "FPDFDOC_InitFormFillEnvironment", "FPDFDOC_ExitFormFillEnvironment",
@@ -641,7 +644,7 @@ internal static class PdfiumSmoke
                             FailApi(Math.Abs(actualWidth - 220f) > 0.01f ? "FPDF_GetPageWidthF" : "FPDF_GetPageHeightF");
                             throw new InvalidDataException($"Expected reopened target page size 220x180 points, got {actualWidth}x{actualHeight}.");
                         }
-                        var render = RenderPageEdit(api, page, TrackPointer, TrackInt, TrackApi);
+                        var render = RenderPageEdit(api, page, TrackPointer, TrackInt, TrackApi, FailApi);
                         return new
                         {
                             status = "verified",
@@ -684,7 +687,7 @@ internal static class PdfiumSmoke
         }
     }
 
-    private static object RenderPageEdit(PageEditApi api, IntPtr page, Func<string, Func<IntPtr>, IntPtr> trackPointer, Func<string, Func<int>, int> trackInt, Action<string, Action> trackVoid)
+    private static object RenderPageEdit(PageEditApi api, IntPtr page, Func<string, Func<IntPtr>, IntPtr> trackPointer, Func<string, Func<int>, int> trackInt, Action<string, Action> trackVoid, Action<string> failApi)
     {
         const int width = 220;
         const int height = 180;
@@ -693,14 +696,27 @@ internal static class PdfiumSmoke
         const int expectedRight = 100;
         const int expectedBottom = 75;
         var bitmap = trackPointer("FPDFBitmap_Create", () => api.BitmapCreate(width, height, 0));
-        if (bitmap == IntPtr.Zero) throw new InvalidOperationException("FPDFBitmap_Create failed for the page-edit render.");
+        if (bitmap == IntPtr.Zero)
+        {
+            failApi("FPDFBitmap_Create");
+            throw new InvalidOperationException("FPDFBitmap_Create failed for the page-edit render.");
+        }
         try
         {
             trackVoid("FPDFBitmap_FillRect", () => api.BitmapFillRect(bitmap, 0, 0, width, height, 0xffffffff));
             trackVoid("FPDF_RenderPageBitmap", () => api.RenderPageBitmap(bitmap, page, 0, 0, width, height, 0, 0));
             var buffer = trackPointer("FPDFBitmap_GetBuffer", () => api.BitmapGetBuffer(bitmap));
             var stride = trackInt("FPDFBitmap_GetStride", () => api.BitmapGetStride(bitmap));
-            if (buffer == IntPtr.Zero || stride < width * 4) throw new InvalidDataException("PDFium returned an invalid page-edit bitmap.");
+            if (buffer == IntPtr.Zero)
+            {
+                failApi("FPDFBitmap_GetBuffer");
+                throw new InvalidDataException("PDFium returned a null page-edit bitmap buffer.");
+            }
+            if (stride < width * 4)
+            {
+                failApi("FPDFBitmap_GetStride");
+                throw new InvalidDataException("PDFium returned an invalid page-edit bitmap stride.");
+            }
             var pixels = new byte[checked(stride * height)];
             Marshal.Copy(buffer, pixels, 0, pixels.Length);
             var count = 0;
@@ -733,6 +749,14 @@ internal static class PdfiumSmoke
             var boundsMatch = count >= 400 && Math.Abs(minX - expectedLeft) <= 1 && Math.Abs(minY - expectedTop) <= 1 && Math.Abs(maxX - (expectedRight - 1)) <= 1 && Math.Abs(maxY - (expectedBottom - 1)) <= 1;
             var originalPositionIsWhite = IsWhiteAt(40, 125);
             var secondObjectWasNotInserted = IsWhiteAt(135, 135);
+            if (!boundsMatch && count >= 400)
+            {
+                failApi("FPDFPageObj_Transform");
+            }
+            if (count < 400 || !originalPositionIsWhite || !secondObjectWasNotInserted)
+            {
+                failApi("FPDF_RenderPageBitmap");
+            }
             if (!boundsMatch || !originalPositionIsWhite || !secondObjectWasNotInserted)
                 throw new InvalidDataException($"Transformed vector render mismatch: redBounds=[{minX},{minY},{maxX},{maxY}], pixels={count}, sourceClear={originalPositionIsWhite}, secondObjectAbsent={secondObjectWasNotInserted}.");
 
@@ -918,11 +942,11 @@ internal static class PdfiumSmoke
                 throw new IOException("FPDF_SaveAsCopy failed.", callbackError);
             }
             if (callbackError is not null) throw new IOException("PDFium's save callback failed.", callbackError);
-            GC.KeepAlive(writer);
             return output.ToArray();
         }
         finally
         {
+            GC.KeepAlive(writer);
             Marshal.FreeHGlobal(fileWritePointer);
         }
     }

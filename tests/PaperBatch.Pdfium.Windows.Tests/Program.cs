@@ -7,6 +7,7 @@ foreach (var (name, run) in new (string Name, Action Run)[]
     ("composition fixture has two distinct render targets", CompositionFixtureHasDistinctTargets),
     ("vector page-edit fixture is deterministic with distinct objects", PageEditFixtureIsDeterministic),
     ("page-edit API results preserve unavailable and not-run states", PageEditApiResultsPreserveStatuses),
+    ("page-edit proof cannot pass without verified native behavior", PageEditUnavailableFailsProof),
     ("form fixture identifies one bounded text widget", FormFixtureIsBounded),
     ("missing form exports retain per-API execution status", MissingFormExportsAreReported),
     ("form API failure status survives report formatting", FormApiFailureStatusIsReported),
@@ -43,7 +44,7 @@ if (args.Length > 0 && args[0] == "smoke")
     var result = PdfiumSmoke.Run(args[2], args[4], args[8]);
     File.WriteAllText(args[6], result.Json);
     Console.WriteLine(result.Summary);
-    if (!result.CompositionPassed || result.PageEditStatus == "failed" || result.FormStatus == "failed")
+    if (PdfiumSmoke.ShouldFailNativeProof(result))
     {
         return 1;
     }
@@ -91,6 +92,13 @@ static void PageEditApiResultsPreserveStatuses()
     var newPage = missing.RootElement.EnumerateArray().Single(x => x.GetProperty("name").GetString() == "FPDFPage_New");
     Assert.Equal("unavailable", newPage.GetProperty("exportStatus").GetString());
     Assert.Equal("unavailable", newPage.GetProperty("executionStatus").GetString());
+}
+
+static void PageEditUnavailableFailsProof()
+{
+    Assert.True(PdfiumSmoke.ShouldFailNativeProof(new PdfiumSmokeRun("", "", true, "unavailable", "blocked")));
+    Assert.True(PdfiumSmoke.ShouldFailNativeProof(new PdfiumSmokeRun("", "", true, "not-run", "blocked")));
+    Assert.True(!PdfiumSmoke.ShouldFailNativeProof(new PdfiumSmokeRun("", "", true, "verified", "blocked")));
 }
 
 static void FormFixtureIsBounded()
