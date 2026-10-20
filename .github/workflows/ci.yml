@@ -82,6 +82,9 @@ jobs:
             "$lo_debs"/libreoffice26.2-writer_*.deb \
             "$lo_debs"/libreoffice26.2-base_*.deb \
             "$lo_debs"/libreoffice26.2-en-us_*.deb
+          # GitHub's hosted runner exposes /opt as world-writable; keep the
+          # installed engine's ancestor protected for the adapter trust check.
+          sudo chmod go-w /opt
           lo_engine='/opt/libreoffice26.2/program/soffice.bin'
           test -x "$lo_engine"
           lo_version_output="$(LD_LIBRARY_PATH=/opt/libreoffice26.2/program URE_BOOTSTRAP=file:///opt/libreoffice26.2/program/fundamentalrc "$lo_engine" --version)"
