@@ -4,7 +4,7 @@ PaperBatch is an AGPL-3.0 project for preparing and printing ordered batches of 
 
 ## U0 compatibility probe
 
-The probe targets .NET 10 and has no NuGet dependencies. It reports exact runtime/architecture, optional PDFium binary identity and PE exports, Office-suite executable/product identity/version/bitness evidence, print-spooler/queue/driver inventory, separate route, job-ID, and physical-device output evidence, and the open/complete state of G1.
+The compatibility probe targets .NET 10 and has no NuGet dependencies. The shared core adds a separate .NET 10 library with a pinned SQLite provider for durable run/job metadata. The probe reports exact runtime/architecture, optional PDFium binary identity and PE exports, Office-suite executable/product identity/version/bitness evidence, print-spooler/queue/driver inventory, separate route, job-ID, and physical-device output evidence, and the open/complete state of G1.
 
 ```sh
 dotnet run --project src/PaperBatch.CompatibilityProbe/PaperBatch.CompatibilityProbe.csproj -- collect
@@ -16,20 +16,45 @@ Run `dotnet run --project src/PaperBatch.CompatibilityProbe/PaperBatch.Compatibi
 
 The simulation command exercises a deterministic GDI job-ID protocol fixture. Its output is marked `simulation` and cannot satisfy any native G1 requirement. The current measured matrix and exact evidence are in [docs/compatibility/u0-measured-matrix.md](docs/compatibility/u0-measured-matrix.md).
 
+The Windows CI job captures runner OS/build/architecture, process session, spooler status, and installed queue/driver/port metadata as `windows-print-runner-evidence.json`; it also uploads the collector report. The hosted runner does not submit a page: built-in file-output queues may prompt, and the other queue routes are not proven local-only. GDI job-ID evidence is therefore `unavailable` until a noninteractive local-only virtual queue can be verified. The artifact records that no job ID or output file was produced and that no physical paper was tested.
+
+A separate Windows x64 CI job checks the community PDFium release `bblanchon/pdfium-binaries` `chromium/8111` (`pdfium-win-x64.tgz`) against its pinned SHA-256 before safely extracting it under the ephemeral runner temp directory. It loads that test-only DLL to import a generated PDF page with `FPDF_ImportPages`, save and reopen the composition, and verify rendered fixture pixels. It also creates and deletes a page, enumerates and detaches vector objects, inserts one into a same-document target page, applies a scale/translation, regenerates content, saves and reopens the file, and verifies exact target page dimensions and rendered red-object bounds. Run [39399031574](https://github.com/JohnXu22786/PaperBatch/actions/runs/39399031574) (report artifact `12253776660`) verified the page-edit path: the red object rendered at pixels `[80,50,100,75)` with 500 matching pixels; the source object position and the unselected blue object were absent from the output. The generated fixture SHA-256 was `6e20a0449b8fb7dc73211630b8fe75231153b49add94cdddb786f767c722d903`; the saved output SHA-256 was `a04c79e92f7854a4d1be8341add4d646f28171d0548be6e627281b26fecfb31f`.
+
+The report records the archive SHA-256 `3452d11031050ec65e57f180215b57b9e6d465e3fbedafa8a77ad90885c7d23e`, the extracted x64 DLL SHA-256 `a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f`, hosted runner image identity, managed probe assembly SHA-256 `74d24523cd76e757ef8658b6118f3ae88fde18049b5b50932f85243ff3632d2e`, and per-API export and execution status. The publisher identifies these as community builds unaffiliated with Google or Foxit; this validates one binary in hosted CI only, with no independent source-to-binary attestation. The report records individual AcroForm and annotation API exports, but the form fixture remains blocked and those APIs are not called after prior hosted attempts against this exact binary raised a repeatable native access violation in the form API path. The community DLL is not committed or shipped as a PaperBatch dependency. This run does not validate product distribution or pinning, official Google/Foxit provenance, AcroForm behavior, XFA/JavaScript or all forms, Office/WPS coexistence, a GDI queue route, or physical output; it cannot close G1.
+
 The Python LibreOffice probe requires `--engine-binary` and `--expected-engine-sha256` from an independent trusted test-image manifest before it launches the engine directly. A self-reported `--version` banner alone does not verify executable identity. Both launchers reject engine images over 512 MiB from an opened file handle before reading a digest. The Linux launchers also enforce that limit during snapshot copying, and the C# collector applies it again when hashing the source after the version command. The Python launcher copies the opened image into a sealed memfd snapshot, verifies the snapshot digest, removes inherited `LD_*` and `URE_BOOTSTRAP` overrides, then launches that snapshot with an open descriptor pinning the sibling runtime directory for both version and export commands. A multiply linked engine is rejected because more than one containing directory would make its sibling runtime files ambiguous. The loader path, working directory, and optional `fundamentalrc` bootstrap all resolve through that same directory descriptor, even if its original pathname is replaced during the probe. Both launchers compare a bounded sibling program-directory manifest after each command; it skips only the top-level regular-file entry with the same opened-file identity as the pinned engine and has the limits and coverage caveats described above. Windows resolves the execution path from a read-only handle that denies write/delete sharing. The classic-xref `startxref` marker must be a syntax token outside a comment. The probe requires the generated fixture phrase in page-referenced text-showing operators whose font names resolve through page resources and whose text state has a positive font size and a rendering mode other than 3 or 7. It caches raw nonempty-stream checks and decoded results by indirect content reference across pages, and caps unique decoded content at 8 MiB across all pages, decodes each unique ToUnicode `bfchar` CMap once per document, and caps aggregate decoded CMap data at 8 MiB across all pages. CMap parsing uses mappings only inside a single validated `begincmap`/`endcmap` envelope and rejects a token-limited prefix. ToUnicode decoding accepts fixed one-byte codes for Type1/TrueType fonts and fixed two-byte codes only for Type0 `/Identity-H` or `/Identity-V` fonts; unsupported encodings and mixed source-code widths cannot verify the phrase. The decoded and parsed CMap cache is shared across page inspections. Page font observations are inspected incrementally instead of retained for every page. For simple fonts, ASCII decoding requires an explicit StandardEncoding or WinAnsiEncoding; Type1 fonts with no /Encoding are not assumed to use StandardEncoding. This is operator-level evidence only: the parser does not inspect text color, transparency, overpainting, clipping geometry, or rendered pixels. It omits the lab identifier by default; pass `--include-device-identifiers` to include `PAPERBATCH_PROBE_ENVIRONMENT_ID` in its JSON report.
+
+## Desktop shell preview
+
+The initial Avalonia desktop shell is a presentation-only scaffold. Its queue, settings, preview, preflight, history, and template cards use synthetic examples. The page-face illustration is not a document renderer. This build does not open files, query printers, create PDFs, save history, or submit print jobs. Native Office/WPS, PDFium, Windows print-route/driver, and physical-printer evidence remain open; this shell does not satisfy G1.
+
+Build the desktop app and run its focused headless presentation checks with the .NET 10 SDK:
+
+```sh
+dotnet restore tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --locked-mode -p:NuGetAudit=false
+dotnet build src/PaperBatch.Desktop/PaperBatch.Desktop.csproj --no-restore -p:NuGetAudit=false
+dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
+```
+
+The UI-only service interfaces are internal to the presentation assembly. They keep the shell independent of future core, persistence, renderer, and printer contracts until those units are ready to connect. Direct and transitive NuGet versions are captured by the project lockfiles; package license metadata was checked and recorded in [docs/dependencies/desktop-ui.md](docs/dependencies/desktop-ui.md).
 
 ## Tests
 
 The deterministic synthetic DOCX, XLSX, PPTX, PDF, and malformed-package seed, its manifest, and regeneration guidance are in [docs/compatibility/u8-synthetic-document-corpus.md](docs/compatibility/u8-synthetic-document-corpus.md).
 
-The test runner uses only the .NET SDK and project code. In the current Linux executor, run it in the official .NET 10 SDK image with network access disabled:
+The managed test runner includes the core SQLite tests and needs the pinned NuGet packages at least once. Restore the packages into a Docker volume, then run the test runner without network access:
 
 ```sh
-docker --host=unix:///var/run/docker.sock run --rm --network none \
-  -v "$PWD:/src" -w /src \
+docker --host=unix:///var/run/docker.sock volume create paperbatch-nuget
+docker --host=unix:///var/run/docker.sock run --rm \
+  -v "$PWD:/src" -v paperbatch-nuget:/root/.nuget/packages -w /src \
   mcr.microsoft.com/dotnet/sdk:10.0 \
-  dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
-python3 -m unittest discover -s tests -p 'test_*.py'
+  dotnet restore tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
+docker --host=unix:///var/run/docker.sock run --rm --network none \
+  -v "$PWD:/src" -v paperbatch-nuget:/root/.nuget/packages -w /src \
+  mcr.microsoft.com/dotnet/sdk:10.0 \
+  dotnet run --no-restore --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
+python3 -m unittest tests/test_libreoffice_probe.py
 ```
 
 The LibreOffice smoke test creates a deterministic DOCX fixture, exports it to PDF with a fresh temporary profile, and records hashes. Its bounded parser checks a classic cross-reference table incrementally, validates in-use object offsets, resolves the trailer `/Root` to a catalog object, follows the page tree to at least one page with a non-empty content stream, and decodes text in referenced page content using a referenced ToUnicode `bfchar` map or a simple-font ASCII encoding explicitly named as StandardEncoding or WinAnsiEncoding in the page font resource. ToUnicode decoding accepts fixed one-byte codes for Type1/TrueType fonts and fixed two-byte codes only for Type0 fonts using `/Identity-H` or `/Identity-V`; unsupported encodings, mixed source-code widths, and incomplete two-byte codes cannot verify the phrase. It concatenates `/Contents` arrays in order, skips PDF comments, and samples font size/render mode at each text-show operator before confirming the fixture phrase. Each decoded stream and total decoded page content are limited to 8 MiB; unique decoded page-content streams are cached across pages and capped at 8 MiB per document. Aggregate decoded CMaps across the document are also limited to 8 MiB and cached across pages, and page text parsing stops at 100,000 tokens. CMap parsing rejects a token-limited prefix so later envelope markers cannot be hidden. Page font observations are processed incrementally. On Linux, file content is opened only after a path-only handle confirms a regular-file identity; reads use that pinned handle. To avoid treating arbitrary inline-image bytes as operators, it stops text inspection at an inline-image operator; text after an inline image in the same page content sequence is not considered. It rejects graphics-only output, text using an undefined font resource, zero-size text, render modes 3 and 7, and unreferenced text. This is text-show operator evidence, not proof of visual output: the parser does not check color, transparency, overpainting, clipping geometry, or pixels. It checks the terminal EOF marker but does not support cross-reference streams, all PDF filters, `bfrange` CMaps, or the full PDF specification. The generated PDF may contain run-specific metadata, so its hash identifies that run rather than promising byte-identical output across runs. The test does not cover coexistence with an already running Office/WPS process, Windows COM automation, PDFium behavior, a Windows route/driver, or physical paper output.
@@ -37,3 +62,11 @@ The LibreOffice smoke test creates a deterministic DOCX fixture, exports it to P
 ## Compatibility gate
 
 G1 remains open until native PDFium page-composition and form behavior, separate Microsoft Office/WPS/LibreOffice export evidence, suite-specific coexistence, a Windows queue/driver route, real GDI job-ID correlation, and operator-verified physical device output are all recorded. A successful Linux LibreOfficeDev export or simulator run is useful evidence for its own row only; neither closes G1.
+
+## Core contracts
+
+The engine-neutral run/job models, SQLite schema and migration behavior, recipe JSON v1, and local IPC envelope are described in [docs/architecture/core-contracts.md](docs/architecture/core-contracts.md). This shared core does not implement a renderer, Windows printer backend, or IPC listener, and OS-reported completion is not evidence of physical paper output.
+
+## IPP protocol-fault lab
+
+The resettable Linux-side IPP Everywhere receiver and network-fault proxy use a pinned Ubuntu/CUPS image and synthetic PDF only. Run `tools/run_ipp_fault_lab.sh` to print a concise JSON trace for the success path and each configured fault, or `tools/run_ipp_fault_lab.sh test` to run the focused assertions. Every generated result is labeled `simulationOnly: true` and `evidenceClass: "protocol-emulation"`. Setup, reset behavior, dependency revisions, the generated package-license inventory, fault classifications, and limitations are in [docs/compatibility/v1-ipp-fault-lab.md](docs/compatibility/v1-ipp-fault-lab.md).
