@@ -40,3 +40,20 @@ jobs:
       # The unit suite uses fixtures; pinned-engine LibreOffice export stays opt-in/local.
       - name: Run Python unit tests
         run: python -m unittest discover -s tests -p test_libreoffice_probe.py
+
+      - name: Capture Windows runner spooler and queue evidence
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        run: |
+          ./tools/capture_windows_print_runner.ps1
+          dotnet run --project src/PaperBatch.CompatibilityProbe/PaperBatch.CompatibilityProbe.csproj -p:NuGetAudit=false -- collect --include-local-queues --output windows-print-probe-report.json
+
+      - name: Upload Windows runner print evidence
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-print-runner-evidence
+          path: |
+            windows-print-runner-evidence.json
+            windows-print-probe-report.json
+          if-no-files-found: warn
