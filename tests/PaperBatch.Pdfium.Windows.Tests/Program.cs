@@ -8,6 +8,7 @@ foreach (var (name, run) in new (string Name, Action Run)[]
     ("form fixture identifies one bounded text widget", FormFixtureIsBounded),
     ("missing form exports retain per-API execution status", MissingFormExportsAreReported),
     ("form API failure status survives report formatting", FormApiFailureStatusIsReported),
+    ("blocked form fixture preserves exports without native calls", BlockedFormFixturePreservesExportStatus),
     ("proof report cannot imply product pinning or close G1", ReportKeepsG1Open)
 })
 {
@@ -102,6 +103,18 @@ static void FormApiFailureStatusIsReported()
     Assert.Equal("failed", formType.GetProperty("executionStatus").GetString());
     var laterApi = json.RootElement.EnumerateArray().Single(x => x.GetProperty("name").GetString() == "FPDFPage_HasFormFieldAtPoint");
     Assert.Equal("not-run", laterApi.GetProperty("executionStatus").GetString());
+}
+
+static void BlockedFormFixturePreservesExportStatus()
+{
+    var exports = new HashSet<string>(PdfiumSmoke.BoundedFormApiNames, StringComparer.Ordinal);
+    using var json = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(
+        PdfiumSmoke.CreateBlockedFormFixture("prior native access violation", exports)));
+    var root = json.RootElement;
+    Assert.Equal("blocked", root.GetProperty("status").GetString());
+    var results = root.GetProperty("apiResults").EnumerateArray().ToArray();
+    Assert.True(results.All(x => x.GetProperty("exportStatus").GetString() == "available"));
+    Assert.True(results.All(x => x.GetProperty("executionStatus").GetString() == "not-run"));
 }
 
 static void ReportKeepsG1Open()

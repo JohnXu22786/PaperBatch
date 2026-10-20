@@ -47,6 +47,13 @@ internal static class PdfiumSmoke
         })
         .ToArray();
 
+    public static object CreateBlockedFormFixture(string reason, IReadOnlySet<string> exports, IReadOnlyDictionary<string, string>? executionStatuses = null) => new
+    {
+        status = "blocked",
+        reason,
+        apiResults = CreateFormExportResults(exports, executionStatuses)
+    };
+
     private static object[] BuildApiExportResults(IReadOnlySet<string> exports, IReadOnlyDictionary<string, string>? executionStatuses = null, bool exportsChecked = true) => CompositionExports.Concat(FormExports).Distinct(StringComparer.Ordinal)
         .Select(name => (object)new
         {
@@ -210,10 +217,12 @@ internal static class PdfiumSmoke
             }
             else
             {
-                formFixtureStarted = true;
-                SaveCheckpoint();
-                form = RunFormFixture(library, exportNames, formExecutionStatuses, SaveCheckpoint);
                 formStatus = "blocked";
+                form = CreateBlockedFormFixture(
+                    "The bounded form fixture is not run because prior hosted Windows attempts against this exact binary raised a repeatable native access violation in the form API path. Individual exports are recorded, and all form API calls remain not-run.",
+                    exportNames,
+                    formExecutionStatuses);
+                SaveCheckpoint();
             }
 
             status = formStatus == "verified" ? "verified" : "blocked";
