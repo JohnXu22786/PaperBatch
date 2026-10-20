@@ -6,6 +6,7 @@ foreach (var (name, run) in new (string Name, Action Run)[]
     ("synthetic PDF fixtures are deterministic", FixturesAreDeterministic),
     ("composition fixture has two distinct render targets", CompositionFixtureHasDistinctTargets),
     ("form fixture identifies one bounded text widget", FormFixtureIsBounded),
+    ("AcroForm host interface initializes stable callback slots", PdfiumSmoke.SelfTestFormFillInfoLayout),
     ("proof report cannot imply product pinning or close G1", ReportKeepsG1Open)
 })
 {

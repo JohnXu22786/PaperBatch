@@ -33,6 +33,27 @@ internal static class PdfiumSmoke
         "FPDFPage_GetAnnotCount", "FPDFPage_GetAnnot", "FPDFAnnot_GetSubtype", "FPDFPage_CloseAnnot"
     ];
 
+    public static void SelfTestFormFillInfoLayout()
+    {
+        var callbacks = FormFillCallbacks.Create(new IntPtr(1), new IntPtr(2));
+        var info = callbacks.AllocateInfo();
+        try
+        {
+            if (Marshal.ReadInt32(info) != 1) throw new InvalidOperationException("Form fill interface version was not set to 1.");
+            var callbackBase = IntPtr.Size == 8 ? 8 : 4;
+            for (var index = 0; index < 15; index++)
+            {
+                if (Marshal.ReadIntPtr(info, callbackBase + index * IntPtr.Size) == IntPtr.Zero)
+                    throw new InvalidOperationException($"Stable form fill callback slot {index} was not initialized.");
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(info);
+            callbacks.KeepAlive();
+        }
+    }
+
     public static string CreateUnavailableReport(string reason, string expectedSha256) => JsonSerializer.Serialize(new
     {
         schemaVersion = "1.0",
@@ -306,17 +327,8 @@ internal static class PdfiumSmoke
                     finally { api.PageCloseAnnot(page, annotation); }
                     if (subtype != 20) throw new InvalidDataException($"Expected widget annotation subtype 20, got {subtype}.");
 
-                    var invalidator = new InvalidateCallback((_, _, _, _, _, _) => { });
-                    var info = new FormFillInfoV1
-                    {
-                        Version = 1,
-                        Release = IntPtr.Zero,
-                        Invalidate = Marshal.GetFunctionPointerForDelegate(invalidator),
-                        Reserved = new IntPtr[96]
-                    };
-                    var infoSize = Marshal.SizeOf<FormFillInfoV1>();
-                    var infoPointer = Marshal.AllocHGlobal(infoSize);
-                    Marshal.StructureToPtr(info, infoPointer, false);
+                    var callbacks = FormFillCallbacks.Create(document, page);
+                    var infoPointer = callbacks.AllocateInfo();
                     try
                     {
                         var form = api.InitFormFillEnvironment(document, infoPointer);
@@ -340,12 +352,11 @@ internal static class PdfiumSmoke
                         {
                             api.FormOnBeforeClosePage(page, form);
                             api.ExitFormFillEnvironment(form);
-                            GC.KeepAlive(invalidator);
+                            callbacks.KeepAlive();
                         }
                     }
                     finally
                     {
-                        Marshal.DestroyStructure<FormFillInfoV1>(infoPointer);
                         Marshal.FreeHGlobal(infoPointer);
                     }
                 }
@@ -537,13 +548,73 @@ internal static class PdfiumSmoke
     [StructLayout(LayoutKind.Sequential)]
     private struct FileWrite { public int Version; public IntPtr WriteBlock; }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct FormFillInfoV1
+    private sealed class FormFillCallbacks
     {
-        public int Version;
-        public IntPtr Release;
-        public IntPtr Invalidate;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 96)] public IntPtr[] Reserved;
+        private readonly IntPtr[] _callbacks;
+        private readonly Delegate[] _roots;
+
+        private FormFillCallbacks(IntPtr[] callbacks, Delegate[] roots)
+        {
+            _callbacks = callbacks;
+            _roots = roots;
+        }
+
+        public static FormFillCallbacks Create(IntPtr document, IntPtr page)
+        {
+            var callbacks = new IntPtr[96];
+            var roots = new Delegate[]
+            {
+                new ReleaseCallback(_ => { }),
+                new InvalidateCallback((_, _, _, _, _, _) => { }),
+                new InvalidateCallback((_, _, _, _, _, _) => { }),
+                new CursorCallback((_, _) => { }),
+                new SetTimerCallback((_, _, _) => 0),
+                new KillTimerCallback((_, _) => { }),
+                new GetLocalTimeCallback(_ => new PdfiumSystemTime { Year = 2026, Month = 10, Day = 20 }),
+                new ReleaseCallback(_ => { }),
+                new GetPageCallback((_, requestedDocument, index) => requestedDocument == document && index == 0 ? page : IntPtr.Zero),
+                new GetCurrentPageCallback((_, requestedDocument) => requestedDocument == document ? page : IntPtr.Zero),
+                new GetRotationCallback((_, _) => 0),
+                new PointerActionCallback((_, _) => { }),
+                new TextFieldFocusCallback((_, _, _, _) => { }),
+                new PointerActionCallback((_, _) => { }),
+                new GoToActionCallback((_, _, _, _, _) => { })
+            };
+
+            for (var index = 0; index < roots.Length; index++)
+            {
+                callbacks[index] = Marshal.GetFunctionPointerForDelegate(roots[index]);
+            }
+            return new FormFillCallbacks(callbacks, roots);
+        }
+
+        public IntPtr AllocateInfo()
+        {
+            var size = IntPtr.Size * (_callbacks.Length + 1);
+            var pointer = Marshal.AllocHGlobal(size);
+            Marshal.WriteInt32(pointer, 1);
+            var callbackBase = IntPtr.Size == 8 ? 8 : 4;
+            for (var index = 0; index < _callbacks.Length; index++)
+            {
+                Marshal.WriteIntPtr(pointer, callbackBase + index * IntPtr.Size, _callbacks[index]);
+            }
+            return pointer;
+        }
+
+        public void KeepAlive() => GC.KeepAlive(_roots);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PdfiumSystemTime
+    {
+        public ushort Year;
+        public ushort Month;
+        public ushort DayOfWeek;
+        public ushort Day;
+        public ushort Hour;
+        public ushort Minute;
+        public ushort Second;
+        public ushort Milliseconds;
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void InitLibraryDelegate();
@@ -566,6 +637,17 @@ internal static class PdfiumSmoke
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void ExitFormFillEnvironmentDelegate(IntPtr form);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void FormPageDelegate(IntPtr page, IntPtr form);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int HasFormFieldAtPointDelegate(IntPtr form, IntPtr page, double x, double y);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void ReleaseCallback(IntPtr info);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void CursorCallback(IntPtr info, int cursorType);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int SetTimerCallback(IntPtr info, int interval, IntPtr timerCallback);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void KillTimerCallback(IntPtr info, int timerId);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate PdfiumSystemTime GetLocalTimeCallback(IntPtr info);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr GetPageCallback(IntPtr info, IntPtr document, int pageIndex);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr GetCurrentPageCallback(IntPtr info, IntPtr document);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int GetRotationCallback(IntPtr info, IntPtr page);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void PointerActionCallback(IntPtr info, IntPtr value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void TextFieldFocusCallback(IntPtr info, IntPtr value, uint length, int focused);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void GoToActionCallback(IntPtr info, int pageIndex, int zoomMode, IntPtr positions, int count);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int PageGetAnnotCountDelegate(IntPtr page);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr PageGetAnnotDelegate(IntPtr page, int index);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int AnnotGetSubtypeDelegate(IntPtr annotation);
