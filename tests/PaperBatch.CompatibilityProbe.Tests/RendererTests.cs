@@ -3,6 +3,7 @@ using PaperBatch.Core.Rendering;
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Security.AccessControl;
+using System.Runtime.Versioning;
 using System.Text;
 
 internal static class RendererTests
@@ -106,12 +107,7 @@ internal static class RendererTests
         try
         {
             _ = new RenderArtifactStore(root);
-            var security = new DirectoryInfo(root).GetAccessControl(AccessControlSections.Access);
-            Assert.True(security.AreAccessRulesProtected);
-            var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(System.Security.Principal.SecurityIdentifier));
-            Assert.Equal(1, rules.Count);
-            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
-            Assert.Equal(identity.User?.Value, ((System.Security.Principal.SecurityIdentifier)rules[0].IdentityReference).Value);
+            AssertOwnerOnlyAcl(root);
         }
         finally
         {
@@ -136,16 +132,17 @@ internal static class RendererTests
         }
     }
 
+    [SupportedOSPlatform("windows")]
     private static void AssertOwnerOnlyAcl(string directory)
     {
         var security = new DirectoryInfo(directory).GetAccessControl(AccessControlSections.Access);
         Assert.True(security.AreAccessRulesProtected);
         var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true,
             typeof(System.Security.Principal.SecurityIdentifier));
-        Assert.Equal(1, rules.Count);
+        if (rules.Count != 1) throw new InvalidOperationException($"Expected one explicit owner ACL rule, got {rules.Count}.");
         using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
-        Assert.Equal(identity.User?.Value,
-            ((System.Security.Principal.SecurityIdentifier)rules[0].IdentityReference).Value);
+        var userSid = identity.User ?? throw new InvalidOperationException("The current Windows user SID could not be resolved.");
+        Assert.Equal(userSid.Value, ((System.Security.Principal.SecurityIdentifier)rules[0].IdentityReference).Value);
     }
 
     public static void ArtifactStoreRejectsNonPdfInput()

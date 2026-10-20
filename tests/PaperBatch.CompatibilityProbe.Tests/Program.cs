@@ -1946,6 +1946,14 @@ static class Assert
         }
     }
 
+    public static void False(bool value)
+    {
+        if (value)
+        {
+            throw new InvalidOperationException("Expected false.");
+        }
+    }
+
     public static void Equal<T>(T expected, T actual)
     {
         if (!EqualityComparer<T>.Default.Equals(expected, actual))
