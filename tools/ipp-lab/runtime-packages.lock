@@ -1,0 +1,14 @@
+libexpat1:amd64=2.6.1-2ubuntu0.6
+libpython3-stdlib:amd64=3.12.3-0ubuntu2.1
+libpython3.12-minimal:amd64=3.12.3-1ubuntu0.17
+libpython3.12-stdlib:amd64=3.12.3-1ubuntu0.17
+libreadline8t64:amd64=8.2-4build1
+libsqlite3-0:amd64=3.45.1-1ubuntu2.8
+media-types=10.1.0
+netbase=6.4
+python3-minimal=3.12.3-0ubuntu2.1
+python3.12-minimal=3.12.3-1ubuntu0.17
+python3.12=3.12.3-1ubuntu0.17
+python3=3.12.3-0ubuntu2.1
+readline-common=8.2-4build1
+tzdata=2026e-0ubuntu0.24.04.1

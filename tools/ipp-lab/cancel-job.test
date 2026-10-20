@@ -1,0 +1,15 @@
+TRANSFER length
+
+{
+  NAME "Cancel pending synthetic job"
+  OPERATION Cancel-Job
+
+  GROUP operation-attributes-tag
+  ATTR charset attributes-charset utf-8
+  ATTR naturalLanguage attributes-natural-language en
+  ATTR uri printer-uri $printer_uri
+  ATTR integer job-id $job_id
+  ATTR name requesting-user-name paperbatch-lab
+
+  STATUS successful-ok
+}
