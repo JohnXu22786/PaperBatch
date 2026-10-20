@@ -638,7 +638,7 @@ public sealed class SourceSnapshotCache
 
             if (OperatingSystem.IsWindows())
             {
-                SetPrivateWindowsPermissions(_rootPath);
+                ApplyPrivateWindowsPermissions(_rootPath);
             }
             else
             {
@@ -715,7 +715,7 @@ public sealed class SourceSnapshotCache
     }
 
     [SupportedOSPlatform("windows")]
-    private static void SetPrivateWindowsPermissions(string directory)
+    internal static void ApplyPrivateWindowsPermissions(string directory)
     {
         using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
         var sid = identity.User?.Value;
