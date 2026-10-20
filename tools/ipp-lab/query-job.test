@@ -1,0 +1,19 @@
+TRANSFER length
+
+{
+  NAME "Query synthetic job"
+  OPERATION Get-Job-Attributes
+
+  GROUP operation-attributes-tag
+  ATTR charset attributes-charset utf-8
+  ATTR naturalLanguage attributes-natural-language en
+  ATTR uri printer-uri $printer_uri
+  ATTR integer job-id $job_id
+  ATTR name requesting-user-name paperbatch-lab
+  ATTR keyword requested-attributes job-id,job-name,job-state
+
+  STATUS successful-ok
+  EXPECT job-id OF-TYPE integer WITH-VALUE $job_id
+  DISPLAY job-id
+  DISPLAY job-state
+}

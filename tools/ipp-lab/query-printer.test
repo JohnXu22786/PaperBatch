@@ -1,0 +1,17 @@
+TRANSFER length
+
+{
+  NAME "Query synthetic IPP printer"
+  OPERATION Get-Printer-Attributes
+
+  GROUP operation-attributes-tag
+  ATTR charset attributes-charset utf-8
+  ATTR naturalLanguage attributes-natural-language en
+  ATTR uri printer-uri $printer_uri
+  ATTR name requesting-user-name paperbatch-lab
+  ATTR keyword requested-attributes printer-name,printer-state,printer-uri-supported
+
+  STATUS successful-ok
+  EXPECT printer-name OF-TYPE name
+  EXPECT printer-uri-supported OF-TYPE uri
+}
