@@ -31,6 +31,14 @@ $formApiNames = @(
     'FORM_OnAfterLoadPage', 'FORM_OnBeforeClosePage', 'FPDFPage_HasFormFieldAtPoint',
     'FPDFPage_GetAnnotCount', 'FPDFPage_GetAnnot', 'FPDFAnnot_GetSubtype', 'FPDFPage_CloseAnnot'
 )
+$pageEditApiNames = @(
+    'FPDF_InitLibrary', 'FPDF_DestroyLibrary', 'FPDF_LoadMemDocument', 'FPDF_CloseDocument', 'FPDF_GetPageCount',
+    'FPDFPage_New', 'FPDFPage_Delete', 'FPDFPage_CountObjects', 'FPDFPage_GetObject', 'FPDFPageObj_GetType',
+    'FPDFPage_RemoveObject', 'FPDFPage_InsertObject', 'FPDFPageObj_Transform', 'FPDFPage_GenerateContent',
+    'FPDFPageObj_Destroy', 'FPDF_SaveAsCopy', 'FPDF_LoadPage', 'FPDF_ClosePage', 'FPDF_GetPageWidthF',
+    'FPDF_GetPageHeightF', 'FPDFBitmap_Create', 'FPDFBitmap_FillRect', 'FPDF_RenderPageBitmap',
+    'FPDFBitmap_GetBuffer', 'FPDFBitmap_GetStride', 'FPDFBitmap_Destroy'
+)
 
 New-Item -ItemType Directory -Path $proofRoot -Force | Out-Null
 
@@ -48,6 +56,13 @@ function Write-ProofReport {
     $binary = $null
     $apiExports = @()
     $composition = [ordered]@{ status = 'blocked'; reason = $FailureReason }
+    $pageEdit = [ordered]@{
+        status = 'not-run'
+        reason = $FailureReason
+        apiResults = @($pageEditApiNames | ForEach-Object {
+            [ordered]@{ name = $_; exportStatus = 'unchecked'; executionStatus = 'not-run' }
+        })
+    }
     $formFixture = [ordered]@{
         status = 'not-run'
         reason = $FailureReason
@@ -62,11 +77,15 @@ function Write-ProofReport {
         $formApiNames | ForEach-Object {
             [ordered]@{ name = $_; exportStatus = 'unchecked'; requiredForComposition = $false; requiredForFormFixture = $true }
         }
+        $pageEditApiNames | ForEach-Object {
+            [ordered]@{ name = $_; exportStatus = 'unchecked'; requiredForComposition = $false; requiredForFormFixture = $false; requiredForPageEdit = $true }
+        }
     )
     if ($null -ne $nativeProof) {
         $binary = $nativeProof.binary
         $apiExports = $nativeProof.apiExports
         $composition = $nativeProof.composition
+        $pageEdit = $nativeProof.pageEdit
         $formFixture = $nativeProof.formFixture
     } elseif ($null -ne $nativeCheckpoint) {
         $apiExports = @($nativeCheckpoint.apiExports | ForEach-Object {
@@ -78,6 +97,14 @@ function Write-ProofReport {
         if ($composition.status -eq 'started') {
             $composition = [ordered]@{ status = 'failed'; reason = $FailureReason }
         }
+        $pageEditApiResults = @($nativeCheckpoint.pageEditApiResults | ForEach-Object {
+            if ($_.executionStatus -eq 'started') { $_.executionStatus = 'failed' }
+            $_
+        })
+        $pageEditStarted = [bool]$nativeCheckpoint.pageEditFixtureStarted
+        $pageEditStatus = if ($pageEditStarted) { 'failed' } else { 'not-run' }
+        $pageEditReason = if ($pageEditStarted) { $FailureReason } else { 'The native process terminated before the page-edit fixture began.' }
+        $pageEdit = [ordered]@{ status = $pageEditStatus; reason = $pageEditReason; apiResults = $pageEditApiResults }
         $formApiResults = @($nativeCheckpoint.formApiResults | ForEach-Object {
             if ($_.executionStatus -eq 'started') { $_.executionStatus = 'failed' }
             $_
@@ -98,6 +125,9 @@ function Write-ProofReport {
             os = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
             osArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
             processArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
+            imageOS = $env:ImageOS
+            imageVersion = $env:ImageVersion
+            powershellVersion = $PSVersionTable.PSVersion.ToString()
             githubRunId = $env:GITHUB_RUN_ID
             githubRunAttempt = $env:GITHUB_RUN_ATTEMPT
         }
@@ -120,6 +150,7 @@ function Write-ProofReport {
         binary = $binary
         apiExports = $apiExports
         composition = $composition
+        pageEdit = $pageEdit
         formFixture = $formFixture
         failure = $FailureReason
         g1 = 'open'
@@ -234,7 +265,7 @@ try {
     if ($null -eq $nativeProof -and (Test-Path -LiteralPath $checkpointPath)) { $nativeCheckpoint = Get-Content -LiteralPath $checkpointPath -Raw | ConvertFrom-Json }
     if ($null -eq $nativeProof) { throw "PDFium smoke did not write a report. $processText" }
     Write-ProofReport -Status ([string]$nativeProof.status) -FailureReason ([string]$nativeProof.failure)
-    if ($child.ExitCode -ne 0) { throw "PDFium native composition/form behavior failed (exit $($child.ExitCode)). See the uploaded report artifact." }
+    if ($child.ExitCode -ne 0) { throw "PDFium native composition/page-edit/form behavior failed (exit $($child.ExitCode)). See the uploaded report artifact." }
 }
 catch {
     $failureReason = $_.Exception.Message
@@ -248,4 +279,5 @@ catch {
     throw
 }
 
+Write-Output "PDFium proof summary: composition=$($nativeProof.composition.status); pageEdit=$($nativeProof.pageEdit.status); formFixture=$($nativeProof.formFixture.status); G1=open."
 Write-Output "Wrote scoped PDFium community proof report: $reportPath"

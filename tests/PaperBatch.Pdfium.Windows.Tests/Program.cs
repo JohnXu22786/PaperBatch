@@ -5,6 +5,8 @@ foreach (var (name, run) in new (string Name, Action Run)[]
 {
     ("synthetic PDF fixtures are deterministic", FixturesAreDeterministic),
     ("composition fixture has two distinct render targets", CompositionFixtureHasDistinctTargets),
+    ("vector page-edit fixture is deterministic with distinct objects", PageEditFixtureIsDeterministic),
+    ("page-edit API results preserve unavailable and not-run states", PageEditApiResultsPreserveStatuses),
     ("form fixture identifies one bounded text widget", FormFixtureIsBounded),
     ("missing form exports retain per-API execution status", MissingFormExportsAreReported),
     ("form API failure status survives report formatting", FormApiFailureStatusIsReported),
@@ -41,7 +43,7 @@ if (args.Length > 0 && args[0] == "smoke")
     var result = PdfiumSmoke.Run(args[2], args[4], args[8]);
     File.WriteAllText(args[6], result.Json);
     Console.WriteLine(result.Summary);
-    if (!result.CompositionPassed || result.FormStatus == "failed")
+    if (!result.CompositionPassed || result.PageEditStatus == "failed" || result.FormStatus == "failed")
     {
         return 1;
     }
@@ -62,6 +64,33 @@ static void CompositionFixtureHasDistinctTargets()
     var insert = SyntheticPdf.CreateCompositionInsert();
     Assert.Contains("1 0 0 rg", System.Text.Encoding.ASCII.GetString(source));
     Assert.Contains("0 0 1 rg", System.Text.Encoding.ASCII.GetString(insert));
+}
+
+static void PageEditFixtureIsDeterministic()
+{
+    var first = SyntheticPdf.CreateVectorPageEditFixture();
+    var second = SyntheticPdf.CreateVectorPageEditFixture();
+    Assert.BytesEqual(first, second);
+    var content = System.Text.Encoding.ASCII.GetString(first);
+    Assert.Contains("1 0 0 rg 20 30 40 50 re f", content);
+    Assert.Contains("0 0 1 rg 120 30 30 30 re f", content);
+}
+
+static void PageEditApiResultsPreserveStatuses()
+{
+    var allExports = new HashSet<string>(PdfiumSmoke.PageEditApiNames, StringComparer.Ordinal);
+    using var complete = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(
+        PdfiumSmoke.CreatePageEditExportResults(allExports)));
+    var completeRows = complete.RootElement.EnumerateArray().ToArray();
+    Assert.Equal(PdfiumSmoke.PageEditApiNames.Count, completeRows.Length);
+    Assert.True(completeRows.All(x => x.GetProperty("exportStatus").GetString() == "available"));
+    Assert.True(completeRows.All(x => x.GetProperty("executionStatus").GetString() == "not-run"));
+
+    using var missing = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(
+        PdfiumSmoke.CreatePageEditExportResults(new HashSet<string>(StringComparer.Ordinal))));
+    var newPage = missing.RootElement.EnumerateArray().Single(x => x.GetProperty("name").GetString() == "FPDFPage_New");
+    Assert.Equal("unavailable", newPage.GetProperty("exportStatus").GetString());
+    Assert.Equal("unavailable", newPage.GetProperty("executionStatus").GetString());
 }
 
 static void FormFixtureIsBounded()
@@ -131,6 +160,11 @@ static void ReportKeepsG1Open()
     Assert.True(formApis.All(x => x.GetProperty("exportStatus").GetString() == "unchecked"));
     Assert.True(formApis.All(x => x.GetProperty("executionStatus").GetString() == "not-run"));
     Assert.Equal("blocked", root.GetProperty("composition").GetProperty("status").GetString());
+    Assert.Equal("not-run", root.GetProperty("pageEdit").GetProperty("status").GetString());
+    var pageEditApis = root.GetProperty("pageEdit").GetProperty("apiResults").EnumerateArray().ToArray();
+    Assert.Equal(PdfiumSmoke.PageEditApiNames.Count, pageEditApis.Length);
+    Assert.True(pageEditApis.All(x => x.GetProperty("exportStatus").GetString() == "unchecked"));
+    Assert.True(pageEditApis.All(x => x.GetProperty("executionStatus").GetString() == "not-run"));
     Assert.Equal("not-run", root.GetProperty("formFixture").GetProperty("status").GetString());
 }
 

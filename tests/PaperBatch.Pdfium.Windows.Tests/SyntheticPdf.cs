@@ -14,6 +14,10 @@ internal static class SyntheticPdf
         content: "0 0 1 rg 40 40 100 100 re f\n",
         includeTextField: false);
 
+    public static byte[] CreateVectorPageEditFixture() => BuildPdf(
+        content: "1 0 0 rg 20 30 40 50 re f\n0 0 1 rg 120 30 30 30 re f\n",
+        includeTextField: false);
+
     public static byte[] CreateTextFieldFixture() => BuildPdf(
         content: "0.9 0.9 0.9 rg 5 5 190 190 re f\n",
         includeTextField: true);
