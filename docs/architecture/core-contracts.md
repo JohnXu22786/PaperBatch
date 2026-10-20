@@ -1,5 +1,13 @@
 # Core model, state, schema, and IPC contracts
 
+## Deterministic physical page layout
+
+`PaperBatch.Core.Layout.LayoutCompiler` turns ordered rendered page dimensions into immutable physical-face mappings. It validates source IDs, page dimensions, page ranges, copies, N-up mode, fit mode, and an output-page budget before expanding copies. Page selection and reverse order are deterministic. Copy order is explicit (`CollatedPackets` or `PerDocument`); source-page identity and copy number remain separate fields. A placement retains its source page, N-up slot, target cell rectangle and dimensions, scale, and rotation decision. Covers, separators, and duplex blanks are tagged explicitly. Segment IDs combine the effective media/printer/tray settings with their contiguous run ordinal, so nonadjacent compatible runs remain separate jobs.
+
+Duplex output maps each physical face in order and estimates sheets from the resulting faces. When `SeparateFilesOnFront` or `SeparatePacketsOnFront` is selected, an odd face boundary receives a blank back before the next front. These are logical estimates; printer-added sheets, jams, and physical output are outside this compiler. Scaling uses the selected media/sheet box and preserves proportions; `ActualSize` intentionally permits content outside that box. The layout does not claim a PDF artifact.
+
+`IPageCompositionAdapter` is the only composition seam: it receives the exact immutable page map and writes to a caller-owned stream. This unit supplies no PDFium-backed implementation because U0 found no installed, pinned runtime/ABI and did not safely submit a native GDI job. PDF serialization remains blocked on G1 evidence and the approved PDFium runtime decision; no alternate engine or binary is bundled. Preview and print must consume the same compiled map and, once available, the same prepared artifact.
+
 This note defines the shared .NET 10 contracts introduced before UI, renderer workers, or a Windows print backend. Engine versions, document formats, PDFium ABI, and printer-driver settings remain behind later versioned adapters.
 
 ## Renderer adapter ownership
