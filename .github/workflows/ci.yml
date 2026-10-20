@@ -32,7 +32,24 @@ jobs:
         run: dotnet build src/PaperBatch.CompatibilityProbe/PaperBatch.CompatibilityProbe.csproj -p:NuGetAudit=false
 
       - name: Run managed test runner
+        id: managed-test-runner
         run: dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
+
+      - name: Expose Windows managed test failure details
+        if: failure() && runner.os == 'Windows' && steps.managed-test-runner.outcome == 'failure'
+        shell: pwsh
+        run: |
+          $testLog = Join-Path $PWD 'windows-managed-test-retry.log'
+          $testOutput = & dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false 2>&1
+          $testExitCode = $LASTEXITCODE
+          $testOutput | Set-Content -Path $testLog -Encoding utf8
+          @(
+            '### Windows managed test runner diagnostic retry'
+            '```text'
+            "Exit code: $testExitCode"
+            (Get-Content -Path $testLog)
+            '```'
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
       - name: Compile Python sources
         run: python -m compileall -q tools tests
@@ -56,4 +73,5 @@ jobs:
           path: |
             windows-print-runner-evidence.json
             windows-print-probe-report.json
+            windows-managed-test-retry.log
           if-no-files-found: warn
