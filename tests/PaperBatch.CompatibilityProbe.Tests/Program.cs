@@ -66,7 +66,28 @@ var tests = new (string Name, Action Run)[]
     ("explicit PDFium paths distinguish absent from unreadable", PdfiumPathStatusDistinguishesMissingFromUnreadable),
     ("unrelated soffice candidate cannot satisfy LibreOffice evidence", UnrelatedSofficeCandidateCannotSatisfyLibreOfficeEvidence),
     ("print simulation is deterministic and labeled", PrintSimulationIsDeterministic),
-    ("Windows hosted-runner job submission is explicitly unavailable when no safe queue is approved", WindowsPrintSubmissionWithoutApprovedQueueIsUnavailable)
+    ("Windows hosted-runner job submission is explicitly unavailable when no safe queue is approved", WindowsPrintSubmissionWithoutApprovedQueueIsUnavailable),
+    ("prepared-run invariants reject invalid hashes and copy collections", CoreTests.PreparedRunInvariantsRejectInvalidHashesAndCopyCollections),
+    ("prepared-run validates renderer media type syntax", CoreTests.PreparedRunValidatesRendererMediaTypeSyntax),
+    ("run aggregation preserves uncertainty and OS completion", CoreTests.RunAggregationPreservesUncertaintyAndOsCompletion),
+    ("SQLite migrations are idempotent and preserve v1 records", CoreTests.SqliteMigrationsAreIdempotentAndPreserveV1Records),
+    ("SQLite rejects future schema versions without downgrading", CoreTests.SqliteRejectsFutureSchemaVersionsWithoutDowngrading),
+    ("SQLite rejects undefined persisted enum values", CoreTests.SqliteRejectsUndefinedPersistedEnumValues),
+    ("run creation is atomic and persists allowlisted metadata", CoreTests.RunCreationIsAtomicAndPersistsMetadataOnly),
+    ("prepared-run serialization matches golden fixture", CoreTests.PreparedRunSerializationMatchesGoldenFixture),
+    ("prepared-run JSON rejects null array entries", CoreTests.PreparedRunJsonRejectsNullArrayEntries),
+    ("distinct runs can reuse segment IDs", CoreTests.DistinctRunsCanReuseSegmentIds),
+    ("expired runs are pruned only when retention allows it", CoreTests.ExpiredRunsArePrunedOnlyWhenRetentionAllowsIt),
+    ("store initialization prunes expired runs", CoreTests.StoreInitializationPrunesExpiredRuns),
+    ("run creation idempotency replays matching requests", CoreTests.RunCreationIdempotencyReplaysMatchingRequests),
+    ("submission intent is durable and idempotent", CoreTests.SubmissionIntentIsDurableAndIdempotent),
+    ("intent and OS receipt writes roll back atomically", CoreTests.IntentAndOsReceiptWritesRollBackAtomically),
+    ("OS receipt is idempotent and not physical completion", CoreTests.OsReceiptIsIdempotentAndNotPhysicalCompletion),
+    ("unknown outcome can still record user-confirmed paper output", CoreTests.UnknownOutcomeCanStillRecordUserConfirmedPaperOutput),
+    ("recipe parser rejects invalid versions and unknown fields", CoreTests.RecipeParserRejectsInvalidVersionsAndUnknownFields),
+    ("recipe serialization matches its golden fixture", CoreTests.RecipeSerializationMatchesGoldenFixture),
+    ("IPC envelopes preserve correlation and negotiate capabilities", CoreTests.IpcEnvelopesPreserveCorrelationAndNegotiateCapabilities),
+    ("IPC rejects malformed and oversized messages", CoreTests.IpcRejectsMalformedAndOversizedMessages)
 };
 
 var failures = 0;

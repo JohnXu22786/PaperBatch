@@ -7,5 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/PaperBatch.CompatibilityProbe/PaperBatch.CompatibilityProbe.csproj" />
+    <ProjectReference Include="../../src/PaperBatch.Core/PaperBatch.Core.csproj" />
+    <None Include="Fixtures/**/*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
