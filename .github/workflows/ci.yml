@@ -72,6 +72,8 @@ jobs:
           lo_debs="$lo_root/LibreOffice_26.2.2.2_Linux_x86-64_deb/DEBS"
           sudo apt-get install --yes \
             "$lo_debs"/libobasis26.2-core_*.deb \
+            "$lo_debs"/libobasis26.2-ooofonts_*.deb \
+            "$lo_debs"/libobasis26.2-images_*.deb \
             "$lo_debs"/libobasis26.2-writer_*.deb \
             "$lo_debs"/libobasis26.2-base_*.deb \
             "$lo_debs"/libobasis26.2-en-us_*.deb \
