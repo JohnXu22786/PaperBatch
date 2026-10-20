@@ -636,7 +636,8 @@ internal static class RendererTests
     {
         if (!OperatingSystem.IsLinux()) return;
         var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-capability-{Guid.NewGuid():N}");
-        var program = Path.Combine(root, "program");
+        var install = Path.Combine(root, "install");
+        var program = Path.Combine(install, "program");
         var outside = Path.Combine(root, "outside");
         Directory.CreateDirectory(program);
         Directory.CreateDirectory(outside);

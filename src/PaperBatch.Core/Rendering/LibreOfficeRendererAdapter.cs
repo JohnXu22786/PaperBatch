@@ -37,6 +37,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
     private readonly string _enginePath;
     private readonly string _engineSha256;
     private readonly string _programDirectory;
+    private readonly string _installationDirectory;
 
     public LibreOfficeRendererAdapter(
         SourceSnapshotCache snapshots,
@@ -54,6 +55,8 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         _enginePath = Path.GetFullPath(directEnginePath);
         _engineSha256 = trustedEngineSha256.ToLowerInvariant();
         _programDirectory = Path.GetDirectoryName(_enginePath) ?? throw new ArgumentException("The direct engine must have a parent directory.", nameof(directEnginePath));
+        _installationDirectory = Directory.GetParent(_programDirectory)?.FullName ??
+            throw new ArgumentException("The direct engine must be inside a LibreOffice installation directory.", nameof(directEnginePath));
     }
 
     public ValueTask<bool> CanRenderAsync(RenderRequest request, CancellationToken cancellationToken)
@@ -210,11 +213,11 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
     private void VerifyRuntimeInstallationReadOnly()
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
-        var trustedRoot = Path.GetFullPath(_programDirectory).TrimEnd(Path.DirectorySeparatorChar);
+        var trustedRoot = Path.GetFullPath(_installationDirectory).TrimEnd(Path.DirectorySeparatorChar);
         EnsureTrustedPath(trustedRoot, trustedRoot);
         EnsureTrustedPath(_enginePath, trustedRoot);
         var checkedFiles = 0;
-        foreach (var library in Directory.EnumerateFiles(_programDirectory, "*.so*", SearchOption.AllDirectories))
+        foreach (var library in Directory.EnumerateFiles(_installationDirectory, "*.so*", SearchOption.AllDirectories))
         {
             if (++checkedFiles > 10_000) throw new IOException("The LibreOffice runtime contains too many shared-library entries.");
             EnsureTrustedPath(library, trustedRoot);
