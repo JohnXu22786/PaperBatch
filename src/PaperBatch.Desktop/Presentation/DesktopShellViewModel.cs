@@ -324,6 +324,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         var index = QueueItems.IndexOf(SelectedQueueItem!);
         var selected = SelectedQueueItem!;
         QueueItems.Move(index, index + delta);
+        (MoveQueueItemCommand as RelayCommand)?.NotifyCanExecuteChanged();
         if (_queueSource is IQueueEditingPresentationSource editable) editable.Move(selected.Id, delta);
         if (_previewSource is IPreparedArtifactPresentationSource preparedArtifacts)
             foreach (var item in QueueItems) preparedArtifacts.InvalidatePreparedRun(item.Id);

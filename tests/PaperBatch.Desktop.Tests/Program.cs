@@ -89,6 +89,8 @@ static void QueueEditsPreserveSelectionAndInvalidateRemovedPreview()
     Assert.True(preview.InvalidatedIds.Contains("a") && preview.InvalidatedIds.Contains("b") && preview.InvalidatedIds.Contains("c"));
     Assert.Equal("b", viewModel.QueueItems[0].Id);
     Assert.Equal("b", viewModel.SelectedQueueItem!.Id);
+    Assert.True(!viewModel.MoveQueueItemCommand.CanExecute(-1));
+    Assert.True(viewModel.MoveQueueItemCommand.CanExecute(1));
     viewModel.RemoveSelectedQueueItem();
     Assert.Equal(2, viewModel.QueueItems.Count);
     Assert.True(preview.InvalidatedIds.Contains("b"));
