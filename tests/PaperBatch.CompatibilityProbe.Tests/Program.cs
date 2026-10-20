@@ -7,6 +7,11 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.Win32.SafeHandles;
 using PaperBatch.CompatibilityProbe;
 
+if (args.Length == 6 && args[0] == "--source-cache-worker")
+{
+    return SourceIntakeTests.RunCrossProcessCacheWorker(args[1], args[2], args[3], args[4], args[5]);
+}
+
 var tests = new (string Name, Action Run)[]
 {
     ("simulated evidence does not close G1", SimulatedEvidenceDoesNotCloseG1),
@@ -86,7 +91,49 @@ var tests = new (string Name, Action Run)[]
     ("recipe parser rejects invalid versions and unknown fields", CoreTests.RecipeParserRejectsInvalidVersionsAndUnknownFields),
     ("recipe serialization matches its golden fixture", CoreTests.RecipeSerializationMatchesGoldenFixture),
     ("IPC envelopes preserve correlation and negotiate capabilities", CoreTests.IpcEnvelopesPreserveCorrelationAndNegotiateCapabilities),
-    ("IPC rejects malformed and oversized messages", CoreTests.IpcRejectsMalformedAndOversizedMessages)
+    ("IPC rejects malformed and oversized messages", CoreTests.IpcRejectsMalformedAndOversizedMessages),
+    ("source enumeration preserves explicit order and natural folder order", SourceIntakeTests.EnumerationPreservesOrderAndNaturalFolderOrdering),
+    ("source enumeration recurses only when requested and skips directory links", SourceIntakeTests.EnumerationRecursesOnlyWhenRequestedAndSkipsLinks),
+    ("source enumeration reports duplicate aliases and preserves intentional copies", SourceIntakeTests.DuplicateAliasesAndIntentionalCopiesRemainVisible),
+    ("source enumeration reports stable sanitized failures and cancellation", SourceIntakeTests.EnumerationReportsStableSanitizedFailuresAndCancellation),
+    ("source enumeration counts invalid explicit selections toward the entry limit", SourceIntakeTests.EnumerationCountsInvalidExplicitSelectionsTowardLimit),
+    ("source enumeration rejects device attributes", SourceIntakeTests.EnumerationRejectsDeviceAttributes),
+    ("Windows extended local paths are not treated as network paths", SourceIntakeTests.WindowsExtendedLocalPathIsNotTreatedAsNetworkPath),
+    ("source preflight recognizes supported format families", SourceIntakeTests.PreflightRecognizesSupportedFormatFamilies),
+    ("source preflight rejects mismatches malformed encryption and unsafe packages", SourceIntakeTests.PreflightRejectsMismatchMalformedEncryptionAndUnsafePackages),
+    ("source preflight rejects PNG files without IDAT payload", SourceIntakeTests.PreflightRejectsPngWithoutIdatPayload),
+    ("source preflight rejects non-finite package compression limits", SourceIntakeTests.PreflightRejectsNonFinitePackageCompressionLimits),
+    ("source preflight rejects ZIP entries without a final DEFLATE block", SourceIntakeTests.PreflightRejectsTruncatedDeflateStream),
+    ("source preflight rejects bytes after a ZIP DEFLATE stream", SourceIntakeTests.PreflightRejectsTrailingDeflateBytes),
+    ("source preflight follows incremental PDF encryption trailers", SourceIntakeTests.PreflightDetectsIncrementalPdfEncryption),
+    ("source preflight rejects repeated TIFF array tags", SourceIntakeTests.PreflightRejectsRepeatedTiffArrayTags),
+    ("source preflight bounds cumulative TIFF array work", SourceIntakeTests.PreflightBoundsCumulativeTiffArrayWork),
+    ("source preflight validates legacy Office files with DIFAT sectors", SourceIntakeTests.PreflightRecognizesLegacyOfficeWithExtendedDifat),
+    ("legacy Office family streams must be children of the root storage", SourceIntakeTests.PreflightRejectsLegacyOfficeFamilyStreamsInNestedStorage),
+    ("source preflight detects legacy Word encryption", SourceIntakeTests.PreflightDetectsEncryptedLegacyWord),
+    ("source preflight detects legacy Excel FILEPASS", SourceIntakeTests.PreflightDetectsEncryptedLegacyExcel),
+    ("source preflight requires OOXML root relationships", SourceIntakeTests.PreflightRejectsOoxmlWithoutRootRelationships),
+    ("source preflight requires OpenDocument content", SourceIntakeTests.PreflightRejectsOpenDocumentWithoutContent),
+    ("source preflight detects OpenDocument manifest encryption", SourceIntakeTests.PreflightDetectsEncryptedOpenDocumentManifest),
+    ("source preflight keeps malformed OpenDocument manifests malformed", SourceIntakeTests.PreflightRejectsMalformedOpenDocumentManifest),
+    ("source preflight bounds OpenDocument manifest reads", SourceIntakeTests.PreflightBoundsOpenDocumentManifestRead),
+    ("source preflight accepts a short legacy Office root mini stream", SourceIntakeTests.PreflightAcceptsLegacyOfficeMiniStreamBelowCutoff),
+    ("source intake isolates a legacy Office mini-sector offset", SourceIntakeTests.IntakeIsolatesLegacyOfficeMiniStreamOffsetErrors),
+    ("source snapshots hash bytes and publish path-free metadata", SourceIntakeTests.SnapshotCaptureHashesAndPublishesPathFreeMetadata),
+    ("source snapshots check the Linux runtime architecture", SourceIntakeTests.SnapshotCaptureChecksLinuxRuntimeArchitecture),
+    ("source snapshots reject device attributes at identity boundaries", SourceIntakeTests.SnapshotCaptureRejectsDeviceAttributeIdentities),
+    ("source snapshots reject source mutation during capture", SourceIntakeTests.SnapshotCaptureRejectsSourceMutation),
+    ("source snapshots fail closed without native file identity", SourceIntakeTests.SnapshotCaptureFailsClosedWithoutNativeFileIdentity),
+    ("source snapshot cancellation cleans only operation temporaries", SourceIntakeTests.SnapshotCancellationCleansOnlyOperationTemporaries),
+    ("source snapshot quota preserves retained entries and prunes only released entries", SourceIntakeTests.SnapshotQuotaAndRetentionAreSafe),
+    ("source snapshot quota recovers owned orphan temporary directories", SourceIntakeTests.SnapshotQuotaReclaimsOwnedOrphanTemporaryDirectories),
+    ("source snapshot quota recovers owned metadata temporary files", SourceIntakeTests.SnapshotQuotaReclaimsOwnedMetadataTemporaryFiles),
+    ("source snapshot quota is enforced across processes", SourceIntakeTests.SnapshotQuotaIsEnforcedAcrossProcesses),
+    ("source snapshot reads verify length and digest", SourceIntakeTests.OpenReadVerifiesSnapshotIntegrity),
+    ("source snapshot rejects paths beneath reparse-point ancestors", SourceIntakeTests.SnapshotCaptureRejectsReparsePointAncestor),
+    ("source identity failures remain isolated to one intake item", SourceIntakeTests.SnapshotIdentityFailureDoesNotAbortBatchItems),
+    ("source preflight read failures stay isolated and release snapshots", SourceIntakeTests.SnapshotPreflightReadFailureDoesNotAbortBatchItems),
+    ("source intake prepares valid snapshots while retaining per-item errors", SourceIntakeTests.IntakePreparesSnapshotsAndKeepsPerItemErrors)
 };
 
 var failures = 0;
