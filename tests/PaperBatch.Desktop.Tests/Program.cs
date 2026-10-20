@@ -13,6 +13,8 @@ var tests = new (string Name, Action Run)[]
 {
     ("selection refreshes preview, settings, and preflight from presentation sources", SelectionRefreshesPresentationSnapshots),
     ("navigation changes the active section", NavigationChangesTheActiveSection),
+    ("queue ordering and removal are actionable and clear prepared previews", QueueEditsPreserveSelectionAndInvalidateRemovedPreview),
+    ("language selection localizes desktop section labels", LanguageSelectionLocalizesSectionLabels),
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
     ("cancelled renderer batch releases every captured snapshot", CancelledRendererBatchReleasesEverySnapshot),
     ("file picker reports all skipped and mixed local selections", FilePickerClassifiesSkippedSelections),
@@ -72,6 +74,34 @@ static void SelectionRefreshesPresentationSnapshots()
     demoViewModel.SelectedQueueItem = demoViewModel.QueueItems.Single(item => item.Id == "sample-brief");
     Assert.Contains("Sample brief", demoViewModel.CurrentPreview!.Description);
     Assert.Equal(3, demoViewModel.CurrentPreview.PageCount);
+}
+
+static void QueueEditsPreserveSelectionAndInvalidateRemovedPreview()
+{
+    var queue = new FakeQueueSource([
+        new QueueItemSnapshot("a", "A.pdf", "ready", "Ready"),
+        new QueueItemSnapshot("b", "B.pdf", "ready", "Ready"),
+        new QueueItemSnapshot("c", "C.pdf", "ready", "Ready")]);
+    var preview = new FakePreparedPreviewSource();
+    var viewModel = CreateViewModel(queue, preview, new FakeSettingsSource(), new FakePreflightSource());
+    viewModel.SelectedQueueItem = viewModel.QueueItems[1];
+    viewModel.MoveSelectedQueueItem(-1);
+    Assert.True(preview.InvalidatedIds.Contains("a") && preview.InvalidatedIds.Contains("b") && preview.InvalidatedIds.Contains("c"));
+    Assert.Equal("b", viewModel.QueueItems[0].Id);
+    Assert.Equal("b", viewModel.SelectedQueueItem!.Id);
+    viewModel.RemoveSelectedQueueItem();
+    Assert.Equal(2, viewModel.QueueItems.Count);
+    Assert.True(preview.InvalidatedIds.Contains("b"));
+    Assert.Equal("a", viewModel.SelectedQueueItem!.Id);
+}
+
+static void LanguageSelectionLocalizesSectionLabels()
+{
+    var viewModel = DesktopShellViewModel.CreateProduction();
+    viewModel.SetLanguage("zh-CN");
+    Assert.Equal("队列与审核", viewModel.SectionQueueLabel);
+    Assert.Equal("历史记录", viewModel.SectionHistoryLabel);
+    Assert.Contains("不可用", viewModel.HistoryTitle);
 }
 
 static void SourceIntakeErrorsRemainVisibleAndAppend()
@@ -336,6 +366,16 @@ static DesktopShellViewModel CreateViewModel(
 sealed class FakeQueueSource(IReadOnlyList<QueueItemSnapshot> items) : IQueuePresentationSource
 {
     public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => items;
+}
+
+sealed class FakePreparedPreviewSource : IFinalPreviewPresentationSource, IPreparedArtifactPresentationSource
+{
+    public event Action<string>? PreparedArtifactChanged { add { } remove { } }
+    public List<string> InvalidatedIds { get; } = [];
+    public void RegisterPreparedRun(string queueItemId, PaperBatch.Core.Domain.PreparedRun run) { }
+    public void InvalidatePreparedRun(string queueItemId) => InvalidatedIds.Add(queueItemId);
+    public Task<PreviewSnapshot> GetPreviewAsync(string queueItemId, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new PreviewSnapshot(queueItemId, "Preview", 1, 1));
 }
 
 sealed class FakePreviewSource : IFinalPreviewPresentationSource
