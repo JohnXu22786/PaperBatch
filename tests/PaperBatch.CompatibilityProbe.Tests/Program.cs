@@ -23,7 +23,7 @@ if (args.Length == 6 && args[0] == "--source-cache-worker")
     return SourceIntakeTests.RunCrossProcessCacheWorker(args[1], args[2], args[3], args[4], args[5]);
 }
 
-var tests = new (string Name, Action Run)[]
+var tests = new List<(string Name, Action Run)>
 {
     ("simulated evidence does not close G1", SimulatedEvidenceDoesNotCloseG1),
     ("LibreOffice rejects shared operation directories", RendererTests.LibreOfficeRejectsSharedOperationDirectory),
@@ -98,6 +98,24 @@ var tests = new (string Name, Action Run)[]
     ("Windows hosted-runner job submission is explicitly unavailable when no safe queue is approved", WindowsPrintSubmissionWithoutApprovedQueueIsUnavailable),
     ("prepared-run invariants reject invalid hashes and copy collections", CoreTests.PreparedRunInvariantsRejectInvalidHashesAndCopyCollections),
     ("prepared-run validates renderer media type syntax", CoreTests.PreparedRunValidatesRendererMediaTypeSyntax),
+    ("layout rejects empty inputs and invalid ranges", LayoutTests.EmptyAndInvalidRangesAreDiagnostics),
+    ("physical output faces retain sheet dimensions", LayoutTests.PhysicalFacesExposeSheetDimensionsInsteadOfNUpCells),
+    ("PDF composition requires explicit static source verification", PdfCompositionTests.CompositionRequiresExplicitStaticSourceInspection),
+    ("PDF composition requires source content and output dimensions", PdfCompositionTests.CompositionRequiresEveryCompiledSourceAndOutputSize),
+    ("PDF composition requires explicit runtime and digest", PdfCompositionTests.CompositionRequiresAnExplicitDigestAndRuntimePath),
+    ("PDF byte difference diagnostics report structural offsets without content", PdfCompositionTests.PdfDifferenceDiagnosticsReportOffsetsWithoutPdfContent),
+    ("PDF output comparison ignores only trailer ID payload volatility", PdfCompositionTests.PdfOutputComparisonIgnoresOnlyTrailerIdPayloads),
+    ("layout N-up and fit are deterministic", LayoutTests.NUpAndFitAreDeterministicAndImmutable),
+    ("four-up cells have distinct slot rectangles", LayoutTests.FourUpUsesFourDistinctCellRectangles),
+    ("page ranges and reversal preserve source mappings", LayoutTests.RangesAndReverseOrderPreserveSelectedMapping),
+    ("mixed sheet sizes create separate contiguous segments", LayoutTests.MixedSheetSizesCreateDistinctContiguousSegments),
+    ("duplex file boundary inserts a blank back face", LayoutTests.DuplexFileBoundariesInsertBlankBackFace),
+    ("copy expansion and segment keys preserve order", LayoutTests.CopyExpansionAndSegmentsPreserveOrder),
+    ("layout enforces copy and output limits", LayoutTests.OutputLimitAndCopiesAreExplicit),
+    ("layout chooses rotation for mixed page orientation", LayoutTests.MixedOrientationUsesRotationWhenItFitsBetter),
+    ("covers and separators are explicit layout pages", LayoutTests.CoversAndSeparatorsAreExplicitLayoutPages),
+    ("duplex separators preserve the next file front side", LayoutTests.DuplexSeparatorDoesNotMoveNextFileOffFront),
+    ("per-document copies distinguish covers from file separators", LayoutTests.PerDocumentCopiesKeepCoversAndFileSeparatorsDistinct),
     ("run aggregation preserves uncertainty and OS completion", CoreTests.RunAggregationPreservesUncertaintyAndOsCompletion),
     ("SQLite migrations are idempotent and preserve v1 records", CoreTests.SqliteMigrationsAreIdempotentAndPreserveV1Records),
     ("SQLite rejects future schema versions without downgrading", CoreTests.SqliteRejectsFutureSchemaVersionsWithoutDowngrading),
@@ -161,6 +179,9 @@ var tests = new (string Name, Action Run)[]
     ("source intake prepares valid snapshots while retaining per-item errors", SourceIntakeTests.IntakePreparesSnapshotsAndKeepsPerItemErrors)
 };
 
+if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH")))
+    tests.Add(("PDFium vector composition preserves transformed N-up placement", PdfCompositionTests.NativeCompositionRendersTwoUpFixture));
+
 var failures = 0;
 foreach (var (name, run) in tests)
 {
@@ -172,7 +193,10 @@ foreach (var (name, run) in tests)
     catch (Exception exception)
     {
         failures++;
-        Console.Error.WriteLine($"FAIL {name}: {exception.Message}");
+        if (name == "PDFium vector composition preserves transformed N-up placement")
+            Console.Error.WriteLine($"FAIL {name}: {exception}");
+        else
+            Console.Error.WriteLine($"FAIL {name}: {exception.Message}");
     }
 }
 

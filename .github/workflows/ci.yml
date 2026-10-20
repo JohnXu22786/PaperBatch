@@ -43,9 +43,73 @@ jobs:
       - name: Run focused headless presentation tests
         run: dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
 
+      - name: Download and verify temporary PDFium fixture runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'pdfium-win-x64.tgz'
+          $extract = Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-test'
+          Invoke-WebRequest -Uri 'https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8111/pdfium-win-x64.tgz' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3452d11031050ec65e57f180215b57b9e6d465e3fbedafa8a77ad90885c7d23e') { throw 'Pinned PDFium archive digest mismatch.' }
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          tar -xzf $archive -C $extract
+          $dll = Get-ChildItem -Path $extract -Filter 'pdfium.dll' -File -Recurse | Select-Object -First 1
+          if ($null -eq $dll) { throw 'Pinned PDFium archive did not contain pdfium.dll.' }
+          if ((Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f') { throw 'Pinned PDFium DLL digest mismatch.' }
+          Add-Content $env:GITHUB_ENV "PAPERBATCH_PDFIUM_TEST_PATH=$($dll.FullName)"
+          Add-Content $env:GITHUB_ENV 'PAPERBATCH_PDFIUM_TEST_SHA256=a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f'
+
       - name: Run managed test runner
         id: managed-test-runner
         run: dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
+
+      - name: Verify PDFium vector composition on the pinned Windows runtime
+        id: pdfiumverify
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $rawOutputPath = Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification-raw.txt'
+          & dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false *> $rawOutputPath
+          $testExitCode = $LASTEXITCODE
+          if ($testExitCode -ne 0) {
+            $reader = [System.IO.StreamReader]::new($rawOutputPath)
+            try {
+              $buffer = [char[]]::new(4096)
+              $head = [System.Text.StringBuilder]::new()
+              $tail = [System.Text.StringBuilder]::new()
+              $totalRead = 0
+              while ($true) {
+                $chunkCount = $reader.Read($buffer, 0, $buffer.Length)
+                if ($chunkCount -eq 0) { break }
+                $totalRead += $chunkCount
+                $headLength = [Math]::Max(0, [Math]::Min(3970 - $head.Length, $chunkCount))
+                if ($headLength -gt 0) { [void]$head.Append($buffer, 0, $headLength) }
+                $tailOffset = $headLength
+                $tailLength = $chunkCount - $tailOffset
+                if ($tailLength -gt 0) {
+                  [void]$tail.Append($buffer, $tailOffset, $tailLength)
+                  if ($tail.Length -gt 12000) { $tail.Remove(0, $tail.Length - 12000) }
+                }
+              }
+              $boundedOutput = $head.ToString() + $tail.ToString()
+              if ($totalRead -gt ($head.Length + $tail.Length)) { $boundedOutput = $head.ToString() + "`n[... middle omitted ...]`n" + $tail.ToString() }
+            } finally {
+              $reader.Dispose()
+            }
+            if ($env:RUNNER_TEMP) { $boundedOutput = $boundedOutput.Replace($env:RUNNER_TEMP, '[RUNNER_TEMP]') }
+            if ($env:GITHUB_WORKSPACE) { $boundedOutput = $boundedOutput.Replace($env:GITHUB_WORKSPACE, '[WORKSPACE]') }
+            $diagnosticPath = Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification.txt'
+            Set-Content -Path $diagnosticPath -Value $boundedOutput -NoNewline
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## Pinned PDFium verification failure'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'The test runner failed. Its bounded output follows; the fixture contains only synthetic PDF content.'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```text'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $boundedOutput
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
+          }
+          exit $testExitCode
 
       - name: Run PDFium proof fixture self-tests
         run: dotnet run --project tests/PaperBatch.Pdfium.Windows.Tests/PaperBatch.Pdfium.Windows.Tests.csproj -p:NuGetAudit=false
@@ -90,6 +154,24 @@ jobs:
             windows-print-probe-report.json
             windows-managed-test-retry.log
           if-no-files-found: warn
+
+      - name: Upload bounded PDFium failure details
+        if: failure() && runner.os == 'Windows' && steps.pdfiumverify.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdfium-verification-diagnostics
+          path: ${{ runner.temp }}/paperbatch-pdfium-verification.txt
+          if-no-files-found: error
+          retention-days: 2
+
+      - name: Remove temporary PDFium test runtime
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'pdfium-win-x64.tgz')
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-test')
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification.txt')
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification-raw.txt')
 
   windows-pdfium-community-proof:
     name: Windows hosted PDFium community proof
