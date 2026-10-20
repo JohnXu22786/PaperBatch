@@ -130,7 +130,11 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             if (result.Status == OwnedProcessStatus.Cancelled)
                 return new RenderResult(RenderStatus.Cancelled, null, "LibreOffice rendering was cancelled and stopped.");
             if (result.Status != OwnedProcessStatus.Exited || result.ExitCode != 0)
+            {
+                if (Environment.GetEnvironmentVariable("PAPERBATCH_LO_DIAGNOSTICS") == "1")
+                    Console.Error.WriteLine($"LibreOffice export failed: status={result.Status}, exit={result.ExitCode}, output={result.Output}");
                 return RenderResult.Failed("LibreOffice could not convert this source format.");
+            }
             cancellationToken.ThrowIfCancellationRequested();
 
             var outputInfo = new FileInfo(pdfPath);
