@@ -56,7 +56,26 @@ jobs:
 
       - name: Verify PDFium vector composition on the pinned Windows runtime
         if: runner.os == 'Windows'
-        run: dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $testOutput = & dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false 2>&1
+          $testExitCode = $LASTEXITCODE
+          if ($testExitCode -ne 0) {
+            $boundedOutput = (($testOutput | ForEach-Object { $_.ToString() }) -join "`n")
+            if ($env:RUNNER_TEMP) { $boundedOutput = $boundedOutput.Replace($env:RUNNER_TEMP, '[RUNNER_TEMP]') }
+            if ($env:GITHUB_WORKSPACE) { $boundedOutput = $boundedOutput.Replace($env:GITHUB_WORKSPACE, '[WORKSPACE]') }
+            if ($boundedOutput.Length -gt 16000) { $boundedOutput = $boundedOutput.Substring(0, 16000) + "`n[output truncated]" }
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## Pinned PDFium verification failure'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'The test runner failed. Its bounded output follows; the fixture contains only synthetic PDF content.'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```text'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $boundedOutput
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
+          }
+          $testOutput | ForEach-Object { Write-Output $_ }
+          exit $testExitCode
 
       - name: Remove temporary PDFium test runtime
         if: always() && runner.os == 'Windows'

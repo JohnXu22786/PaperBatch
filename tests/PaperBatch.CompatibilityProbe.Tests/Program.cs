@@ -190,7 +190,10 @@ foreach (var (name, run) in tests)
     catch (Exception exception)
     {
         failures++;
-        Console.Error.WriteLine($"FAIL {name}: {exception.Message}");
+        if (name == "PDFium vector composition preserves transformed N-up placement")
+            Console.Error.WriteLine($"FAIL {name}: {exception}");
+        else
+            Console.Error.WriteLine($"FAIL {name}: {exception.Message}");
     }
 }
 
