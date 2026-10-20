@@ -68,6 +68,8 @@ internal static class RendererTests
             var unrelatedStart = new ProcessStartInfo(enginePath)
             {
                 UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 CreateNoWindow = true,
                 WorkingDirectory = programDirectory
             };
@@ -80,8 +82,10 @@ internal static class RendererTests
             unrelatedStart.ArgumentList.Add("-env:UserInstallation=" + profileUri);
             unrelatedStart.ArgumentList.Add("--accept=pipe,name=paperbatch-unrelated-" + Guid.NewGuid().ToString("N") + ";urp;StarOffice.ServiceManager");
             unrelatedProcess = Process.Start(unrelatedStart) ?? throw new InvalidOperationException("Could not start the unrelated LibreOffice fixture process.");
+            var unrelatedStdout = unrelatedProcess.StandardOutput.ReadToEndAsync();
+            var unrelatedStderr = unrelatedProcess.StandardError.ReadToEndAsync();
             Thread.Sleep(TimeSpan.FromMilliseconds(500));
-            Assert.False(unrelatedProcess.HasExited);
+            Assert.False(unrelatedProcess.HasExited, DescribeExitedProcess(unrelatedProcess, unrelatedStdout, unrelatedStderr));
 
             var existingOperations = Directory.GetDirectories(Path.GetTempPath(), "paperbatch-lo-*", SearchOption.TopDirectoryOnly)
                 .ToHashSet(StringComparer.Ordinal);
@@ -91,7 +95,7 @@ internal static class RendererTests
             Assert.Equal(1, result.Artifact?.PageCount);
             Assert.True(Directory.GetDirectories(Path.GetTempPath(), "paperbatch-lo-*", SearchOption.TopDirectoryOnly)
                 .All(existingOperations.Contains));
-            Assert.False(unrelatedProcess.HasExited);
+            Assert.False(unrelatedProcess.HasExited, DescribeExitedProcess(unrelatedProcess, unrelatedStdout, unrelatedStderr));
             Assert.True(originalBytes.SequenceEqual(File.ReadAllBytes(sourcePath)));
             using (var captured = snapshots.OpenRead(snapshot.SnapshotId))
                 Assert.Equal(snapshot.Sha256, Convert.ToHexString(SHA256.HashData(captured)).ToLowerInvariant());
@@ -120,6 +124,14 @@ internal static class RendererTests
             }
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    private static string DescribeExitedProcess(Process process, Task<string> stdout, Task<string> stderr)
+    {
+        if (!process.HasExited) return "The unrelated LibreOffice process is still running.";
+        if (!process.WaitForExit(10_000)) return "The unrelated LibreOffice process exited but its output streams did not close.";
+        return $"The unrelated LibreOffice process exited with code {process.ExitCode}. " +
+            $"stdout: {stdout.GetAwaiter().GetResult()} stderr: {stderr.GetAwaiter().GetResult()}";
     }
 
     private static string ReadLibreOfficeVersion(string enginePath, TimeSpan? timeout = null)

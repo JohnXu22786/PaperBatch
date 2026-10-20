@@ -202,7 +202,7 @@ var tests = new List<(string Name, Action Run)>
     ("source intake prepares valid snapshots while retaining per-item errors", SourceIntakeTests.IntakePreparesSnapshotsAndKeepsPerItemErrors)
 };
 
-if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH")))
+if (OperatingSystem.IsWindows() && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH")))
     tests.Add(("PDFium vector composition preserves transformed N-up placement", PdfCompositionTests.NativeCompositionRendersTwoUpFixture));
 
 if (OperatingSystem.IsLinux())
@@ -1962,6 +1962,14 @@ static class Assert
         if (value)
         {
             throw new InvalidOperationException("Expected false.");
+        }
+    }
+
+    public static void False(bool value, string message)
+    {
+        if (value)
+        {
+            throw new InvalidOperationException(message);
         }
     }
 
