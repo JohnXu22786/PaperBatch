@@ -102,6 +102,11 @@ static void LanguageSelectionLocalizesSectionLabels()
     Assert.Equal("队列与审核", viewModel.SectionQueueLabel);
     Assert.Equal("历史记录", viewModel.SectionHistoryLabel);
     Assert.Contains("不可用", viewModel.HistoryTitle);
+
+    var demo = DesktopShellViewModel.CreateDemo();
+    demo.SetLanguage("zh-CN");
+    Assert.Equal("示例运行 A", demo.HistoryEntries[0].Title);
+    Assert.Equal("示例课堂资料包", demo.Templates[0].Name);
 }
 
 static void SourceIntakeErrorsRemainVisibleAndAppend()

@@ -11,6 +11,8 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     private readonly IEffectiveSettingsPresentationSource _settingsSource;
     private readonly IFinalPreviewPresentationSource _previewSource;
     private readonly IPreflightPresentationSource _preflightSource;
+    private readonly IHistoryPresentationSource _historySource;
+    private readonly ITemplatePresentationSource _templateSource;
     private QueueItemSnapshot? _selectedQueueItem;
     private PreviewSnapshot? _currentPreview;
     private IReadOnlyList<EffectiveSettingSnapshot> _effectiveSettings = [];
@@ -46,6 +48,8 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         if (_previewSource is IPreparedArtifactPresentationSource preparedArtifacts)
             preparedArtifacts.PreparedArtifactChanged += OnPreparedArtifactChanged;
         _preflightSource = preflightSource;
+        _historySource = historySource;
+        _templateSource = templateSource;
         QueueItems = new ObservableCollection<QueueItemSnapshot>(queueSource.GetQueueItems());
         HistoryEntries = historySource.GetHistoryEntries();
         Templates = templateSource.GetTemplates();
@@ -64,9 +68,9 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     public ObservableCollection<QueueItemSnapshot> QueueItems { get; }
 
-    public IReadOnlyList<HistoryEntrySnapshot> HistoryEntries { get; }
+    public IReadOnlyList<HistoryEntrySnapshot> HistoryEntries { get; private set; }
 
-    public IReadOnlyList<TemplateSnapshot> Templates { get; }
+    public IReadOnlyList<TemplateSnapshot> Templates { get; private set; }
 
     public ICommand NavigateCommand { get; }
 
@@ -85,8 +89,43 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         var next = string.Equals(language, "zh-CN", StringComparison.OrdinalIgnoreCase) ? "zh-CN" : "en";
         if (!SetProperty(ref _language, next, nameof(LanguageIndex))) return;
         OnPropertyChanged(nameof(LanguageIndex));
+        if (IsDemoMode)
+        {
+            HistoryEntries = _historySource.GetHistoryEntries().Select(entry => entry with
+            {
+                Title = Localize(entry.Title, entry.Title switch
+                {
+                    "Sample run A" => "示例运行 A",
+                    "Sample run B" => "示例运行 B",
+                    _ => entry.Title
+                }),
+                Summary = Localize(entry.Summary, entry.Summary switch
+                {
+                    "Example history row · no pages submitted" => "示例历史记录 · 未提交页面",
+                    "Example history row · no output created" => "示例历史记录 · 未生成输出",
+                    _ => entry.Summary
+                }),
+                Status = Localize(entry.Status, entry.Status == "Example only" ? "仅供示例" : entry.Status)
+            }).ToArray();
+            Templates = _templateSource.GetTemplates().Select(template => template with
+            {
+                Name = Localize(template.Name, template.Name switch
+                {
+                    "Sample classroom packet" => "示例课堂资料包",
+                    "Sample office handout" => "示例办公讲义",
+                    _ => template.Name
+                }),
+                Summary = Localize(template.Summary, template.Summary == "Example recipe · not saved" ? "示例配方 · 未保存" : template.Summary),
+                SettingsSummary = Localize(template.SettingsSummary, template.SettingsSummary switch
+                {
+                    "A4 · one-sided · sample values" => "A4 · 单面 · 示例值",
+                    "Letter · two-sided · sample values" => "Letter · 双面 · 示例值",
+                    _ => template.SettingsSummary
+                })
+            }).ToArray();
+        }
         foreach (var property in new[] { nameof(SectionQueueLabel), nameof(SectionHistoryLabel), nameof(SectionTemplatesLabel),
-                     nameof(ActiveSectionTitle), nameof(HistoryEyebrow), nameof(HistoryTitle), nameof(HistoryDescription), nameof(TemplateEyebrow), nameof(TemplateTitle), nameof(TemplateDescription) })
+                     nameof(ActiveSectionTitle), nameof(HistoryEyebrow), nameof(HistoryTitle), nameof(HistoryDescription), nameof(HistoryEntries), nameof(TemplateEyebrow), nameof(TemplateTitle), nameof(TemplateDescription), nameof(Templates) })
             OnPropertyChanged(property);
     }
 
