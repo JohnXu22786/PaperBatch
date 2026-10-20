@@ -1957,6 +1957,14 @@ static class Assert
         }
     }
 
+    public static void True(bool value, string message)
+    {
+        if (!value)
+        {
+            throw new InvalidOperationException(message);
+        }
+    }
+
     public static void False(bool value)
     {
         if (value)

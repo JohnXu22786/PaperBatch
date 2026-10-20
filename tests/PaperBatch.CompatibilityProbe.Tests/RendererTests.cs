@@ -45,7 +45,8 @@ internal static class RendererTests
             throw new InvalidOperationException("The pinned LibreOffice CI runtime configuration is incomplete.");
         Assert.Equal(pinnedVersion, expectedVersion);
         Assert.Equal(pinnedEngineSha256, expectedHash);
-        Assert.True(ReadLibreOfficeVersion(enginePath).StartsWith(pinnedVersion, StringComparison.Ordinal));
+        Assert.True(ReadLibreOfficeVersion(enginePath).StartsWith(pinnedVersion, StringComparison.Ordinal),
+            "The verified LibreOffice executable did not report the pinned version.");
 
         var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-integration-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
@@ -90,9 +91,11 @@ internal static class RendererTests
 
             var existingOperations = Directory.GetDirectories(Path.GetTempPath(), "paperbatch-lo-*", SearchOption.TopDirectoryOnly)
                 .ToHashSet(StringComparer.Ordinal);
-            Assert.True(adapter.CanRenderAsync(request, CancellationToken.None).AsTask().GetAwaiter().GetResult());
+            Assert.True(adapter.CanRenderAsync(request, CancellationToken.None).AsTask().GetAwaiter().GetResult(),
+                "The pinned adapter did not advertise the synthetic DOCX capability.");
             var result = adapter.RenderAsync(request, CancellationToken.None).GetAwaiter().GetResult();
-            Assert.Equal(RenderStatus.Succeeded, result.Status);
+            Assert.True(result.Status == RenderStatus.Succeeded,
+                $"The pinned adapter render returned {result.Status}: {result.Error ?? "no diagnostic"}.");
             Assert.Equal(1, result.Artifact?.PageCount);
             Assert.True(Directory.GetDirectories(Path.GetTempPath(), "paperbatch-lo-*", SearchOption.TopDirectoryOnly)
                 .All(existingOperations.Contains));
