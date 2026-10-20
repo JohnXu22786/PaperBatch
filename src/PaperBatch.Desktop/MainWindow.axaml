@@ -1,0 +1,274 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:presentation="using:PaperBatch.Desktop.Presentation"
+        x:Class="PaperBatch.Desktop.MainWindow"
+        x:DataType="presentation:DesktopShellViewModel"
+        Title="PaperBatch · sample desktop shell"
+        Width="1440"
+        Height="960"
+        MinWidth="1024"
+        MinHeight="720"
+        Background="#F4F6FA">
+  <Window.Styles>
+    <Style Selector="Button.navigation">
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="Padding" Value="14,10" />
+      <Setter Property="Background" Value="#273449" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Foreground" Value="#E2E8F0" />
+    </Style>
+    <Style Selector="Button.navigation:pointerover">
+      <Setter Property="Background" Value="#36465E" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="TextBlock.eyebrow">
+      <Setter Property="FontSize" Value="10" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="#64748B" />
+    </Style>
+    <Style Selector="TextBlock.sidebar-eyebrow">
+      <Setter Property="FontSize" Value="10" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="#AFC0D5" />
+    </Style>
+  </Window.Styles>
+
+  <Grid ColumnDefinitions="244,*">
+    <Border Grid.Column="0" Background="#1E293B" Padding="18,22">
+      <DockPanel LastChildFill="True">
+        <StackPanel DockPanel.Dock="Top" Spacing="3">
+          <TextBlock Text="PaperBatch" FontSize="24" FontWeight="Bold" Foreground="White" />
+          <TextBlock Text="DOCUMENT BATCH PREPARATION" FontSize="9" FontWeight="SemiBold" Foreground="#AFC0D5" />
+          <Border Height="1" Margin="0,18,0,16" Background="#40516A" />
+          <TextBlock Text="WORKSPACE" Classes="sidebar-eyebrow" Margin="2,0,0,6" />
+
+          <Grid ColumnDefinitions="4,*" Margin="0,0,0,4">
+            <Border Grid.Column="0" Background="#7DD3FC" CornerRadius="2" IsVisible="{Binding IsQueueSection}" />
+            <Button x:Name="QueueNavigation" Grid.Column="1" Classes="navigation" Content="Queue and review"
+                    Command="{Binding NavigateCommand}" CommandParameter="Queue"
+                    AutomationProperties.Name="Open queue and review" />
+          </Grid>
+          <Grid ColumnDefinitions="4,*" Margin="0,0,0,4">
+            <Border Grid.Column="0" Background="#7DD3FC" CornerRadius="2" IsVisible="{Binding IsHistorySection}" />
+            <Button x:Name="HistoryNavigation" Grid.Column="1" Classes="navigation" Content="History"
+                    Command="{Binding NavigateCommand}" CommandParameter="History"
+                    AutomationProperties.Name="Open sample history" />
+          </Grid>
+          <Grid ColumnDefinitions="4,*">
+            <Border Grid.Column="0" Background="#7DD3FC" CornerRadius="2" IsVisible="{Binding IsTemplatesSection}" />
+            <Button x:Name="TemplatesNavigation" Grid.Column="1" Classes="navigation" Content="Templates"
+                    Command="{Binding NavigateCommand}" CommandParameter="Templates"
+                    AutomationProperties.Name="Open sample templates" />
+          </Grid>
+        </StackPanel>
+
+        <Border DockPanel.Dock="Bottom" Background="#334155" CornerRadius="12" Padding="14" Margin="0,18,0,0">
+          <StackPanel Spacing="6">
+            <TextBlock Text="DEMO MODE" FontSize="10" FontWeight="Bold" Foreground="#7DD3FC" />
+            <TextBlock Text="This shell does not open files, connect to printers, save history, or submit jobs."
+                       FontSize="12" TextWrapping="Wrap" Foreground="#E2E8F0" />
+          </StackPanel>
+        </Border>
+      </DockPanel>
+    </Border>
+
+    <Grid Grid.Column="1" RowDefinitions="Auto,Auto,*" Margin="28,24,28,28">
+      <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,18">
+        <StackPanel Spacing="3">
+          <TextBlock Text="{Binding ActiveSectionTitle}" FontSize="27" FontWeight="Bold" Foreground="#172033" />
+          <TextBlock Text="A local-first workspace preview for preparing ordered document batches."
+                     FontSize="13" Foreground="#526176" />
+        </StackPanel>
+        <Border Grid.Column="1" Background="#E8EDF4" CornerRadius="18" Padding="13,8" VerticalAlignment="Center">
+          <TextBlock Text="DESKTOP SHELL PREVIEW" FontSize="10" FontWeight="SemiBold" Foreground="#334155" />
+        </Border>
+      </Grid>
+
+      <Border x:Name="SampleDataBanner" Grid.Row="1" Background="#FFF5D6" BorderBrush="#E9C46A" BorderThickness="1"
+              CornerRadius="12" Padding="15,11" Margin="0,0,0,18"
+              AutomationProperties.Name="Sample data notice">
+        <StackPanel Orientation="Horizontal" Spacing="12">
+          <TextBlock Text="SAMPLE DATA" FontSize="11" FontWeight="Bold" Foreground="#805A00" VerticalAlignment="Center" />
+          <TextBlock Text="No files are opened, no printer is queried, and no print job can be submitted."
+                     FontSize="12" Foreground="#604A16" TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+        <Grid>
+          <StackPanel IsVisible="{Binding IsQueueSection}">
+            <Grid ColumnDefinitions="1.05*,0.95*" RowDefinitions="Auto,Auto">
+              <Border Grid.Row="0" Grid.Column="0" Background="White" BorderBrush="#E2E8F0" BorderThickness="1"
+                      CornerRadius="15" Padding="18" Margin="0,0,8,14">
+                <StackPanel Spacing="12">
+                  <Grid ColumnDefinitions="*,Auto">
+                    <StackPanel Spacing="2">
+                      <TextBlock Text="SAMPLE QUEUE" Classes="eyebrow" />
+                      <TextBlock Text="{Binding QueueItems.Count, StringFormat='{}{0} example rows'}" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
+                    </StackPanel>
+                    <Border Grid.Column="1" Background="#EEF2F7" CornerRadius="14" Padding="9,5" VerticalAlignment="Center">
+                      <TextBlock Text="NO FILES LOADED" FontSize="9" FontWeight="SemiBold" Foreground="#475569" />
+                    </Border>
+                  </Grid>
+                  <ListBox ItemsSource="{Binding QueueItems}" SelectedItem="{Binding SelectedQueueItem, Mode=TwoWay}"
+                           Background="Transparent" BorderThickness="0" Padding="0"
+                           AutomationProperties.Name="Sample document queue">
+                    <ListBox.ItemTemplate>
+                      <DataTemplate x:DataType="presentation:QueueItemSnapshot">
+                        <Border Background="#F8FAFC" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="10"
+                                Padding="12" Margin="0,3">
+                          <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Title}" FontWeight="SemiBold" Foreground="#172033" />
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding Details}" FontSize="11" Foreground="#64748B" Margin="0,4,0,0" />
+                            <TextBlock Grid.Row="0" Grid.Column="1" Grid.RowSpan="2" Text="{Binding Status}" FontSize="10"
+                                       Foreground="#475569" VerticalAlignment="Center" Margin="12,0,0,0" />
+                          </Grid>
+                        </Border>
+                      </DataTemplate>
+                    </ListBox.ItemTemplate>
+                  </ListBox>
+                  <TextBlock Text="Selecting a row updates only the sample preview and sample settings."
+                             FontSize="11" Foreground="#64748B" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
+
+              <Border Grid.Row="0" Grid.Column="1" Background="White" BorderBrush="#E2E8F0" BorderThickness="1"
+                      CornerRadius="15" Padding="18" Margin="8,0,0,14">
+                <StackPanel Spacing="12">
+                  <StackPanel Spacing="2">
+                    <TextBlock Text="FINAL PREVIEW SURFACE" Classes="eyebrow" />
+                    <TextBlock Text="Illustrative sheet face" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
+                  </StackPanel>
+                  <Border Background="#F3F5F8" CornerRadius="12" Padding="16" MinHeight="356"
+                          AutomationProperties.Name="Synthetic final preview">
+                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
+                      <Border Width="220" Height="270" Background="#FFFEFA" BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="2" Padding="22">
+                        <StackPanel Spacing="14">
+                          <TextBlock Text="SAMPLE PAGE FACE" FontSize="9" FontWeight="Bold" Foreground="#2563EB" />
+                          <TextBlock Text="Illustration only" FontSize="15" FontWeight="SemiBold" Foreground="#172033" />
+                          <Border Height="1" Background="#CBD5E1" />
+                          <Border Height="5" Background="#E2E8F0" CornerRadius="3" />
+                          <Border Height="5" Width="135" HorizontalAlignment="Left" Background="#E2E8F0" CornerRadius="3" />
+                          <Border Height="5" Background="#E2E8F0" CornerRadius="3" />
+                          <Border Height="48" Background="#EFF6FF" CornerRadius="5" />
+                          <TextBlock Text="No source text or page artwork is rendered here." FontSize="10" Foreground="#64748B"
+                                     TextWrapping="Wrap" />
+                        </StackPanel>
+                      </Border>
+                      <TextBlock Text="{Binding CurrentPreview.Description}" FontSize="11" Foreground="#526176"
+                                 TextAlignment="Center" TextWrapping="Wrap" />
+                      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="4">
+                        <TextBlock Text="Sample face" FontSize="10" Foreground="#64748B" />
+                        <TextBlock Text="{Binding CurrentPreview.PageNumber}" FontSize="10" Foreground="#64748B" />
+                        <TextBlock Text="of" FontSize="10" Foreground="#64748B" />
+                        <TextBlock Text="{Binding CurrentPreview.PageCount}" FontSize="10" Foreground="#64748B" />
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+                </StackPanel>
+              </Border>
+
+              <Border Grid.Row="1" Grid.Column="0" Background="White" BorderBrush="#E2E8F0" BorderThickness="1"
+                      CornerRadius="15" Padding="18" Margin="0,0,8,0">
+                <StackPanel Spacing="11">
+                  <StackPanel Spacing="2">
+                    <TextBlock Text="EFFECTIVE SETTINGS" Classes="eyebrow" />
+                    <TextBlock Text="Example values and reasons" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
+                  </StackPanel>
+                  <ItemsControl ItemsSource="{Binding EffectiveSettings}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="presentation:EffectiveSettingSnapshot">
+                        <Border Background="#F8FAFC" CornerRadius="9" Padding="11" Margin="0,3">
+                          <Grid ColumnDefinitions="105,*" RowDefinitions="Auto,Auto">
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Name}" FontSize="11" FontWeight="SemiBold" Foreground="#334155" />
+                            <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding Value}" FontSize="11" FontWeight="SemiBold" Foreground="#172033" />
+                            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding Explanation}" FontSize="10" Foreground="#64748B"
+                                       TextWrapping="Wrap" Margin="0,4,0,0" />
+                          </Grid>
+                        </Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                  <TextBlock Text="These examples do not describe a connected printer or a completed rules calculation."
+                             FontSize="10" Foreground="#64748B" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
+
+              <Border Grid.Row="1" Grid.Column="1" Background="White" BorderBrush="#E2E8F0" BorderThickness="1"
+                      CornerRadius="15" Padding="18" Margin="8,0,0,0">
+                <StackPanel Spacing="11">
+                  <StackPanel Spacing="2">
+                    <TextBlock Text="PREFLIGHT / STATUS" Classes="eyebrow" />
+                    <TextBlock Text="Demo checks only" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
+                  </StackPanel>
+                  <ItemsControl ItemsSource="{Binding PreflightFindings}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="presentation:PreflightFindingSnapshot">
+                        <Border Background="#F8FAFC" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="9"
+                                Padding="11" Margin="0,3">
+                          <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Title}" FontSize="11" FontWeight="SemiBold" Foreground="#334155" />
+                            <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding Status}" FontSize="10" Foreground="#9A6700"
+                                       Margin="8,0,0,0" />
+                            <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Text="{Binding Detail}" FontSize="10"
+                                       Foreground="#64748B" TextWrapping="Wrap" Margin="0,4,0,0" />
+                          </Grid>
+                        </Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+              </Border>
+            </Grid>
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding IsHistorySection}" Spacing="14">
+            <StackPanel Spacing="3">
+              <TextBlock Text="HISTORY · SAMPLE VIEW" Classes="eyebrow" />
+              <TextBlock Text="Example activity" FontSize="21" FontWeight="SemiBold" Foreground="#172033" />
+              <TextBlock Text="These rows are illustrative. This shell does not save completed runs or print records."
+                         FontSize="12" Foreground="#526176" TextWrapping="Wrap" />
+            </StackPanel>
+            <ItemsControl ItemsSource="{Binding HistoryEntries}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="presentation:HistoryEntrySnapshot">
+                  <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="12" Padding="17" Margin="0,4">
+                    <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                      <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Title}" FontSize="14" FontWeight="SemiBold" Foreground="#172033" />
+                      <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding Summary}" FontSize="11" Foreground="#64748B" Margin="0,4,0,0" />
+                      <TextBlock Grid.Row="0" Grid.Column="1" Grid.RowSpan="2" Text="{Binding Status}" FontSize="10"
+                                 Foreground="#475569" VerticalAlignment="Center" Margin="12,0,0,0" />
+                    </Grid>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding IsTemplatesSection}" Spacing="14">
+            <StackPanel Spacing="3">
+              <TextBlock Text="TEMPLATES · SAMPLE VIEW" Classes="eyebrow" />
+              <TextBlock Text="Example recipes" FontSize="21" FontWeight="SemiBold" Foreground="#172033" />
+              <TextBlock Text="These sample cards are not saved recipes and do not change application settings."
+                         FontSize="12" Foreground="#526176" TextWrapping="Wrap" />
+            </StackPanel>
+            <ItemsControl ItemsSource="{Binding Templates}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="presentation:TemplateSnapshot">
+                  <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="12" Padding="17" Margin="0,4">
+                    <StackPanel Spacing="5">
+                      <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#172033" />
+                      <TextBlock Text="{Binding Summary}" FontSize="11" Foreground="#64748B" />
+                      <TextBlock Text="{Binding SettingsSummary}" FontSize="11" Foreground="#334155" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+        </Grid>
+      </ScrollViewer>
+    </Grid>
+  </Grid>
+</Window>

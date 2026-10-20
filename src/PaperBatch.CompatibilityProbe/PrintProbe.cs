@@ -105,7 +105,7 @@ internal static class WindowsPrintProbe
                 queues,
                 drivers,
                 RouteEvidence(queues),
-                ProbeEvidence.NotRun(EvidenceSource.Native, "GDI test-job submission and job-ID correlation", "API exports do not prove a real job ID; no test page or printer job was submitted."),
+                NoSafeQueueSubmissionEvidence(),
                 ProbeEvidence.NotRun(EvidenceSource.Native, "physical-device output confirmation", "No scoped test page was submitted and no operator-verified paper output was recorded."));
         }
         catch (SecurityException exception)
@@ -118,6 +118,11 @@ internal static class WindowsPrintProbe
             NativeLibrary.Free(library);
         }
     }
+
+    internal static ProbeEvidence NoSafeQueueSubmissionEvidence() => ProbeEvidence.Unavailable(
+        EvidenceSource.Native,
+        "GDI test-job submission and job-ID correlation",
+        "No test page was submitted: this probe has no verified noninteractive, local-only virtual queue policy. Windows built-in file-output queues can show a save dialog, and other queue routes may contact an external printer or service.");
 
     internal static ProbeEvidence InspectWinspoolPath(
         string path,
