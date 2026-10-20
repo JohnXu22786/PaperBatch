@@ -7,6 +7,17 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.Win32.SafeHandles;
 using PaperBatch.CompatibilityProbe;
 
+if (args.Length >= 2 && args[0] == "--renderer-worker-child")
+{
+    if (args[1] == "exit") return 0;
+    if (args[1] == "hang")
+    {
+        if (args.Length == 3) File.WriteAllText(args[2], Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Thread.Sleep(Timeout.Infinite);
+        return 0;
+    }
+}
+
 if (args.Length == 6 && args[0] == "--source-cache-worker")
 {
     return SourceIntakeTests.RunCrossProcessCacheWorker(args[1], args[2], args[3], args[4], args[5]);
@@ -15,6 +26,19 @@ if (args.Length == 6 && args[0] == "--source-cache-worker")
 var tests = new (string Name, Action Run)[]
 {
     ("simulated evidence does not close G1", SimulatedEvidenceDoesNotCloseG1),
+    ("LibreOffice rejects shared operation directories", RendererTests.LibreOfficeRejectsSharedOperationDirectory),
+    ("LibreOffice rejects replaceable operation ancestors", RendererTests.LibreOfficeRejectsReplaceableOperationPathAncestors),
+    ("LibreOffice profile is private and disables macros and link updates", RendererTests.LibreOfficeUsesPrivateMacroRestrictedProfile),
+    ("owned process worker observes child exit", RendererTests.OwnedProcessWorkerWaitsForSuccessfulChild),
+    ("owned process worker terminates child on timeout", RendererTests.OwnedProcessWorkerKillsOnlyItsChildOnTimeout),
+    ("owned process worker terminates child on cancellation", RendererTests.OwnedProcessWorkerKillsItsChildOnCancellation),
+    ("renderer failure does not silently fall back", RendererTests.UnsupportedFormatIsReportedWithoutFallback),
+    ("missing renderer is explicitly unsupported", RendererTests.MissingAdapterIsExplicitlyUnsupported),
+    ("renderer capability checks are included in the deadline", RendererTests.CapabilityCheckIsInsideTheRenderDeadline),
+    ("throwing cancellation callback does not hide timeout", RendererTests.ThrowingCancellationCallbacksDoNotHideTimeout),
+    ("renderer timeout has a distinct result", RendererTests.AdapterTimeoutIsDistinguished),
+    ("cancelled render is not launched", RendererTests.CancelledRequestDoesNotLaunchAnAdapter),
+    ("renderer capability failure does not try another adapter", RendererTests.CapabilityFailureStopsWithoutTryingAnotherAdapter),
     ("physical device output is required for G1", PhysicalDeviceOutputIsRequiredForG1),
     ("suite-specific evidence is required", SuiteSpecificEvidenceIsRequired),
     ("queue and driver inventory does not verify a print route", QueueAndDriverInventoryDoesNotVerifyPrintRoute),
