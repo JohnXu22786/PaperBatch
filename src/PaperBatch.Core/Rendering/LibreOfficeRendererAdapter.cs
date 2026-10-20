@@ -252,7 +252,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
                     metadata.UserId != uid && (metadata.Mode & sticky) != 0;
                 if (((metadata.Mode & userWrite) != 0 && metadata.UserId == uid) ||
                     (writableByOthers && !protectedStickyParent))
-                    throw new UnauthorizedAccessException($"The LibreOffice executable or shared-library path '{current.FullName}' is writable by the current user or another untrusted account (mode {metadata.Mode:o}, owner UID {metadata.UserId}).");
+                    throw new UnauthorizedAccessException($"The LibreOffice executable or shared-library path '{current.FullName}' is writable by the current user or another untrusted account (mode 0x{Convert.ToInt32(metadata.Mode):X}, owner UID {metadata.UserId}).");
             }
             // The installation root can itself be protected while an ancestor
             // remains replaceable. Walk to the filesystem root as well. A
