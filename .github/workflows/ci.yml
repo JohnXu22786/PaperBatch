@@ -55,6 +55,7 @@ jobs:
           Add-Content $env:GITHUB_ENV 'PAPERBATCH_PDFIUM_TEST_SHA256=a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f'
 
       - name: Verify PDFium vector composition on the pinned Windows runtime
+        id: pdfiumverify
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -66,6 +67,8 @@ jobs:
             if ($env:RUNNER_TEMP) { $boundedOutput = $boundedOutput.Replace($env:RUNNER_TEMP, '[RUNNER_TEMP]') }
             if ($env:GITHUB_WORKSPACE) { $boundedOutput = $boundedOutput.Replace($env:GITHUB_WORKSPACE, '[WORKSPACE]') }
             if ($boundedOutput.Length -gt 16000) { $boundedOutput = $boundedOutput.Substring(0, 16000) + "`n[output truncated]" }
+            $diagnosticPath = Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification.txt'
+            Set-Content -Path $diagnosticPath -Value $boundedOutput -NoNewline
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## Pinned PDFium verification failure'
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ''
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'The test runner failed. Its bounded output follows; the fixture contains only synthetic PDF content.'
@@ -77,12 +80,22 @@ jobs:
           $testOutput | ForEach-Object { Write-Output $_ }
           exit $testExitCode
 
+      - name: Upload bounded PDFium failure details
+        if: failure() && runner.os == 'Windows' && steps.pdfiumverify.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdfium-verification-diagnostics
+          path: ${{ runner.temp }}/paperbatch-pdfium-verification.txt
+          if-no-files-found: error
+          retention-days: 2
+
       - name: Remove temporary PDFium test runtime
         if: always() && runner.os == 'Windows'
         shell: pwsh
         run: |
           Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'pdfium-win-x64.tgz')
           Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-test')
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification.txt')
 
       - name: Compile Python sources
         run: python -m compileall -q tools tests
