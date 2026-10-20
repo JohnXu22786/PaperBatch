@@ -565,7 +565,7 @@ internal static class PdfiumSmoke
                         try
                         {
                             inserted = api.PageInsertObject(targetPage, redObject);
-                            executionStatuses["FPDFPage_InsertObject"] = "verified";
+                            executionStatuses["FPDFPage_InsertObject"] = inserted != 0 ? "verified" : "failed";
                             checkpoint();
                         }
                         catch
@@ -576,8 +576,6 @@ internal static class PdfiumSmoke
                         }
                         if (inserted == 0)
                         {
-                            executionStatuses["FPDFPage_InsertObject"] = "failed";
-                            checkpoint();
                             throw new InvalidOperationException("FPDFPage_InsertObject failed to transfer the detached object to the target page.");
                         }
                     }
