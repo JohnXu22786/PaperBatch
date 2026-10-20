@@ -552,6 +552,7 @@ internal static class RendererTests
         Directory.CreateDirectory(program);
         var engine = Path.Combine(program, "soffice.bin");
         File.WriteAllText(engine, "pinned executable fixture");
+        CreateFixtureLauncher(program);
         File.WriteAllText(Path.Combine(program, "libfixture.so"), "runtime library fixture");
         try
         {
@@ -575,6 +576,7 @@ internal static class RendererTests
         var engine = Path.Combine(program, "soffice.bin");
         var library = Path.Combine(program, "libfixture.so");
         File.WriteAllText(engine, "pinned executable fixture");
+        CreateFixtureLauncher(program);
         File.WriteAllText(library, "runtime library fixture");
         try
         {
@@ -608,6 +610,7 @@ internal static class RendererTests
         Directory.CreateDirectory(program);
         var engine = Path.Combine(program, "soffice.bin");
         File.WriteAllText(engine, "pinned executable fixture");
+        CreateFixtureLauncher(program);
         File.WriteAllText(Path.Combine(program, "libfixture.so"), "runtime library fixture");
         try
         {
@@ -648,6 +651,7 @@ internal static class RendererTests
         var link = Path.Combine(program, "libfixture.so");
         try
         {
+            CreateFixtureLauncher(program);
             File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserExecute);
             File.SetUnixFileMode(externalLibrary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
             File.SetUnixFileMode(outside, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -675,6 +679,14 @@ internal static class RendererTests
         var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
         var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(engine))).ToLowerInvariant();
         return new LibreOfficeRendererAdapter(snapshots, artifacts, new UnusedPdfInspector(), engine, digest);
+    }
+
+    private static void CreateFixtureLauncher(string program)
+    {
+        var launcher = Path.Combine(program, "soffice");
+        File.WriteAllText(launcher, "#!/bin/sh\nexit 0\n");
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(launcher, UnixFileMode.UserRead | UnixFileMode.UserExecute);
     }
 
     private sealed class UnusedPdfInspector : IPdfArtifactInspector
