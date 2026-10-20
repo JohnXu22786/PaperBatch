@@ -54,7 +54,16 @@ try {
     $osError = $_.Exception.Message
 }
 $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-$sessionName = if ($sessionId -eq 0) { 'service-session' } else { 'hosted-session' }
+$sessionName = [string]$env:SESSIONNAME
+$sessionType = 'Unavailable'
+$sessionStatus = 'Unavailable'
+if ($sessionName -eq 'Services') {
+    $sessionType = 'service'
+    $sessionStatus = 'Verified'
+} elseif ($sessionName -eq 'Console' -or $sessionName -match '^(RDP|ICA)-Tcp#\d+$') {
+    $sessionType = 'interactive'
+    $sessionStatus = 'Verified'
+}
 $evidence = [ordered]@{
     schemaVersion = '1.0'
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
@@ -64,10 +73,14 @@ $evidence = [ordered]@{
         version = if ($null -ne $os) { $os.Version } else { $null }
         build = if ($null -ne $os) { $os.BuildNumber } else { $null }
         osError = $osError
-        architecture = $env:PROCESSOR_ARCHITECTURE
+        osArchitecture = if ($null -ne $os) { $os.OSArchitecture } else { $null }
+        runnerArchitecture = if ([string]::IsNullOrWhiteSpace($env:RUNNER_ARCH)) { $null } else { $env:RUNNER_ARCH }
+        processArchitecture = $env:PROCESSOR_ARCHITECTURE
         powershellVersion = $PSVersionTable.PSVersion.ToString()
+        sessionStatus = $sessionStatus
         processSessionId = $sessionId
-        sessionType = $sessionName
+        sessionName = if ([string]::IsNullOrWhiteSpace($sessionName)) { $null } else { $sessionName }
+        sessionType = $sessionType
     }
     spooler = [ordered]@{
         status = $serviceStatus

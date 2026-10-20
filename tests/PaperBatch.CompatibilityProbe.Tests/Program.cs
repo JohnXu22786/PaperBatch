@@ -237,7 +237,7 @@ static void MissingNativePlatformEvidenceIsUnavailable()
     }
     else
     {
-        Assert.Equal(EvidenceStatus.NotRun, printing.GdiJobId.Status);
+        Assert.Equal(EvidenceStatus.Unavailable, printing.GdiJobId.Status);
         Assert.Equal(EvidenceStatus.NotRun, printing.PhysicalDeviceOutput.Status);
     }
 }
