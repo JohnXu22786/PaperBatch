@@ -106,8 +106,8 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             await using (var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read,
                 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
             {
-                var preflight = SourceFormatPreflight.Inspect(source, extension);
-                if (preflight.Status != SourcePreflightStatus.Ready)
+                var sourcePreflight = SourceFormatPreflight.Inspect(source, extension);
+                if (sourcePreflight.Status != SourcePreflightStatus.Ready)
                     return RenderResult.Failed("The source snapshot failed structural or encryption safety checks.");
             }
             var version = await ReadVersionAsync(profileUri, enginePath, cancellationToken).ConfigureAwait(false);
@@ -280,17 +280,19 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         if ((File.GetAttributes(_enginePath) & FileAttributes.ReparsePoint) != 0)
             throw new InvalidDataException("The configured LibreOffice engine path cannot be a reparse point.");
         var staged = Path.Combine(operation, "soffice.bin");
-        await using (var input = new FileStream(_enginePath, FileMode.Open, FileAccess.Read, FileShare.Read,
-            64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
-        await using (var output = new FileStream(staged, new FileStreamOptions
+        var options = new FileStreamOptions
         {
             Mode = FileMode.CreateNew,
             Access = FileAccess.Write,
             Share = FileShare.None,
             BufferSize = 64 * 1024,
-            Options = FileOptions.Asynchronous | FileOptions.WriteThrough,
-            UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
-        }))
+            Options = FileOptions.Asynchronous | FileOptions.WriteThrough
+        };
+        if (!OperatingSystem.IsWindows())
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+        await using (var input = new FileStream(_enginePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+        await using (var output = new FileStream(staged, options))
         {
             await input.CopyToAsync(output, 64 * 1024, cancellationToken).ConfigureAwait(false);
             await output.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -305,15 +307,16 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
     {
         using var input = _snapshots.OpenRead(snapshotId);
         if (input.Length <= 0 || input.Length > MaximumSourceBytes) throw new InvalidDataException("The source snapshot exceeds LibreOffice limits.");
-        await using var output = new FileStream(destinationPath, new FileStreamOptions
+        var options = new FileStreamOptions
         {
             Mode = FileMode.CreateNew,
             Access = FileAccess.Write,
             Share = FileShare.None,
             BufferSize = 64 * 1024,
-            Options = FileOptions.Asynchronous | FileOptions.WriteThrough,
-            UnixCreateMode = OperatingSystem.IsWindows() ? null : UnixFileMode.UserRead | UnixFileMode.UserWrite
-        });
+            Options = FileOptions.Asynchronous | FileOptions.WriteThrough
+        };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        await using var output = new FileStream(destinationPath, options);
         await input.CopyToAsync(output, 64 * 1024, cancellationToken).ConfigureAwait(false);
         await output.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -400,6 +403,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
     {
         if (OperatingSystem.IsWindows()) Directory.CreateDirectory(path);
         else Directory.CreateDirectory(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        if (OperatingSystem.IsWindows()) SourceSnapshotCache.ApplyPrivateWindowsPermissions(path);
         if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new IOException("The renderer operation path cannot be a reparse point.");
     }
 

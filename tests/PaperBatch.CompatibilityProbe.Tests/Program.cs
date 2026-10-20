@@ -29,6 +29,8 @@ var tests = new List<(string Name, Action Run)>
     ("artifact store persists stable PDF bytes and receipt", RendererTests.ArtifactStorePersistsStablePdfAndReceipt),
     ("artifact store rejects changed PDF bytes on readback", RendererTests.ArtifactStoreRejectsChangedPdfOnReadback),
     ("artifact store rejects malformed receipts as invalid data", RendererTests.ArtifactStoreRejectsMalformedReceiptAsInvalidData),
+    ("artifact store protects its Windows directory ACL", RendererTests.ArtifactStoreProtectsItsWindowsDirectoryAcl),
+    ("LibreOffice private profile protects its Windows directory ACL", RendererTests.LibreOfficeProfileProtectsItsWindowsDirectoryAcl),
     ("artifact store rejects non-PDF input", RendererTests.ArtifactStoreRejectsNonPdfInput),
     ("PDF pass-through persists exact snapshot bytes without claiming page count", RendererTests.PdfPassThroughPersistsExactSnapshotBytesWithoutClaimingPageCount),
     ("built-in PNG renderer creates a readable one-page PDF from a snapshot", RendererTests.BuiltInPngRendererCreatesReadableOnePagePdfFromSnapshot),

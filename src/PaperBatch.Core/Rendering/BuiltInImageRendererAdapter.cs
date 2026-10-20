@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Globalization;
+using System.IO.Compression;
 using System.Text;
 using PaperBatch.Core.Intake;
 

@@ -2,6 +2,7 @@ using PaperBatch.Core.Intake;
 using PaperBatch.Core.Rendering;
 using System.Buffers.Binary;
 using System.IO.Compression;
+using System.Security.AccessControl;
 using System.Text;
 
 internal static class RendererTests
@@ -20,6 +21,13 @@ internal static class RendererTests
             Assert.True(concurrent.All(item => item.Artifact.ArtifactId == first.Artifact.ArtifactId));
             Assert.Equal(64, first.Artifact.Sha256.Length);
             Assert.Equal("test-engine", store.GetReceipt(first.Artifact.ArtifactId).EngineId);
+            if (!OperatingSystem.IsWindows())
+            {
+                const UnixFileMode shared = UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+                    UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+                Assert.Equal(0, (int)(File.GetUnixFileMode(root) & shared));
+                Assert.Equal(0, (int)(File.GetUnixFileMode(Path.Combine(root, first.Artifact.ArtifactId, "content.pdf")) & shared));
+            }
             using var readback = store.OpenRead(first.Artifact.ArtifactId);
             using var copy = new MemoryStream();
             readback.CopyTo(copy);
@@ -89,6 +97,55 @@ internal static class RendererTests
         {
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
+    }
+
+    public static void ArtifactStoreProtectsItsWindowsDirectoryAcl()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-{Guid.NewGuid():N}");
+        try
+        {
+            _ = new RenderArtifactStore(root);
+            var security = new DirectoryInfo(root).GetAccessControl(AccessControlSections.Access);
+            Assert.True(security.AreAccessRulesProtected);
+            var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(System.Security.Principal.SecurityIdentifier));
+            Assert.Equal(1, rules.Count);
+            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+            Assert.Equal(identity.User?.Value, ((System.Security.Principal.SecurityIdentifier)rules[0].IdentityReference).Value);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void LibreOfficeProfileProtectsItsWindowsDirectoryAcl()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var operation = Path.Combine(Path.GetTempPath(), $"paperbatch-renderer-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(operation);
+        try
+        {
+            var profile = LibreOfficeProfilePolicy.CreatePrivateProfile(operation);
+            AssertOwnerOnlyAcl(operation);
+            AssertOwnerOnlyAcl(profile.LocalPath.TrimEnd(Path.DirectorySeparatorChar));
+        }
+        finally
+        {
+            if (Directory.Exists(operation)) Directory.Delete(operation, recursive: true);
+        }
+    }
+
+    private static void AssertOwnerOnlyAcl(string directory)
+    {
+        var security = new DirectoryInfo(directory).GetAccessControl(AccessControlSections.Access);
+        Assert.True(security.AreAccessRulesProtected);
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true,
+            typeof(System.Security.Principal.SecurityIdentifier));
+        Assert.Equal(1, rules.Count);
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        Assert.Equal(identity.User?.Value,
+            ((System.Security.Principal.SecurityIdentifier)rules[0].IdentityReference).Value);
     }
 
     public static void ArtifactStoreRejectsNonPdfInput()
