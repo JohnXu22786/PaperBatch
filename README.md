@@ -64,3 +64,7 @@ G1 remains open until native PDFium page-composition and form behavior, separate
 ## Core contracts
 
 The engine-neutral run/job models, SQLite schema and migration behavior, recipe JSON v1, and local IPC envelope are described in [docs/architecture/core-contracts.md](docs/architecture/core-contracts.md). This shared core does not implement a renderer, Windows printer backend, or IPC listener, and OS-reported completion is not evidence of physical paper output.
+
+## IPP protocol-fault lab
+
+The resettable Linux-side IPP Everywhere receiver and network-fault proxy use a pinned Ubuntu/CUPS image and synthetic PDF only. Run `tools/run_ipp_fault_lab.sh` to print a concise JSON trace for the success path and each configured fault, or `tools/run_ipp_fault_lab.sh test` to run the focused assertions. Every generated result is labeled `simulationOnly: true` and `evidenceClass: "protocol-emulation"`. Setup, reset behavior, dependency revisions, the generated package-license inventory, fault classifications, and limitations are in [docs/compatibility/v1-ipp-fault-lab.md](docs/compatibility/v1-ipp-fault-lab.md).
