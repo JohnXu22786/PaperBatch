@@ -380,6 +380,7 @@ internal static class RendererTests
             File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserExecute);
             File.SetUnixFileMode(library, UnixFileMode.UserRead);
             var adapter = CreateLibreOfficeCapabilityProbe(root, program, engine);
+            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserExecute);
             var request = new RenderRequest("snapshot", SourceFormat.Docx, RendererExecutionContext.BackgroundWorker);
             Assert.True(adapter.CanRenderAsync(request, CancellationToken.None).GetAwaiter().GetResult());
 
@@ -391,6 +392,7 @@ internal static class RendererTests
             File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             File.SetUnixFileMode(Path.Combine(program, "libfixture.so"), UnixFileMode.UserRead | UnixFileMode.UserWrite);
             File.SetUnixFileMode(program, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             Directory.Delete(root, recursive: true);
         }
     }
@@ -449,6 +451,7 @@ internal static class RendererTests
             File.SetUnixFileMode(outside, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             Directory.CreateSymbolicLink(link, externalLibrary);
             var adapter = CreateLibreOfficeCapabilityProbe(root, program, engine);
+            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserExecute);
             var supported = adapter.CanRenderAsync(new RenderRequest("snapshot", SourceFormat.Docx,
                 RendererExecutionContext.BackgroundWorker), CancellationToken.None).GetAwaiter().GetResult();
             Assert.False(supported);
@@ -458,6 +461,7 @@ internal static class RendererTests
             File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             File.SetUnixFileMode(program, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             File.SetUnixFileMode(outside, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             Directory.Delete(root, recursive: true);
         }
     }
