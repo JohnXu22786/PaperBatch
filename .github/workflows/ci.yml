@@ -41,11 +41,71 @@ jobs:
         run: dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
 
       - name: Run managed test runner
+        id: managed-test-runner
         run: dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
+
+      - name: Run PDFium proof fixture self-tests
+        run: dotnet run --project tests/PaperBatch.Pdfium.Windows.Tests/PaperBatch.Pdfium.Windows.Tests.csproj -p:NuGetAudit=false
+
+      - name: Expose Windows managed test failure details
+        if: failure() && runner.os == 'Windows' && steps.managed-test-runner.outcome == 'failure'
+        shell: pwsh
+        run: |
+          $testLog = Join-Path $PWD 'windows-managed-test-retry.log'
+          $testOutput = & dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false 2>&1
+          $testExitCode = $LASTEXITCODE
+          $testOutput | Set-Content -Path $testLog -Encoding utf8
+          @(
+            '### Windows managed test runner diagnostic retry'
+            '```text'
+            "Exit code: $testExitCode"
+            (Get-Content -Path $testLog)
+            '```'
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
       - name: Compile Python sources
         run: python -m compileall -q tools tests
 
       # The unit suite uses fixtures; pinned-engine LibreOffice export stays opt-in/local.
       - name: Run Python unit tests
-        run: python -m unittest discover -s tests -p test_libreoffice_probe.py
+        run: python -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Capture Windows runner spooler and queue evidence
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        run: |
+          ./tools/capture_windows_print_runner.ps1
+          dotnet run --project src/PaperBatch.CompatibilityProbe/PaperBatch.CompatibilityProbe.csproj -p:NuGetAudit=false -- collect --include-local-queues --output windows-print-probe-report.json
+
+      - name: Upload Windows runner print evidence
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-print-runner-evidence
+          path: |
+            windows-print-runner-evidence.json
+            windows-print-probe-report.json
+            windows-managed-test-retry.log
+          if-no-files-found: warn
+
+  windows-pdfium-community-proof:
+    name: Windows hosted PDFium community proof
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Verify pinned PDFium and run native fixtures
+        shell: pwsh
+        run: ./tools/run_windows_pdfium_community_proof.ps1
+
+      - name: Upload scoped PDFium compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-pdfium-community-proof
+          path: ${{ runner.temp }}/paperbatch-pdfium-proof/report.json
+          if-no-files-found: warn
