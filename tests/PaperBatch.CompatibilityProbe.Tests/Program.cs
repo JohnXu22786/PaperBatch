@@ -26,6 +26,18 @@ if (args.Length == 6 && args[0] == "--source-cache-worker")
 var tests = new List<(string Name, Action Run)>
 {
     ("simulated evidence does not close G1", SimulatedEvidenceDoesNotCloseG1),
+    ("artifact store persists stable PDF bytes and receipt", RendererTests.ArtifactStorePersistsStablePdfAndReceipt),
+    ("artifact store rejects changed PDF bytes on readback", RendererTests.ArtifactStoreRejectsChangedPdfOnReadback),
+    ("artifact store rejects malformed receipts as invalid data", RendererTests.ArtifactStoreRejectsMalformedReceiptAsInvalidData),
+    ("artifact store rejects non-PDF input", RendererTests.ArtifactStoreRejectsNonPdfInput),
+    ("PDF pass-through persists exact snapshot bytes without claiming page count", RendererTests.PdfPassThroughPersistsExactSnapshotBytesWithoutClaimingPageCount),
+    ("built-in PNG renderer creates a readable one-page PDF from a snapshot", RendererTests.BuiltInPngRendererCreatesReadableOnePagePdfFromSnapshot),
+    ("built-in PNG renderer rejects a corrupt compressed raster", RendererTests.BuiltInPngRendererRejectsCorruptCompressedRaster),
+    ("built-in PNG renderer rejects alpha rather than dropping it", RendererTests.BuiltInPngRendererRejectsAlphaRatherThanDroppingIt),
+    ("LibreOffice capability rejects user-writable runtime trees", RendererTests.LibreOfficeCapabilityRejectsUserWritableRuntimeTree),
+    ("LibreOffice capability accepts protected trees and rejects group-writable libraries", RendererTests.LibreOfficeCapabilityAcceptsProtectedTreeAndRejectsGroupWritableLibrary),
+    ("LibreOffice capability rejects a writable ancestor of a protected runtime", RendererTests.LibreOfficeCapabilityRejectsWritableAncestorOfProtectedRuntime),
+    ("LibreOffice capability rejects dependency symlink escapes", RendererTests.LibreOfficeCapabilityRejectsDependencySymlinkEscape),
     ("LibreOffice rejects shared operation directories", RendererTests.LibreOfficeRejectsSharedOperationDirectory),
     ("LibreOffice rejects replaceable operation ancestors", RendererTests.LibreOfficeRejectsReplaceableOperationPathAncestors),
     ("LibreOffice profile is private and disables macros and link updates", RendererTests.LibreOfficeUsesPrivateMacroRestrictedProfile),

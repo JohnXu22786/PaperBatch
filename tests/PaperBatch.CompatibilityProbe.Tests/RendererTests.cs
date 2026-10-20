@@ -1,8 +1,426 @@
 using PaperBatch.Core.Intake;
 using PaperBatch.Core.Rendering;
+using System.Buffers.Binary;
+using System.IO.Compression;
+using System.Text;
 
 internal static class RendererTests
 {
+    public static void ArtifactStorePersistsStablePdfAndReceipt()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-{Guid.NewGuid():N}");
+        var bytes = OnePagePdf();
+        try
+        {
+            var store = new RenderArtifactStore(root);
+            var concurrent = Task.WhenAll(Enumerable.Range(0, 8).Select(_ => store.PersistPdfAsync(new MemoryStream(bytes), "test-engine", "4.2",
+                new Dictionary<string, string> { ["profile"] = "private", ["macros"] = "disabled" }))).GetAwaiter().GetResult();
+            var first = concurrent[0];
+
+            Assert.True(concurrent.All(item => item.Artifact.ArtifactId == first.Artifact.ArtifactId));
+            Assert.Equal(64, first.Artifact.Sha256.Length);
+            Assert.Equal("test-engine", store.GetReceipt(first.Artifact.ArtifactId).EngineId);
+            using var readback = store.OpenRead(first.Artifact.ArtifactId);
+            using var copy = new MemoryStream();
+            readback.CopyTo(copy);
+            Assert.True(bytes.SequenceEqual(copy.ToArray()));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStoreRejectsChangedPdfOnReadback()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new RenderArtifactStore(root);
+            var stored = store.PersistPdfAsync(new MemoryStream(OnePagePdf()), "test-engine", "1",
+                new Dictionary<string, string>()).GetAwaiter().GetResult();
+            File.WriteAllText(Path.Combine(root, stored.Artifact.ArtifactId, "content.pdf"), "%PDF-1.7\nchanged");
+            Assert.Throws<InvalidDataException>(() => store.OpenRead(stored.Artifact.ArtifactId));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStoreRejectsMalformedReceiptAsInvalidData()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new RenderArtifactStore(root);
+            var stored = store.PersistPdfAsync(new MemoryStream(OnePagePdf()), "test-engine", "1",
+                new Dictionary<string, string>()).GetAwaiter().GetResult();
+            var id = stored.Artifact.ArtifactId;
+            File.WriteAllText(Path.Combine(root, id, "receipt.json"),
+                System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    Artifact = new { ArtifactId = id, Sha256 = (string?)null, LengthBytes = 20 },
+                    EngineId = "test-engine",
+                    EngineVersion = "1",
+                    Options = new Dictionary<string, string>()
+                }));
+
+            Assert.Throws<InvalidDataException>(() => store.GetReceipt(id));
+            Assert.Throws<InvalidDataException>(() => store.OpenRead(id));
+
+            var mismatchedDigest = (stored.Artifact.Sha256[0] == '0' ? '1' : '0') + stored.Artifact.Sha256[1..];
+            File.WriteAllText(Path.Combine(root, id, "receipt.json"),
+                System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    Artifact = new { ArtifactId = id, Sha256 = mismatchedDigest, LengthBytes = stored.Artifact.LengthBytes },
+                    EngineId = "test-engine",
+                    EngineVersion = "1",
+                    Options = new Dictionary<string, string>()
+                }));
+            Assert.Throws<InvalidDataException>(() => store.GetReceipt(id));
+            Assert.Throws<InvalidDataException>(() => store.OpenRead(id));
+
+            File.WriteAllText(Path.Combine(root, id, "receipt.json"), "{");
+            Assert.Throws<InvalidDataException>(() => store.GetReceipt(id));
+            Assert.Throws<InvalidDataException>(() => store.OpenRead(id));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStoreRejectsNonPdfInput()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new RenderArtifactStore(root);
+            Assert.Throws<InvalidDataException>(() => store.PersistPdfAsync(new MemoryStream("not a PDF"u8.ToArray()),
+                "test-engine", "1", new Dictionary<string, string>()).GetAwaiter().GetResult());
+            Assert.Throws<InvalidDataException>(() => store.PersistPdfAsync(new MemoryStream("%PDF-1.7\nthis has no PDF trailer or cross-reference"u8.ToArray()),
+                "test-engine", "1", new Dictionary<string, string>()).GetAwaiter().GetResult());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void PdfPassThroughPersistsExactSnapshotBytesWithoutClaimingPageCount()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-pdf-pass-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var sourcePath = Path.Combine(root, "source.pdf");
+        var cacheRoot = Path.Combine(root, "cache");
+        var artifactRoot = Path.Combine(root, "artifacts");
+        var bytes = OnePagePdf();
+        File.WriteAllBytes(sourcePath, bytes);
+        try
+        {
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = cacheRoot });
+            var snapshot = cache.CaptureAsync(sourcePath).GetAwaiter().GetResult();
+            var store = new RenderArtifactStore(artifactRoot);
+            var adapter = new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, store));
+            Assert.True(adapter.CanRenderAsync(new RenderRequest(snapshot.SnapshotId, SourceFormat.Pdf,
+                RendererExecutionContext.BackgroundWorker), CancellationToken.None).GetAwaiter().GetResult());
+            Assert.False(adapter.CanRenderAsync(new RenderRequest(snapshot.SnapshotId, SourceFormat.Pdf,
+                RendererExecutionContext.InteractiveDesktop), CancellationToken.None).GetAwaiter().GetResult());
+            var result = adapter.RenderAsync(new RenderRequest(snapshot.SnapshotId, SourceFormat.Pdf,
+                RendererExecutionContext.BackgroundWorker), CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert.Equal(RenderStatus.Succeeded, result.Status);
+            Assert.Equal(0, result.Artifact?.PageCount);
+            var persisted = store.GetReceipt(result.Artifact!.ArtifactId);
+            Assert.Equal(snapshot.Sha256, persisted.Artifact.Sha256);
+            Assert.Equal(64, persisted.Artifact.Sha256.Length);
+            Assert.True(bytes.SequenceEqual(File.ReadAllBytes(sourcePath)));
+            using var readback = store.OpenRead(persisted.Artifact.ArtifactId);
+            using var output = new MemoryStream();
+            readback.CopyTo(output);
+            Assert.True(bytes.SequenceEqual(output.ToArray()));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void BuiltInPngRendererCreatesReadableOnePagePdfFromSnapshot()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-image-render-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var sourcePath = Path.Combine(root, "source.png");
+        var bytes = OnePixelPng();
+        File.WriteAllBytes(sourcePath, bytes);
+        try
+        {
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+            var snapshot = cache.CaptureAsync(sourcePath).GetAwaiter().GetResult();
+            var store = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+            var adapter = new BuiltInImageRendererAdapter(cache, store);
+            var result = adapter.RenderAsync(new RenderRequest(snapshot.SnapshotId, SourceFormat.Png,
+                RendererExecutionContext.BackgroundWorker), CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert.Equal(RenderStatus.Succeeded, result.Status);
+            Assert.Equal(1, result.Artifact?.PageCount);
+            Assert.True(bytes.SequenceEqual(File.ReadAllBytes(sourcePath)));
+            using var pdf = store.OpenRead(result.Artifact!.ArtifactId);
+            var preflight = SourceFormatPreflight.Inspect(pdf, ".pdf");
+            Assert.Equal(SourcePreflightStatus.Ready, preflight.Status);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void BuiltInPngRendererRejectsCorruptCompressedRaster()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-image-render-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var sourcePath = Path.Combine(root, "source.png");
+        File.WriteAllBytes(sourcePath, OnePixelPng(corruptCompressedRaster: true));
+        try
+        {
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+            var snapshot = cache.CaptureAsync(sourcePath).GetAwaiter().GetResult();
+            var adapter = new BuiltInImageRendererAdapter(cache, new RenderArtifactStore(Path.Combine(root, "artifacts")));
+            var result = adapter.RenderAsync(new RenderRequest(snapshot.SnapshotId, SourceFormat.Png,
+                RendererExecutionContext.BackgroundWorker), CancellationToken.None).GetAwaiter().GetResult();
+            Assert.Equal(RenderStatus.Failed, result.Status);
+            Assert.True(result.Artifact is null);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void BuiltInPngRendererRejectsAlphaRatherThanDroppingIt()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-image-render-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var sourcePath = Path.Combine(root, "source.png");
+        File.WriteAllBytes(sourcePath, OnePixelPng(colorType: 6));
+        try
+        {
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+            var snapshot = cache.CaptureAsync(sourcePath).GetAwaiter().GetResult();
+            var adapter = new BuiltInImageRendererAdapter(cache, new RenderArtifactStore(Path.Combine(root, "artifacts")));
+            var result = adapter.RenderAsync(new RenderRequest(snapshot.SnapshotId, SourceFormat.Png,
+                RendererExecutionContext.BackgroundWorker), CancellationToken.None).GetAwaiter().GetResult();
+            Assert.Equal(RenderStatus.Unsupported, result.Status);
+            Assert.True(result.Artifact is null);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static byte[] OnePixelPng(byte colorType = 2, bool corruptCompressedRaster = false)
+    {
+        using var output = new MemoryStream();
+        output.Write(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
+        var header = new byte[13];
+        BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(0, 4), 1);
+        BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(4, 4), 1);
+        header[8] = 8; header[9] = colorType;
+        WritePngChunk(output, "IHDR", header);
+        using var compressed = new MemoryStream();
+        using (var zlib = new ZLibStream(compressed, CompressionLevel.SmallestSize, leaveOpen: true))
+            zlib.Write(colorType == 6 ? new byte[] { 0, 0x20, 0x40, 0x60, 0xff } : new byte[] { 0, 0x20, 0x40, 0x60 });
+        var raster = compressed.ToArray();
+        if (corruptCompressedRaster) raster[raster.Length / 2] ^= 0xff;
+        WritePngChunk(output, "IDAT", raster);
+        WritePngChunk(output, "IEND", []);
+        return output.ToArray();
+    }
+
+    private static void WritePngChunk(Stream output, string name, byte[] data)
+    {
+        Span<byte> length = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(length, checked((uint)data.Length));
+        output.Write(length);
+        var type = Encoding.ASCII.GetBytes(name);
+        output.Write(type); output.Write(data);
+        var crcData = new byte[type.Length + data.Length];
+        type.CopyTo(crcData, 0); data.CopyTo(crcData, type.Length);
+        Span<byte> crc = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(crc, PngCrc32(crcData));
+        output.Write(crc);
+    }
+
+    private static uint PngCrc32(ReadOnlySpan<byte> bytes)
+    {
+        var crc = 0xffffffffu;
+        foreach (var value in bytes)
+        {
+            crc ^= value;
+            for (var bit = 0; bit < 8; bit++) crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xedb88320u : crc >> 1;
+        }
+        return ~crc;
+    }
+
+    private static byte[] OnePagePdf()
+    {
+        var objects = new[]
+        {
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /ProcSet [/PDF] >> /Contents 4 0 R >>",
+            "<< /Length 0 >>\nstream\n\nendstream"
+        };
+        var builder = new StringBuilder("%PDF-1.7\n");
+        var offsets = new List<int> { 0 };
+        foreach (var item in objects)
+        {
+            offsets.Add(Encoding.ASCII.GetByteCount(builder.ToString()));
+            builder.Append(offsets.Count).Append(" 0 obj\n").Append(item).Append("\nendobj\n");
+        }
+        var xref = Encoding.ASCII.GetByteCount(builder.ToString());
+        builder.Append("xref\n0 5\n0000000000 65535 f \n");
+        foreach (var offset in offsets.Skip(1)) builder.Append(offset.ToString("D10", System.Globalization.CultureInfo.InvariantCulture)).Append(" 00000 n \n");
+        builder.Append("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n").Append(xref).Append("\n%%EOF\n");
+        return Encoding.ASCII.GetBytes(builder.ToString());
+    }
+
+    public static void LibreOfficeCapabilityRejectsUserWritableRuntimeTree()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-capability-{Guid.NewGuid():N}");
+        var program = Path.Combine(root, "program");
+        Directory.CreateDirectory(program);
+        var engine = Path.Combine(program, "soffice.bin");
+        File.WriteAllText(engine, "pinned executable fixture");
+        File.WriteAllText(Path.Combine(program, "libfixture.so"), "runtime library fixture");
+        try
+        {
+            var adapter = CreateLibreOfficeCapabilityProbe(root, program, engine);
+            var supported = adapter.CanRenderAsync(new RenderRequest("snapshot", SourceFormat.Docx,
+                RendererExecutionContext.BackgroundWorker), CancellationToken.None).GetAwaiter().GetResult();
+            Assert.False(supported);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void LibreOfficeCapabilityAcceptsProtectedTreeAndRejectsGroupWritableLibrary()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-capability-{Guid.NewGuid():N}");
+        var program = Path.Combine(root, "program");
+        Directory.CreateDirectory(program);
+        var engine = Path.Combine(program, "soffice.bin");
+        var library = Path.Combine(program, "libfixture.so");
+        File.WriteAllText(engine, "pinned executable fixture");
+        File.WriteAllText(library, "runtime library fixture");
+        try
+        {
+            File.SetUnixFileMode(program, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(library, UnixFileMode.UserRead);
+            var adapter = CreateLibreOfficeCapabilityProbe(root, program, engine);
+            var request = new RenderRequest("snapshot", SourceFormat.Docx, RendererExecutionContext.BackgroundWorker);
+            Assert.True(adapter.CanRenderAsync(request, CancellationToken.None).GetAwaiter().GetResult());
+
+            File.SetUnixFileMode(library, UnixFileMode.UserRead | UnixFileMode.GroupWrite);
+            Assert.False(adapter.CanRenderAsync(request, CancellationToken.None).GetAwaiter().GetResult());
+        }
+        finally
+        {
+            File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(Path.Combine(program, "libfixture.so"), UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            File.SetUnixFileMode(program, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void LibreOfficeCapabilityRejectsWritableAncestorOfProtectedRuntime()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-ancestor-{Guid.NewGuid():N}");
+        var install = Path.Combine(root, "install");
+        var program = Path.Combine(install, "program");
+        Directory.CreateDirectory(program);
+        var engine = Path.Combine(program, "soffice.bin");
+        File.WriteAllText(engine, "pinned executable fixture");
+        File.WriteAllText(Path.Combine(program, "libfixture.so"), "runtime library fixture");
+        try
+        {
+            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupWrite);
+            File.SetUnixFileMode(install, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(program, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(Path.Combine(program, "libfixture.so"), UnixFileMode.UserRead);
+
+            var adapter = CreateLibreOfficeCapabilityProbe(root, program, engine);
+            Assert.False(adapter.CanRenderAsync(new RenderRequest("snapshot", SourceFormat.Docx,
+                RendererExecutionContext.BackgroundWorker), CancellationToken.None).GetAwaiter().GetResult());
+        }
+        finally
+        {
+            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(install, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(program, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(Path.Combine(program, "libfixture.so"), UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void LibreOfficeCapabilityRejectsDependencySymlinkEscape()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-capability-{Guid.NewGuid():N}");
+        var program = Path.Combine(root, "program");
+        var outside = Path.Combine(root, "outside");
+        Directory.CreateDirectory(program);
+        Directory.CreateDirectory(outside);
+        var engine = Path.Combine(program, "soffice.bin");
+        var externalLibrary = Path.Combine(outside, "libfixture.so");
+        File.WriteAllText(engine, "pinned executable fixture");
+        File.WriteAllText(externalLibrary, "untrusted runtime library fixture");
+        var link = Path.Combine(program, "libfixture.so");
+        try
+        {
+            File.SetUnixFileMode(program, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(externalLibrary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            File.SetUnixFileMode(outside, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            Directory.CreateSymbolicLink(link, externalLibrary);
+            var adapter = CreateLibreOfficeCapabilityProbe(root, program, engine);
+            var supported = adapter.CanRenderAsync(new RenderRequest("snapshot", SourceFormat.Docx,
+                RendererExecutionContext.BackgroundWorker), CancellationToken.None).GetAwaiter().GetResult();
+            Assert.False(supported);
+        }
+        finally
+        {
+            File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(program, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(outside, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static LibreOfficeRendererAdapter CreateLibreOfficeCapabilityProbe(string root, string program, string engine)
+    {
+        var snapshots = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+        var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+        var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(engine))).ToLowerInvariant();
+        return new LibreOfficeRendererAdapter(snapshots, artifacts, new UnusedPdfInspector(), engine, digest);
+    }
+
+    private sealed class UnusedPdfInspector : IPdfArtifactInspector
+    {
+        public Task<int> GetPageCountAsync(Stream pdf, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("The capability probe does not render PDFs.");
+    }
+
     public static void LibreOfficeRejectsSharedOperationDirectory()
     {
         if (OperatingSystem.IsWindows()) return;
