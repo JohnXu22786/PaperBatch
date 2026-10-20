@@ -95,7 +95,7 @@ internal static class RendererTests
                 "The pinned adapter did not advertise the synthetic DOCX capability.");
             var result = adapter.RenderAsync(request, CancellationToken.None).GetAwaiter().GetResult();
             Assert.True(result.Status == RenderStatus.Succeeded,
-                $"The pinned adapter render returned {result.Status}: {result.Error ?? "no diagnostic"}.");
+                $"The pinned adapter render returned {result.Status}: {result.Message ?? "no diagnostic"}.");
             Assert.Equal(1, result.Artifact?.PageCount);
             Assert.True(Directory.GetDirectories(Path.GetTempPath(), "paperbatch-lo-*", SearchOption.TopDirectoryOnly)
                 .All(existingOperations.Contains));
