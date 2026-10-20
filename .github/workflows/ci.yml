@@ -62,7 +62,8 @@ jobs:
           printf '%s  %s\n' 'aa2815afe97e45dc02e446c43e24232f1d78941aee1081c95d871e05d74062e8' "$lo_archive_path" | sha256sum --check --status
           sudo apt-get update
           sudo apt-get install --yes gpgv
-          curl --fail --location --retry 3 'https://keys.openpgp.org/vks/v1/by-fingerprint/C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3' --output "$lo_key_path"
+          curl --fail --location --retry 3 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xF434A1EFAFEEAEA3' --output "$lo_key_path"
+          gpg --batch --show-keys --with-colons "$lo_key_path" | grep -F 'fpr:::::::::C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3:'
           gpg --batch --dearmor --output "$lo_keyring_path" "$lo_key_path"
           gpgv --status-fd=1 --keyring "$lo_keyring_path" "$lo_signature_path" "$lo_archive_path" | tee "$lo_status_path"
           grep -F '[GNUPG:] VALIDSIG C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3 ' "$lo_status_path"
