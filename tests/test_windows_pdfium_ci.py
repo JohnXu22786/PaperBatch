@@ -37,6 +37,18 @@ class WindowsPdfiumCiTests(unittest.TestCase):
         self.assertIn("Microsoft Office or WPS coexistence", runner)
         self.assertIn("physical printer output", runner)
 
+    def test_wrapper_preserves_native_probe_assembly_hash(self):
+        runner = (ROOT / "tools/run_windows_pdfium_community_proof.ps1").read_text()
+        harness = (ROOT / "tests/PaperBatch.Pdfium.Windows.Tests/PdfiumSmoke.cs").read_text()
+
+        self.assertIn("$nativeRunner = $nativeProof.runner", runner)
+        self.assertIn("$nativeRunner = $nativeCheckpoint.runner", runner)
+        self.assertIn("probeAssembly = if ($null -ne $nativeRunner)", runner)
+        self.assertIn("Assembly.GetEntryAssembly()?.Location", harness)
+        self.assertIn("runner = new { probeAssembly }", harness)
+        self.assertLess(harness.index("SaveCheckpoint();\n        try"), harness.index("var archiveSha256 = HashFile(archivePath)"))
+        self.assertIn('kind = "managed-entry-assembly"', harness)
+
 
 if __name__ == "__main__":
     unittest.main()

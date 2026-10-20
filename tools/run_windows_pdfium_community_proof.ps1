@@ -54,6 +54,7 @@ function Write-ProofReport {
         'https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/8111/third_party/'
     )
     $binary = $null
+    $nativeRunner = $null
     $apiExports = @()
     $composition = [ordered]@{ status = 'blocked'; reason = $FailureReason }
     $pageEdit = [ordered]@{
@@ -83,6 +84,7 @@ function Write-ProofReport {
     )
     if ($null -ne $nativeProof) {
         $binary = $nativeProof.binary
+        $nativeRunner = $nativeProof.runner
         $apiExports = $nativeProof.apiExports
         $composition = $nativeProof.composition
         $pageEdit = $nativeProof.pageEdit
@@ -97,6 +99,7 @@ function Write-ProofReport {
         if ($composition.status -eq 'started') {
             $composition = [ordered]@{ status = 'failed'; reason = $FailureReason }
         }
+        $nativeRunner = $nativeCheckpoint.runner
         $pageEditApiResults = @($nativeCheckpoint.pageEditApiResults | ForEach-Object {
             if ($_.executionStatus -eq 'started') { $_.executionStatus = 'failed' }
             $_
@@ -128,6 +131,7 @@ function Write-ProofReport {
             imageOS = $env:ImageOS
             imageVersion = $env:ImageVersion
             powershellVersion = $PSVersionTable.PSVersion.ToString()
+            probeAssembly = if ($null -ne $nativeRunner) { $nativeRunner.probeAssembly } else { $null }
             githubRunId = $env:GITHUB_RUN_ID
             githubRunAttempt = $env:GITHUB_RUN_ATTEMPT
         }

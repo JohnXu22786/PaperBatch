@@ -147,6 +147,7 @@ internal static class PdfiumSmoke
         string compositionStatus = "blocked";
         string? failure = null;
         string? checkpointFailure = null;
+        var probeAssembly = DescribeProbeAssembly();
 
         T TrackApiResult<T>(string name, Func<T> call)
         {
@@ -182,6 +183,7 @@ internal static class PdfiumSmoke
         {
             var checkpoint = new
             {
+                runner = new { probeAssembly },
                 apiExports = BuildApiExportResults(exportNames, CurrentExecutionStatuses()),
                 binary,
                 composition,
@@ -202,6 +204,7 @@ internal static class PdfiumSmoke
             }
         }
 
+        SaveCheckpoint();
         try
         {
             var archiveSha256 = HashFile(archivePath);
@@ -375,7 +378,7 @@ internal static class PdfiumSmoke
                 osArchitecture = RuntimeInformation.OSArchitecture.ToString(),
                 processArchitecture = RuntimeInformation.ProcessArchitecture.ToString(),
                 framework = RuntimeInformation.FrameworkDescription,
-                probeExecutable = DescribeProbeExecutable()
+                probeAssembly
             },
             binary,
             apiExports = exports,
@@ -933,14 +936,15 @@ internal static class PdfiumSmoke
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
-    private static object? DescribeProbeExecutable()
+    private static object? DescribeProbeAssembly()
     {
-        var path = Environment.ProcessPath;
+        var path = System.Reflection.Assembly.GetEntryAssembly()?.Location;
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
         var info = new FileInfo(path);
         return new
         {
             fileName = info.Name,
+            kind = "managed-entry-assembly",
             sizeBytes = info.Length,
             sha256 = HashFile(path)
         };
