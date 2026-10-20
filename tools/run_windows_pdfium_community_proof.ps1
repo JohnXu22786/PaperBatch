@@ -12,12 +12,25 @@ $extractRoot = Join-Path $proofRoot 'extract'
 $archivePath = Join-Path $proofRoot $assetName
 $reportPath = Join-Path $proofRoot 'report.json'
 $nativeReportPath = Join-Path $proofRoot 'native-report.json'
+$checkpointPath = Join-Path $proofRoot 'native-checkpoint.json'
 $processLogPath = Join-Path $proofRoot 'native-process.log'
 $startedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
 $noticeFiles = @()
 $archiveSizeBytes = $null
 $archiveHash = $null
 $nativeProof = $null
+$nativeCheckpoint = $null
+$compositionApiNames = @(
+    'FPDF_InitLibrary', 'FPDF_DestroyLibrary', 'FPDF_LoadMemDocument', 'FPDF_CloseDocument',
+    'FPDF_GetPageCount', 'FPDF_ImportPages', 'FPDF_SaveAsCopy', 'FPDF_LoadPage', 'FPDF_ClosePage',
+    'FPDFBitmap_Create', 'FPDFBitmap_FillRect', 'FPDF_RenderPageBitmap', 'FPDFBitmap_GetBuffer',
+    'FPDFBitmap_GetStride', 'FPDFBitmap_Destroy'
+)
+$formApiNames = @(
+    'FPDF_GetFormType', 'FPDFDOC_InitFormFillEnvironment', 'FPDFDOC_ExitFormFillEnvironment',
+    'FORM_OnAfterLoadPage', 'FORM_OnBeforeClosePage', 'FPDFPage_HasFormFieldAtPoint',
+    'FPDFPage_GetAnnotCount', 'FPDFPage_GetAnnot', 'FPDFAnnot_GetSubtype', 'FPDFPage_CloseAnnot'
+)
 
 New-Item -ItemType Directory -Path $proofRoot -Force | Out-Null
 
@@ -34,13 +47,47 @@ function Write-ProofReport {
     )
     $binary = $null
     $apiExports = @()
-    $composition = [ordered]@{ status = 'unavailable'; reason = $FailureReason }
-    $formFixture = [ordered]@{ status = 'unavailable'; reason = $FailureReason }
+    $composition = [ordered]@{ status = 'blocked'; reason = $FailureReason }
+    $formFixture = [ordered]@{
+        status = 'not-run'
+        reason = $FailureReason
+        apiResults = @($formApiNames | ForEach-Object {
+            [ordered]@{ name = $_; exportStatus = 'unchecked'; executionStatus = 'not-run' }
+        })
+    }
+    $apiExports = @(
+        $compositionApiNames | ForEach-Object {
+            [ordered]@{ name = $_; exportStatus = 'unchecked'; requiredForComposition = $true; requiredForFormFixture = $false }
+        }
+        $formApiNames | ForEach-Object {
+            [ordered]@{ name = $_; exportStatus = 'unchecked'; requiredForComposition = $false; requiredForFormFixture = $true }
+        }
+    )
     if ($null -ne $nativeProof) {
         $binary = $nativeProof.binary
         $apiExports = $nativeProof.apiExports
         $composition = $nativeProof.composition
         $formFixture = $nativeProof.formFixture
+    } elseif ($null -ne $nativeCheckpoint) {
+        $apiExports = @($nativeCheckpoint.apiExports | ForEach-Object {
+            if ($_.executionStatus -eq 'started') { $_.executionStatus = 'failed' }
+            $_
+        })
+        $binary = $nativeCheckpoint.binary
+        $composition = $nativeCheckpoint.composition
+        if ($composition.status -eq 'started') {
+            $composition = [ordered]@{ status = 'failed'; reason = $FailureReason }
+        }
+        $formApiResults = @($nativeCheckpoint.formApiResults | ForEach-Object {
+            if ($_.executionStatus -eq 'started') { $_.executionStatus = 'failed' }
+            $_
+        })
+        $formApiStarted = [bool]$nativeCheckpoint.formFixtureStarted
+        $formApiUnavailable = @($formApiResults | Where-Object { $_.exportStatus -eq 'unavailable' }).Count -gt 0
+        $formInteractionBlocked = @($formApiResults | Where-Object { $_.executionStatus -eq 'blocked' }).Count -gt 0
+        $formStatus = if ($formInteractionBlocked) { 'blocked' } elseif ($formApiStarted) { 'failed' } elseif ($formApiUnavailable) { 'unavailable' } else { 'not-run' }
+        $formReason = if ($formInteractionBlocked) { 'Safe AcroForm parsing completed; interactive form APIs remain blocked.' } elseif ($formApiStarted) { $FailureReason } elseif ($formApiUnavailable) { 'Required form or annotation API exports are missing.' } else { 'The native process terminated before the form fixture began.' }
+        $formFixture = [ordered]@{ status = $formStatus; reason = $formReason; apiResults = $formApiResults }
     }
     $report = [ordered]@{
         schemaVersion = '1.0'
@@ -170,7 +217,7 @@ try {
     $process.RedirectStandardOutput = $true
     $process.RedirectStandardError = $true
     $process.UseShellExecute = $false
-    foreach ($argument in @('run', '--project', $projectPath, '-p:NuGetAudit=false', '--', 'smoke', '--pdfium-path', $dllPath, '--archive-path', $archivePath, '--output', $nativeReportPath)) {
+    foreach ($argument in @('run', '--project', $projectPath, '-p:NuGetAudit=false', '--', 'smoke', '--pdfium-path', $dllPath, '--archive-path', $archivePath, '--output', $nativeReportPath, '--checkpoint', $checkpointPath)) {
         $process.ArgumentList.Add($argument)
     }
     $child = [System.Diagnostics.Process]::Start($process)
@@ -184,13 +231,20 @@ try {
     $processText = "STDOUT`n$($stdout.GetAwaiter().GetResult())`nSTDERR`n$($stderr.GetAwaiter().GetResult())"
     $processText | Set-Content -Path $processLogPath -Encoding utf8
     if (Test-Path -LiteralPath $nativeReportPath) { $nativeProof = Get-Content -LiteralPath $nativeReportPath -Raw | ConvertFrom-Json }
+    if ($null -eq $nativeProof -and (Test-Path -LiteralPath $checkpointPath)) { $nativeCheckpoint = Get-Content -LiteralPath $checkpointPath -Raw | ConvertFrom-Json }
     if ($null -eq $nativeProof) { throw "PDFium smoke did not write a report. $processText" }
     Write-ProofReport -Status ([string]$nativeProof.status) -FailureReason ([string]$nativeProof.failure)
     if ($child.ExitCode -ne 0) { throw "PDFium native composition/form behavior failed (exit $($child.ExitCode)). See the uploaded report artifact." }
 }
 catch {
     $failureReason = $_.Exception.Message
-    if (-not (Test-Path -LiteralPath $reportPath)) { Write-ProofReport -Status 'blocked' -FailureReason $failureReason }
+    if ($null -eq $nativeProof -and $null -eq $nativeCheckpoint -and (Test-Path -LiteralPath $checkpointPath)) {
+        try { $nativeCheckpoint = Get-Content -LiteralPath $checkpointPath -Raw | ConvertFrom-Json } catch { $nativeCheckpoint = $null }
+    }
+    if (-not (Test-Path -LiteralPath $reportPath)) {
+        $reportStatus = if ($null -ne $nativeCheckpoint) { 'failed' } else { 'blocked' }
+        Write-ProofReport -Status $reportStatus -FailureReason $failureReason
+    }
     throw
 }
 

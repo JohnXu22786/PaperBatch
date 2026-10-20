@@ -8,6 +8,7 @@ using PaperBatch.CompatibilityProbe;
 namespace PaperBatch.Pdfium.Windows.Tests;
 
 internal sealed record PdfiumSmokeRun(string Json, string Summary, bool CompositionPassed, string FormStatus);
+internal delegate T ApiTracker<T>(string name, Func<T> call);
 
 internal static class PdfiumSmoke
 {
@@ -33,26 +34,29 @@ internal static class PdfiumSmoke
         "FPDFPage_GetAnnotCount", "FPDFPage_GetAnnot", "FPDFAnnot_GetSubtype", "FPDFPage_CloseAnnot"
     ];
 
-    public static void SelfTestFormFillInfoLayout()
-    {
-        var callbacks = FormFillCallbacks.Create(new IntPtr(1), new IntPtr(2));
-        var info = callbacks.AllocateInfo();
-        try
+    public static IReadOnlyList<string> BoundedFormApiNames => FormExports;
+
+    public static object[] CreateFormExportResults(IReadOnlySet<string> exports, IReadOnlyDictionary<string, string>? executionStatuses = null, bool exportsChecked = true) => FormExports
+        .Select(name => (object)new
         {
-            if (Marshal.ReadInt32(info) != 1) throw new InvalidOperationException("Form fill interface version was not set to 1.");
-            var callbackBase = IntPtr.Size == 8 ? 8 : 4;
-            for (var index = 0; index < 15; index++)
-            {
-                if (Marshal.ReadIntPtr(info, callbackBase + index * IntPtr.Size) == IntPtr.Zero)
-                    throw new InvalidOperationException($"Stable form fill callback slot {index} was not initialized.");
-            }
-        }
-        finally
+            name,
+            exportStatus = !exportsChecked ? "unchecked" : exports.Contains(name) ? "available" : "unavailable",
+            executionStatus = !exportsChecked ? "not-run" : exports.Contains(name)
+                ? executionStatuses?.GetValueOrDefault(name) ?? "not-run"
+                : "unavailable"
+        })
+        .ToArray();
+
+    private static object[] BuildApiExportResults(IReadOnlySet<string> exports, IReadOnlyDictionary<string, string>? executionStatuses = null, bool exportsChecked = true) => CompositionExports.Concat(FormExports).Distinct(StringComparer.Ordinal)
+        .Select(name => (object)new
         {
-            Marshal.FreeHGlobal(info);
-            callbacks.KeepAlive();
-        }
-    }
+            name,
+            exportStatus = !exportsChecked ? "unchecked" : exports.Contains(name) ? "available" : "unavailable",
+            executionStatus = !exportsChecked ? "not-run" : exports.Contains(name) ? executionStatuses?.GetValueOrDefault(name) ?? "not-run" : "unavailable",
+            requiredForComposition = CompositionExports.Contains(name, StringComparer.Ordinal),
+            requiredForFormFixture = FormExports.Contains(name, StringComparer.Ordinal)
+        })
+        .ToArray();
 
     public static string CreateUnavailableReport(string reason, string expectedSha256) => JsonSerializer.Serialize(new
     {
@@ -60,22 +64,79 @@ internal static class PdfiumSmoke
         status = "blocked",
         reason,
         assetSha256Expected = expectedSha256,
+        apiExports = BuildApiExportResults(new HashSet<string>(StringComparer.Ordinal), exportsChecked: false),
+        composition = new { status = "blocked", reason },
+        formFixture = new
+        {
+            status = "not-run",
+            reason,
+            apiResults = CreateFormExportResults(new HashSet<string>(StringComparer.Ordinal), exportsChecked: false)
+        },
         g1 = "open",
         productDistributionValidated = false,
         notValidated = NotValidated
     }, JsonOptions);
 
-    public static PdfiumSmokeRun Run(string dllPath, string archivePath)
+    public static PdfiumSmokeRun Run(string dllPath, string archivePath, string checkpointPath)
     {
         var compositionPassed = false;
-        var formStatus = "unavailable";
+        var compositionStarted = false;
+        var formFixtureStarted = false;
+        var formStatus = "not-run";
         IntPtr library = IntPtr.Zero;
         var exports = new List<object>();
+        IReadOnlySet<string> exportNames = new HashSet<string>(StringComparer.Ordinal);
+        var formExecutionStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
+        var apiExecutionStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
+        var exportsChecked = false;
         object? binary = null;
         object? composition = new { status = "blocked", reason = "Composition smoke did not complete." };
-        object? form = new { status = "unavailable", reason = "Form smoke did not complete." };
+        object? form = new
+        {
+            status = "not-run",
+            reason = "Form smoke did not complete.",
+            apiResults = CreateFormExportResults(exportNames, formExecutionStatuses, exportsChecked: false)
+        };
         string status = "blocked";
+        string compositionStatus = "blocked";
         string? failure = null;
+
+        T TrackApiResult<T>(string name, Func<T> call)
+        {
+            apiExecutionStatuses[name] = "started";
+            SaveCheckpoint();
+            try
+            {
+                var result = call();
+                apiExecutionStatuses[name] = "verified";
+                SaveCheckpoint();
+                return result;
+            }
+            catch
+            {
+                apiExecutionStatuses[name] = "failed";
+                SaveCheckpoint();
+                throw;
+            }
+        }
+
+        void TrackApi(string name, Action call) => TrackApiResult(name, () => { call(); return true; });
+        IntPtr TrackPointer(string name, Func<IntPtr> call) => TrackApiResult(name, call);
+        int TrackInt(string name, Func<int> call) => TrackApiResult(name, call);
+
+        void SaveCheckpoint()
+        {
+            var checkpoint = new
+            {
+                apiExports = BuildApiExportResults(exportNames, apiExecutionStatuses),
+                binary,
+                composition,
+                formFixtureStarted,
+                formFixture = form,
+                formApiResults = CreateFormExportResults(exportNames, formExecutionStatuses)
+            };
+            File.WriteAllText(checkpointPath, JsonSerializer.Serialize(checkpoint, JsonOptions));
+        }
 
         try
         {
@@ -98,6 +159,16 @@ internal static class PdfiumSmoke
                 if (stream.ReadByte() >= 0) throw new IOException("The PDFium DLL changed while its identity was measured.");
                 var parsed = PeImageParser.Parse(image);
                 if (parsed.Architecture != "x64") throw new InvalidDataException($"Expected an x64 PDFium DLL, got {parsed.Architecture}.");
+                exportNames = parsed.ExportNames;
+                exportsChecked = true;
+                foreach (var name in FormExports)
+                {
+                    formExecutionStatuses[name] = exportNames.Contains(name) ? "not-run" : "unavailable";
+                }
+                foreach (var name in CompositionExports)
+                {
+                    apiExecutionStatuses[name] = exportNames.Contains(name) ? "not-run" : "unavailable";
+                }
                 binary = new
                 {
                     fileName = Path.GetFileName(fullDllPath),
@@ -106,7 +177,8 @@ internal static class PdfiumSmoke
                     architecture = parsed.Architecture,
                     fileVersion = FileVersionInfo.GetVersionInfo(fullDllPath).FileVersion
                 };
-                exports.AddRange(ExportResults(parsed.ExportNames));
+                SaveCheckpoint();
+                exports.AddRange(BuildApiExportResults(parsed.ExportNames, apiExecutionStatuses));
                 var missingComposition = CompositionExports.Where(name => !parsed.ExportNames.Contains(name)).ToArray();
                 if (missingComposition.Length > 0)
                 {
@@ -116,18 +188,32 @@ internal static class PdfiumSmoke
             }
 
             var native = new NativeApi(library);
-            composition = RunComposition(native);
+            compositionStarted = true;
+            compositionStatus = "started";
+            composition = new { status = "started" };
+            SaveCheckpoint();
+            composition = RunComposition(native, TrackPointer, TrackInt, (name, call) => TrackApi(name, call));
             compositionPassed = true;
+            compositionStatus = "verified";
+            SaveCheckpoint();
             var missingForm = FormExports.Where(name => !NativeLibrary.TryGetExport(library, name, out _)).ToArray();
             if (missingForm.Length > 0)
             {
                 formStatus = "unavailable";
-                form = new { status = "unavailable", reason = "This binary does not export every bounded AcroForm/annotation API required by the fixture.", missingExports = missingForm };
+                form = new
+                {
+                    status = "unavailable",
+                    reason = "The bounded AcroForm/annotation fixture was not run because required API exports are missing.",
+                    missingExports = missingForm,
+                    apiResults = CreateFormExportResults(exportNames, formExecutionStatuses)
+                };
             }
             else
             {
-                form = RunFormFixture(library);
-                formStatus = "verified";
+                formFixtureStarted = true;
+                SaveCheckpoint();
+                form = RunFormFixture(library, exportNames, formExecutionStatuses, SaveCheckpoint);
+                formStatus = "blocked";
             }
 
             status = formStatus == "verified" ? "verified" : "blocked";
@@ -136,17 +222,28 @@ internal static class PdfiumSmoke
         {
             status = "blocked";
             failure = exception.GetType().Name + ": " + exception.Message;
-            if (!compositionPassed) composition = new { status = "failed", reason = failure };
-            else if (formStatus != "verified")
+            if (!compositionPassed && compositionStarted)
+            {
+                compositionStatus = "failed";
+                composition = new { status = "failed", reason = failure };
+            }
+            else if (formFixtureStarted && formStatus != "verified")
             {
                 formStatus = "failed";
-                form = new { status = "failed", reason = failure };
+                foreach (var name in formExecutionStatuses.Keys.ToArray())
+                {
+                    if (formExecutionStatuses[name] == "started") formExecutionStatuses[name] = "failed";
+                }
+                form = new { status = "failed", reason = failure, apiResults = CreateFormExportResults(exportNames, formExecutionStatuses) };
             }
         }
         finally
         {
             if (library != IntPtr.Zero) NativeLibrary.Free(library);
         }
+
+        exports.Clear();
+        exports.AddRange(BuildApiExportResults(exportNames, apiExecutionStatuses, exportsChecked));
 
         var report = new
         {
@@ -178,43 +275,43 @@ internal static class PdfiumSmoke
             productDistributionValidated = false,
             notValidated = NotValidated
         };
-        return new PdfiumSmokeRun(JsonSerializer.Serialize(report, JsonOptions), $"PDFium smoke status: {status}; composition: {(compositionPassed ? "verified" : "failed")}; form fixture: {formStatus}; G1: open.", compositionPassed, formStatus);
+        return new PdfiumSmokeRun(JsonSerializer.Serialize(report, JsonOptions), $"PDFium smoke status: {status}; composition: {compositionStatus}; form fixture: {formStatus}; G1: open.", compositionPassed, formStatus);
     }
 
-    private static object RunComposition(NativeApi api)
+    private static object RunComposition(NativeApi api, ApiTracker<IntPtr> trackPointer, ApiTracker<int> trackInt, Action<string, Action> trackVoid)
     {
-        api.InitLibrary();
+        trackVoid("FPDF_InitLibrary", () => api.InitLibrary());
         try
         {
             using var sourceBytes = PinnedBytes.From(SyntheticPdf.CreateCompositionSource());
             using var insertBytes = PinnedBytes.From(SyntheticPdf.CreateCompositionInsert());
-            var destination = api.LoadMemDocument(sourceBytes.Pointer, sourceBytes.Length, IntPtr.Zero);
+            var destination = trackPointer("FPDF_LoadMemDocument", () => api.LoadMemDocument(sourceBytes.Pointer, sourceBytes.Length, IntPtr.Zero));
             if (destination == IntPtr.Zero) throw new InvalidDataException("PDFium could not open the generated destination fixture.");
             try
             {
-                var source = api.LoadMemDocument(insertBytes.Pointer, insertBytes.Length, IntPtr.Zero);
+                var source = trackPointer("FPDF_LoadMemDocument", () => api.LoadMemDocument(insertBytes.Pointer, insertBytes.Length, IntPtr.Zero));
                 if (source == IntPtr.Zero) throw new InvalidDataException("PDFium could not open the generated insert fixture.");
                 try
                 {
-                var before = api.GetPageCount(destination);
-                var insertedCount = api.GetPageCount(source);
+                var before = trackInt("FPDF_GetPageCount", () => api.GetPageCount(destination));
+                var insertedCount = trackInt("FPDF_GetPageCount", () => api.GetPageCount(source));
                 if (before != 1 || insertedCount != 1) throw new InvalidDataException("PDFium read an unexpected source fixture page count.");
-                if (api.ImportPages(destination, source, "1", 1) == 0) throw new InvalidOperationException("FPDF_ImportPages rejected the deterministic one-page insert.");
-                var after = api.GetPageCount(destination);
+                if (trackInt("FPDF_ImportPages", () => api.ImportPages(destination, source, "1", 1)) == 0) throw new InvalidOperationException("FPDF_ImportPages rejected the deterministic one-page insert.");
+                var after = trackInt("FPDF_GetPageCount", () => api.GetPageCount(destination));
                 if (after != 2) throw new InvalidDataException($"Expected two pages after import, got {after}.");
-                var saved = SaveDocument(api, destination);
+                var saved = SaveDocument(api, destination, trackInt);
                 if (saved.Length == 0) throw new IOException("FPDF_SaveAsCopy returned an empty document.");
                 using var reopenedBytes = PinnedBytes.From(saved);
-                var reopened = api.LoadMemDocument(reopenedBytes.Pointer, reopenedBytes.Length, IntPtr.Zero);
+                var reopened = trackPointer("FPDF_LoadMemDocument", () => api.LoadMemDocument(reopenedBytes.Pointer, reopenedBytes.Length, IntPtr.Zero));
                 if (reopened == IntPtr.Zero) throw new InvalidDataException("PDFium could not reopen the composed in-memory document.");
                 try
                 {
-                    var reopenedCount = api.GetPageCount(reopened);
+                    var reopenedCount = trackInt("FPDF_GetPageCount", () => api.GetPageCount(reopened));
                     if (reopenedCount != 2) throw new InvalidDataException($"Expected two pages after saving/reopening, got {reopenedCount}.");
                     var pages = new[]
                     {
-                        RenderAndCountColor(api, reopened, 0, "red"),
-                        RenderAndCountColor(api, reopened, 1, "blue")
+                        RenderAndCountColor(api, reopened, 0, "red", trackPointer, trackInt, trackVoid),
+                        RenderAndCountColor(api, reopened, 1, "blue", trackPointer, trackInt, trackVoid)
                     };
                     return new
                     {
@@ -230,42 +327,42 @@ internal static class PdfiumSmoke
                 }
                 finally
                 {
-                    api.CloseDocument(reopened);
+                    trackVoid("FPDF_CloseDocument", () => api.CloseDocument(reopened));
                 }
             }
             finally
             {
-                api.CloseDocument(source);
+                trackVoid("FPDF_CloseDocument", () => api.CloseDocument(source));
             }
             }
             finally
             {
-                api.CloseDocument(destination);
+                trackVoid("FPDF_CloseDocument", () => api.CloseDocument(destination));
             }
         }
         finally
         {
-            api.DestroyLibrary();
+            trackVoid("FPDF_DestroyLibrary", () => api.DestroyLibrary());
         }
     }
 
-    private static object RenderAndCountColor(NativeApi api, IntPtr document, int pageIndex, string expected)
+    private static object RenderAndCountColor(NativeApi api, IntPtr document, int pageIndex, string expected, ApiTracker<IntPtr> trackPointer, ApiTracker<int> trackInt, Action<string, Action> trackVoid)
     {
-        var page = api.LoadPage(document, pageIndex);
+        var page = trackPointer("FPDF_LoadPage", () => api.LoadPage(document, pageIndex));
         if (page == IntPtr.Zero) throw new InvalidDataException($"PDFium could not reopen composed page {pageIndex}.");
-        var bitmap = api.BitmapCreate(96, 96, 0);
+        var bitmap = trackPointer("FPDFBitmap_Create", () => api.BitmapCreate(96, 96, 0));
         if (bitmap == IntPtr.Zero)
         {
-            api.ClosePage(page);
+            trackVoid("FPDF_ClosePage", () => api.ClosePage(page));
             throw new InvalidOperationException("FPDFBitmap_Create failed.");
         }
 
         try
         {
-            api.BitmapFillRect(bitmap, 0, 0, 96, 96, 0xffffffff);
-            api.RenderPageBitmap(bitmap, page, 0, 0, 96, 96, 0, 0);
-            var buffer = api.BitmapGetBuffer(bitmap);
-            var stride = api.BitmapGetStride(bitmap);
+            trackVoid("FPDFBitmap_FillRect", () => api.BitmapFillRect(bitmap, 0, 0, 96, 96, 0xffffffff));
+            trackVoid("FPDF_RenderPageBitmap", () => api.RenderPageBitmap(bitmap, page, 0, 0, 96, 96, 0, 0));
+            var buffer = trackPointer("FPDFBitmap_GetBuffer", () => api.BitmapGetBuffer(bitmap));
+            var stride = trackInt("FPDFBitmap_GetStride", () => api.BitmapGetStride(bitmap));
             if (buffer == IntPtr.Zero || stride < 96 * 4) throw new InvalidDataException("PDFium returned an invalid rendered bitmap.");
             var pixels = new byte[stride * 96];
             Marshal.Copy(buffer, pixels, 0, pixels.Length);
@@ -296,12 +393,12 @@ internal static class PdfiumSmoke
         }
         finally
         {
-            api.BitmapDestroy(bitmap);
-            api.ClosePage(page);
+            trackVoid("FPDFBitmap_Destroy", () => api.BitmapDestroy(bitmap));
+            trackVoid("FPDF_ClosePage", () => api.ClosePage(page));
         }
     }
 
-    private static object RunFormFixture(IntPtr library)
+    private static object RunFormFixture(IntPtr library, IReadOnlySet<string> exportNames, IDictionary<string, string> executionStatuses, Action checkpoint)
     {
         var api = new FormApi(library);
         api.InitLibrary();
@@ -312,53 +409,58 @@ internal static class PdfiumSmoke
             if (document == IntPtr.Zero) throw new InvalidDataException("PDFium could not open the generated AcroForm fixture.");
             try
             {
+                executionStatuses["FPDF_GetFormType"] = "started";
+                checkpoint();
                 var formType = api.GetFormType(document);
                 if (formType != 1) throw new InvalidDataException($"Expected AcroForm type 1, got {formType}.");
+                executionStatuses["FPDF_GetFormType"] = "verified";
+                checkpoint();
                 var page = api.LoadPage(document, 0);
                 if (page == IntPtr.Zero) throw new InvalidDataException("PDFium could not open the generated form page.");
                 try
                 {
+                    executionStatuses["FPDFPage_GetAnnotCount"] = "started";
+                    checkpoint();
                     var annotationCount = api.PageGetAnnotCount(page);
                     if (annotationCount != 1) throw new InvalidDataException($"Expected one widget annotation, got {annotationCount}.");
+                    executionStatuses["FPDFPage_GetAnnotCount"] = "verified";
+                    checkpoint();
+                    executionStatuses["FPDFPage_GetAnnot"] = "started";
+                    checkpoint();
                     var annotation = api.PageGetAnnot(page, 0);
                     if (annotation == IntPtr.Zero) throw new InvalidDataException("PDFium could not read the generated widget annotation.");
+                    executionStatuses["FPDFPage_GetAnnot"] = "verified";
+                    checkpoint();
                     int subtype;
-                    try { subtype = api.AnnotGetSubtype(annotation); }
-                    finally { api.PageCloseAnnot(page, annotation); }
-                    if (subtype != 20) throw new InvalidDataException($"Expected widget annotation subtype 20, got {subtype}.");
-
-                    var callbacks = FormFillCallbacks.Create(document, page);
-                    var infoPointer = callbacks.AllocateInfo();
                     try
                     {
-                        var form = api.InitFormFillEnvironment(document, infoPointer);
-                        if (form == IntPtr.Zero) throw new InvalidOperationException("FPDFDOC_InitFormFillEnvironment failed for the generated AcroForm fixture.");
-                        try
-                        {
-                            api.FormOnAfterLoadPage(page, form);
-                            var fieldType = api.PageHasFormFieldAtPoint(form, page, 50, 40);
-                            if (fieldType != 6) throw new InvalidDataException($"Expected a text field (6) at the fixture coordinate, got {fieldType}.");
-                            return new
-                            {
-                                status = "verified",
-                                api = new[] { "FPDF_GetFormType", "FPDFDOC_InitFormFillEnvironment", "FORM_OnAfterLoadPage", "FPDFPage_HasFormFieldAtPoint", "FORM_OnBeforeClosePage", "FPDFDOC_ExitFormFillEnvironment", "FPDFPage_GetAnnotCount", "FPDFPage_GetAnnot", "FPDFAnnot_GetSubtype" },
-                                formType,
-                                annotationCount,
-                                annotationSubtype = subtype,
-                                pointQuery = new { x = 50, y = 40, fieldType }
-                            };
-                        }
-                        finally
-                        {
-                            api.FormOnBeforeClosePage(page, form);
-                            api.ExitFormFillEnvironment(form);
-                            callbacks.KeepAlive();
-                        }
+                        executionStatuses["FPDFAnnot_GetSubtype"] = "started";
+                        checkpoint();
+                        subtype = api.AnnotGetSubtype(annotation);
+                        if (subtype != 20) throw new InvalidDataException($"Expected widget annotation subtype 20, got {subtype}.");
+                        executionStatuses["FPDFAnnot_GetSubtype"] = "verified";
+                        checkpoint();
                     }
                     finally
                     {
-                        Marshal.FreeHGlobal(infoPointer);
+                        executionStatuses["FPDFPage_CloseAnnot"] = "started";
+                        checkpoint();
+                        api.PageCloseAnnot(page, annotation);
+                        executionStatuses["FPDFPage_CloseAnnot"] = "verified";
+                        checkpoint();
                     }
+
+                    executionStatuses["FPDFDOC_InitFormFillEnvironment"] = "blocked";
+                    checkpoint();
+                    return new
+                    {
+                        status = "blocked",
+                        reason = "AcroForm and widget annotation parsing passed. The form-fill interaction path caused a repeatable access violation in hosted Windows CI, so interaction APIs remain unavailable and were not rerun.",
+                        formType,
+                        annotationCount,
+                        annotationSubtype = subtype,
+                        apiResults = CreateFormExportResults(exportNames, new Dictionary<string, string>(executionStatuses))
+                    };
                 }
                 finally
                 {
@@ -376,7 +478,7 @@ internal static class PdfiumSmoke
         }
     }
 
-    private static byte[] SaveDocument(NativeApi api, IntPtr document)
+    private static byte[] SaveDocument(NativeApi api, IntPtr document, ApiTracker<int> trackInt)
     {
         using var output = new MemoryStream();
         Exception? callbackError = null;
@@ -401,7 +503,7 @@ internal static class PdfiumSmoke
         Marshal.StructureToPtr(fileWrite, fileWritePointer, false);
         try
         {
-            if (api.SaveAsCopy(document, fileWritePointer, 0) == 0) throw new IOException("FPDF_SaveAsCopy failed.", callbackError);
+            if (trackInt("FPDF_SaveAsCopy", () => api.SaveAsCopy(document, fileWritePointer, 0)) == 0) throw new IOException("FPDF_SaveAsCopy failed.", callbackError);
             if (callbackError is not null) throw new IOException("PDFium's save callback failed.", callbackError);
             GC.KeepAlive(writer);
             return output.ToArray();
@@ -409,22 +511,6 @@ internal static class PdfiumSmoke
         finally
         {
             Marshal.FreeHGlobal(fileWritePointer);
-        }
-    }
-
-    private static IEnumerable<object> ExportResults(IReadOnlySet<string> exports)
-    {
-        foreach (var name in CompositionExports.Concat(FormExports).Distinct(StringComparer.Ordinal))
-        {
-            var compositionRequired = CompositionExports.Contains(name, StringComparer.Ordinal);
-            var formFixtureRequired = FormExports.Contains(name, StringComparer.Ordinal);
-            yield return new
-            {
-                name,
-                exportStatus = exports.Contains(name) ? "available" : "unavailable",
-                requiredForComposition = compositionRequired,
-                requiredForFormFixture = formFixtureRequired
-            };
         }
     }
 
@@ -497,11 +583,6 @@ internal static class PdfiumSmoke
         public readonly LoadPageDelegate LoadPage;
         public readonly ClosePageDelegate ClosePage;
         public readonly GetFormTypeDelegate GetFormType;
-        public readonly InitFormFillEnvironmentDelegate InitFormFillEnvironment;
-        public readonly ExitFormFillEnvironmentDelegate ExitFormFillEnvironment;
-        public readonly FormPageDelegate FormOnAfterLoadPage;
-        public readonly FormPageDelegate FormOnBeforeClosePage;
-        public readonly HasFormFieldAtPointDelegate PageHasFormFieldAtPoint;
         public readonly PageGetAnnotCountDelegate PageGetAnnotCount;
         public readonly PageGetAnnotDelegate PageGetAnnot;
         public readonly AnnotGetSubtypeDelegate AnnotGetSubtype;
@@ -516,11 +597,6 @@ internal static class PdfiumSmoke
             LoadPage = GetExport<LoadPageDelegate>(library, "FPDF_LoadPage");
             ClosePage = GetExport<ClosePageDelegate>(library, "FPDF_ClosePage");
             GetFormType = GetExport<GetFormTypeDelegate>(library, "FPDF_GetFormType");
-            InitFormFillEnvironment = GetExport<InitFormFillEnvironmentDelegate>(library, "FPDFDOC_InitFormFillEnvironment");
-            ExitFormFillEnvironment = GetExport<ExitFormFillEnvironmentDelegate>(library, "FPDFDOC_ExitFormFillEnvironment");
-            FormOnAfterLoadPage = GetExport<FormPageDelegate>(library, "FORM_OnAfterLoadPage");
-            FormOnBeforeClosePage = GetExport<FormPageDelegate>(library, "FORM_OnBeforeClosePage");
-            PageHasFormFieldAtPoint = GetExport<HasFormFieldAtPointDelegate>(library, "FPDFPage_HasFormFieldAtPoint");
             PageGetAnnotCount = GetExport<PageGetAnnotCountDelegate>(library, "FPDFPage_GetAnnotCount");
             PageGetAnnot = GetExport<PageGetAnnotDelegate>(library, "FPDFPage_GetAnnot");
             AnnotGetSubtype = GetExport<AnnotGetSubtypeDelegate>(library, "FPDFAnnot_GetSubtype");
@@ -548,75 +624,6 @@ internal static class PdfiumSmoke
     [StructLayout(LayoutKind.Sequential)]
     private struct FileWrite { public int Version; public IntPtr WriteBlock; }
 
-    private sealed class FormFillCallbacks
-    {
-        private readonly IntPtr[] _callbacks;
-        private readonly Delegate[] _roots;
-
-        private FormFillCallbacks(IntPtr[] callbacks, Delegate[] roots)
-        {
-            _callbacks = callbacks;
-            _roots = roots;
-        }
-
-        public static FormFillCallbacks Create(IntPtr document, IntPtr page)
-        {
-            var callbacks = new IntPtr[96];
-            var roots = new Delegate[]
-            {
-                new ReleaseCallback(_ => { }),
-                new InvalidateCallback((_, _, _, _, _, _) => { }),
-                new InvalidateCallback((_, _, _, _, _, _) => { }),
-                new CursorCallback((_, _) => { }),
-                new SetTimerCallback((_, _, _) => 0),
-                new KillTimerCallback((_, _) => { }),
-                new GetLocalTimeCallback(_ => new PdfiumSystemTime { Year = 2026, Month = 10, Day = 20 }),
-                new ReleaseCallback(_ => { }),
-                new GetPageCallback((_, requestedDocument, index) => requestedDocument == document && index == 0 ? page : IntPtr.Zero),
-                new GetCurrentPageCallback((_, requestedDocument) => requestedDocument == document ? page : IntPtr.Zero),
-                new GetRotationCallback((_, _) => 0),
-                new PointerActionCallback((_, _) => { }),
-                new TextFieldFocusCallback((_, _, _, _) => { }),
-                new PointerActionCallback((_, _) => { }),
-                new GoToActionCallback((_, _, _, _, _) => { })
-            };
-
-            for (var index = 0; index < roots.Length; index++)
-            {
-                callbacks[index] = Marshal.GetFunctionPointerForDelegate(roots[index]);
-            }
-            return new FormFillCallbacks(callbacks, roots);
-        }
-
-        public IntPtr AllocateInfo()
-        {
-            var size = IntPtr.Size * (_callbacks.Length + 1);
-            var pointer = Marshal.AllocHGlobal(size);
-            Marshal.WriteInt32(pointer, 1);
-            var callbackBase = IntPtr.Size == 8 ? 8 : 4;
-            for (var index = 0; index < _callbacks.Length; index++)
-            {
-                Marshal.WriteIntPtr(pointer, callbackBase + index * IntPtr.Size, _callbacks[index]);
-            }
-            return pointer;
-        }
-
-        public void KeepAlive() => GC.KeepAlive(_roots);
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct PdfiumSystemTime
-    {
-        public ushort Year;
-        public ushort Month;
-        public ushort DayOfWeek;
-        public ushort Day;
-        public ushort Hour;
-        public ushort Minute;
-        public ushort Second;
-        public ushort Milliseconds;
-    }
-
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void InitLibraryDelegate();
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void VoidDelegate();
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr LoadMemDocumentDelegate(IntPtr data, int size, IntPtr password);
@@ -633,21 +640,6 @@ internal static class PdfiumSmoke
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int BitmapGetStrideDelegate(IntPtr bitmap);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void BitmapDestroyDelegate(IntPtr bitmap);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int GetFormTypeDelegate(IntPtr document);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr InitFormFillEnvironmentDelegate(IntPtr document, IntPtr formInfo);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void ExitFormFillEnvironmentDelegate(IntPtr form);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void FormPageDelegate(IntPtr page, IntPtr form);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int HasFormFieldAtPointDelegate(IntPtr form, IntPtr page, double x, double y);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void ReleaseCallback(IntPtr info);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void CursorCallback(IntPtr info, int cursorType);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int SetTimerCallback(IntPtr info, int interval, IntPtr timerCallback);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void KillTimerCallback(IntPtr info, int timerId);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate PdfiumSystemTime GetLocalTimeCallback(IntPtr info);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr GetPageCallback(IntPtr info, IntPtr document, int pageIndex);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr GetCurrentPageCallback(IntPtr info, IntPtr document);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int GetRotationCallback(IntPtr info, IntPtr page);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void PointerActionCallback(IntPtr info, IntPtr value);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void TextFieldFocusCallback(IntPtr info, IntPtr value, uint length, int focused);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void GoToActionCallback(IntPtr info, int pageIndex, int zoomMode, IntPtr positions, int count);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int PageGetAnnotCountDelegate(IntPtr page);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr PageGetAnnotDelegate(IntPtr page, int index);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int AnnotGetSubtypeDelegate(IntPtr annotation);
