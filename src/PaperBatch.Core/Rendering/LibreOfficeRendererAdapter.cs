@@ -82,6 +82,8 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or CryptographicException or Win32Exception or NotSupportedException or System.Security.SecurityException)
         {
+            if (Environment.GetEnvironmentVariable("PAPERBATCH_LO_DIAGNOSTICS") == "1")
+                Console.Error.WriteLine($"LibreOffice runtime capability check rejected: {exception.GetType().Name}: {exception.Message}");
             return ValueTask.FromResult(false);
         }
     }

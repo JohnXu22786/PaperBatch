@@ -98,6 +98,7 @@ jobs:
           [[ "$(sha256sum "$pdfium_library" | cut -d ' ' -f 1)" == 'dca41ec4a2496ea7378b144cc4bad2d9e050692aaac75b9cc22411c1835f7f6e' ]]
           {
             echo 'PAPERBATCH_REQUIRE_LIBREOFFICE_TEST=1'
+            echo 'PAPERBATCH_LO_DIAGNOSTICS=1'
             echo "PAPERBATCH_LO_ENGINE_PATH=$lo_engine"
             echo "PAPERBATCH_LO_LAUNCHER_PATH=$(dirname "$lo_engine")/soffice"
             echo 'PAPERBATCH_LO_EXPECTED_VERSION=LibreOffice 26.2.2.2'
