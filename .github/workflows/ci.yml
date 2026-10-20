@@ -83,7 +83,7 @@ jobs:
                 }
               }
               $boundedOutput = $head.ToString() + $tail.ToString()
-              if ($totalRead -gt 16000) { $boundedOutput = $head.ToString() + "`n[... middle omitted ...]`n" + $tail.ToString() }
+              if ($totalRead -gt ($head.Length + $tail.Length)) { $boundedOutput = $head.ToString() + "`n[... middle omitted ...]`n" + $tail.ToString() }
             } finally {
               $reader.Dispose()
             }

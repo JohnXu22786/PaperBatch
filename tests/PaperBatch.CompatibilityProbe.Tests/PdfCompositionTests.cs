@@ -82,8 +82,12 @@ internal static class PdfCompositionTests
         adapter.ComposePdfAsync(plan, [new PdfCompositionSource("fixture", input, StaticPageContentVerified: true)], repeated).GetAwaiter().GetResult();
         var firstPdf = output.ToArray();
         var secondPdf = repeated.ToArray();
-        if (!firstPdf.SequenceEqual(secondPdf))
-            throw new InvalidOperationException($"Identical compiled inputs produced different PDF bytes. {DescribePdfDifference(firstPdf, secondPdf)}");
+        if (!PdfOutputsMatchExceptTrailerIdPayloads(firstPdf, secondPdf))
+            throw new InvalidOperationException($"Identical compiled inputs produced differences outside the generated trailer /ID string payloads. {DescribePdfDifference(firstPdf, secondPdf)}");
+        var repeatedImage = RenderFirstPage(runtimePath, expectedHash, secondPdf, 200, 100);
+        AssertColor(repeatedImage, width: 200, x: 20, y: 70, red: true);
+        AssertColor(repeatedImage, width: 200, x: 120, y: 70, red: false);
+        if (!SHA256.HashData(input).SequenceEqual(sourceHash)) throw new InvalidOperationException("Composition mutated source PDF bytes.");
     }
 
     internal static void PdfDifferenceDiagnosticsReportOffsetsWithoutPdfContent()
@@ -114,6 +118,12 @@ internal static class PdfCompositionTests
 
         var trailerId = DescribePdfDifference(Encoding.ASCII.GetBytes("trailer\n<< /ID [<1><2>] >>\nstartxref\n0\n%%EOF"), Encoding.ASCII.GetBytes("trailer\n<< /ID [<3><4>] >>\nstartxref\n0\n%%EOF"));
         Assert.Contains("confined to aligned /ID array: True", trailerId);
+        Assert.True(PdfOutputsMatchExceptTrailerIdPayloads(
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<11><22>] >>\nstartxref\n0\n%%EOF"),
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<33><44>] >>\nstartxref\n0\n%%EOF")));
+        Assert.True(!PdfOutputsMatchExceptTrailerIdPayloads(
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<11><22>] /Size 1 >>\nstartxref\n0\n%%EOF"),
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<33><44>] /Size 2 >>\nstartxref\n0\n%%EOF")));
 
         var commentedTrailer = DescribePdfDifference(
             Encoding.ASCII.GetBytes("trailer\n<< /Size 1 >>\n% trailer\n<< /ID [<1>] >>\nstartxref\n0\n%%EOF"),
@@ -130,6 +140,74 @@ internal static class PdfCompositionTests
             Encoding.ASCII.GetBytes("trailer\n<< /ID [<1> % comment ]\n<3>] >>\nstartxref\n0\n%%EOF"));
         Assert.Contains("confined to aligned /ID array: True", commentedArray);
     }
+
+    internal static void PdfOutputComparisonIgnoresOnlyTrailerIdPayloads()
+    {
+        Assert.True(PdfOutputsMatchExceptTrailerIdPayloads(
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<11><22>] /Size 1 >>\nstartxref\n0\n%%EOF"),
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<33><44>] /Size 1 >>\nstartxref\n0\n%%EOF")));
+        Assert.True(!PdfOutputsMatchExceptTrailerIdPayloads(
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<11><22>] /Size 1 >>\nstartxref\n0\n%%EOF"),
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<33><44>] /Size 2 >>\nstartxref\n0\n%%EOF")));
+        Assert.True(!PdfOutputsMatchExceptTrailerIdPayloads(
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<11><22>] >>\nstartxref\n0\n%%EOF"),
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<11><2>] >>\nstartxref\n0\n%%EOF")));
+        Assert.True(!PdfOutputsMatchExceptTrailerIdPayloads(
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<GG><HH>] >>\nstartxref\n0\n%%EOF"),
+            Encoding.ASCII.GetBytes("trailer\n<< /ID [<II><JJ>] >>\nstartxref\n0\n%%EOF")));
+        Assert.True(PdfOutputsMatchExceptTrailerIdPayloads("same"u8.ToArray(), "same"u8.ToArray()));
+    }
+
+    private static bool PdfOutputsMatchExceptTrailerIdPayloads(byte[] first, byte[] second)
+    {
+        if (first.AsSpan().SequenceEqual(second)) return true;
+        if (first.Length != second.Length) return false;
+        var firstPayloads = PdfIdPayloadRanges(first);
+        var secondPayloads = PdfIdPayloadRanges(second);
+        if (firstPayloads is not { } firstRanges || secondPayloads is not { } secondRanges || firstRanges != secondRanges) return false;
+        var differenceFound = false;
+        for (var index = 0; index < first.Length; index++)
+        {
+            if (first[index] == second[index]) continue;
+            if (IsInRange(index, firstRanges.First) || IsInRange(index, firstRanges.Second))
+            {
+                differenceFound = true;
+                continue;
+            }
+            return false;
+        }
+        return differenceFound;
+    }
+
+    private static ((int Start, int End) First, (int Start, int End) Second)? PdfIdPayloadRanges(byte[] pdf)
+    {
+        var array = PdfIdValueRange(pdf);
+        if (array is not { } idArray) return null;
+        var index = SkipPdfTrivia(pdf, idArray.Start + 1);
+        if (!TryReadHexStringPayload(pdf, idArray.End, ref index, out var first)) return null;
+        index = SkipPdfTrivia(pdf, index);
+        if (!TryReadHexStringPayload(pdf, idArray.End, ref index, out var second)) return null;
+        index = SkipPdfTrivia(pdf, index);
+        return index == idArray.End ? (first, second) : null;
+    }
+
+    private static bool TryReadHexStringPayload(byte[] pdf, int arrayEnd, ref int index, out (int Start, int End) payload)
+    {
+        payload = default;
+        if (index >= arrayEnd || pdf[index] != '<' || (index + 1 < arrayEnd && pdf[index + 1] == '<')) return false;
+        var close = pdf.AsSpan(index + 1, arrayEnd - index - 1).IndexOf((byte)'>');
+        if (close < 0) return false;
+        foreach (var value in pdf.AsSpan(index + 1, close))
+            if (!IsPdfHexDigit(value) && value is not 0 and not 9 and not 10 and not 12 and not 13 and not 32) return false;
+        payload = (index + 1, index + 1 + close);
+        index += close + 2;
+        return true;
+    }
+
+    private static bool IsInRange(int value, (int Start, int End) range) => value >= range.Start && value < range.End;
+
+    private static bool IsPdfHexDigit(byte value) =>
+        value is >= (byte)'0' and <= (byte)'9' or >= (byte)'A' and <= (byte)'F' or >= (byte)'a' and <= (byte)'f';
 
     private static string DescribePdfDifference(byte[] first, byte[] second)
     {
