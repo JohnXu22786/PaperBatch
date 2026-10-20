@@ -23,7 +23,7 @@ if (args.Length == 6 && args[0] == "--source-cache-worker")
     return SourceIntakeTests.RunCrossProcessCacheWorker(args[1], args[2], args[3], args[4], args[5]);
 }
 
-var tests = new (string Name, Action Run)[]
+var tests = new List<(string Name, Action Run)>
 {
     ("simulated evidence does not close G1", SimulatedEvidenceDoesNotCloseG1),
     ("LibreOffice rejects shared operation directories", RendererTests.LibreOfficeRejectsSharedOperationDirectory),
@@ -98,6 +98,10 @@ var tests = new (string Name, Action Run)[]
     ("prepared-run invariants reject invalid hashes and copy collections", CoreTests.PreparedRunInvariantsRejectInvalidHashesAndCopyCollections),
     ("prepared-run validates renderer media type syntax", CoreTests.PreparedRunValidatesRendererMediaTypeSyntax),
     ("layout rejects empty inputs and invalid ranges", LayoutTests.EmptyAndInvalidRangesAreDiagnostics),
+    ("physical output faces retain sheet dimensions", LayoutTests.PhysicalFacesExposeSheetDimensionsInsteadOfNUpCells),
+    ("PDF composition requires explicit static source verification", PdfCompositionTests.CompositionRequiresExplicitStaticSourceInspection),
+    ("PDF composition requires source content and output dimensions", PdfCompositionTests.CompositionRequiresEveryCompiledSourceAndOutputSize),
+    ("PDF composition requires explicit runtime and digest", PdfCompositionTests.CompositionRequiresAnExplicitDigestAndRuntimePath),
     ("layout N-up and fit are deterministic", LayoutTests.NUpAndFitAreDeterministicAndImmutable),
     ("four-up cells have distinct slot rectangles", LayoutTests.FourUpUsesFourDistinctCellRectangles),
     ("page ranges and reversal preserve source mappings", LayoutTests.RangesAndReverseOrderPreserveSelectedMapping),
@@ -171,6 +175,9 @@ var tests = new (string Name, Action Run)[]
     ("source preflight read failures stay isolated and release snapshots", SourceIntakeTests.SnapshotPreflightReadFailureDoesNotAbortBatchItems),
     ("source intake prepares valid snapshots while retaining per-item errors", SourceIntakeTests.IntakePreparesSnapshotsAndKeepsPerItemErrors)
 };
+
+if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH")))
+    tests.Add(("PDFium vector composition preserves transformed N-up placement", PdfCompositionTests.NativeCompositionRendersTwoUpFixture));
 
 var failures = 0;
 foreach (var (name, run) in tests)

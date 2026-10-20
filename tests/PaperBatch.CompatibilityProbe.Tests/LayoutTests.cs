@@ -65,6 +65,22 @@ internal static class LayoutTests
         Assert.Equal(PageSide.Back, result.Pages[1].Side);
         Assert.Equal(PageSide.Front, result.Pages[2].Side);
         Assert.Equal(2, result.SheetEstimate);
+        Assert.Equal(new PageSize(612, 792), result.Pages[1].OutputSize);
+
+        var mixedSizes = LayoutCompiler.Compile(
+            [new LayoutDocument("letter", [new PageSize(612, 792)], "Letter"), new LayoutDocument("a4", [new PageSize(595, 842)], "A4")],
+            new(Duplex: true, SeparateFilesOnFront: true));
+        Assert.True(mixedSizes.Succeeded);
+        Assert.Equal(mixedSizes.Pages[0].OutputSize, mixedSizes.Pages[1].OutputSize);
+        Assert.Equal(new PageSize(595, 842), mixedSizes.Pages[2].OutputSize);
+    }
+
+    internal static void PhysicalFacesExposeSheetDimensionsInsteadOfNUpCells()
+    {
+        var result = LayoutCompiler.Compile([Doc("a", 2)], new(NUp: NUpMode.Two, Duplex: true, SheetSize: new(700, 900), SeparateFilesOnFront: true));
+        Assert.True(result.Succeeded);
+        Assert.True(result.Pages.All(page => page.OutputSize == new PageSize(700, 900)));
+        Assert.True(result.Pages[0].Placements.All(placement => placement.TargetSize == new PageSize(350, 900)));
     }
 
     internal static void CopyExpansionAndSegmentsPreserveOrder()

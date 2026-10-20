@@ -55,7 +55,7 @@ public sealed record PagePlacement(
     PageRectangle? TargetBounds = null);
 
 /// <summary>One physical face in the deterministic print plan; blank faces have no placements.</summary>
-public sealed record PhysicalPage(int Number, int SheetNumber, PageSide Side, string SegmentKey, ImmutableArray<PagePlacement> Placements)
+public sealed record PhysicalPage(int Number, int SheetNumber, PageSide Side, string SegmentKey, ImmutableArray<PagePlacement> Placements, PageSize? OutputSize = null)
 {
     public bool IsBlank => Placements.IsDefaultOrEmpty;
 }
@@ -67,10 +67,13 @@ public sealed record LayoutCompilation(ImmutableArray<PhysicalPage> Pages, Immut
     public bool Succeeded => Diagnostics.IsDefaultOrEmpty;
 }
 
+/// <summary>Immutable input PDF bytes keyed by the matching layout item identifier.</summary>
+public sealed record PdfCompositionSource(string ItemId, ReadOnlyMemory<byte> PdfBytes, bool StaticPageContentVerified = false);
+
 /// <summary>Composes an already compiled page map using the selected pinned engine adapter.</summary>
 public interface IPageCompositionAdapter
 {
-    Task ComposePdfAsync(ImmutableArray<PhysicalPage> pages, Stream destination, CancellationToken cancellationToken = default);
+    Task ComposePdfAsync(LayoutCompilation compilation, IEnumerable<PdfCompositionSource> sources, Stream destination, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Deterministic page selection, copy expansion, N-up, duplex, and contiguous segment mapping.</summary>
@@ -191,11 +194,13 @@ public static class LayoutCompiler
             pages.Add(page);
             return true;
         }
-        void Append(string key, ImmutableArray<PagePlacement> placements, bool startsFile = false)
+        void Append(string key, ImmutableArray<PagePlacement> placements, PageSize? outputSize = null, bool startsFile = false)
         {
+            outputSize ??= options.SheetSize ?? placements[0].TargetSize;
             if (startsFile && options.SeparateFilesOnFront && options.Duplex && !needFront)
             {
-                TryAddPhysicalPage(new PhysicalPage(pages.Count + 1, sheet++, PageSide.Back, previousKey ?? key, []));
+                var previousOutputSize = pages.Count == 0 ? outputSize : pages[^1].OutputSize ?? outputSize;
+                TryAddPhysicalPage(new PhysicalPage(pages.Count + 1, sheet++, PageSide.Back, previousKey ?? key, [], previousOutputSize));
                 needFront = true;
             }
             var side = options.Duplex ? (needFront ? PageSide.Front : PageSide.Back) : PageSide.Front;
@@ -205,7 +210,7 @@ public static class LayoutCompiler
                 previousCompatibilityKey = key;
             }
             var segmentKey = $"{segmentOrdinal}:{key}";
-            TryAddPhysicalPage(new PhysicalPage(pages.Count + 1, sheet, side, segmentKey, placements));
+            TryAddPhysicalPage(new PhysicalPage(pages.Count + 1, sheet, side, segmentKey, placements, outputSize));
             if (options.Duplex) { needFront = !needFront; if (side == PageSide.Back) sheet++; }
             else sheet++;
             previousKey = key;
@@ -221,20 +226,21 @@ public static class LayoutCompiler
             {
                 if (options.SeparatePacketsOnFront && options.Duplex && lastCopy != 0 && !needFront)
                 {
-                    TryAddPhysicalPage(new PhysicalPage(pages.Count + 1, sheet++, PageSide.Back, previousKey ?? "blank", []));
+                    var blankSize = pages.Count > 0 ? pages[pages.Count - 1].OutputSize : options.SheetSize ?? docs[unit.Doc].Pages[selectedByDoc[unit.Doc][0]];
+                    TryAddPhysicalPage(new PhysicalPage(pages.Count + 1, sheet++, PageSide.Back, previousKey ?? "blank", [], blankSize));
                     needFront = true;
                 }
             }
             if (options.AddFrontCover && (startsPacket || unitIndex == 0))
             {
                 var coverSize = options.SheetSize ?? docs[unit.Doc].Pages[selectedByDoc[unit.Doc][0]];
-                Append(SegmentKey(docs[unit.Doc], coverSize), [new PagePlacement("$cover", 0, unit.Copy, 0, coverSize, coverSize, 1, Kind: LayoutPageKind.Cover)]);
+                Append(SegmentKey(docs[unit.Doc], coverSize), [new PagePlacement("$cover", 0, unit.Copy, 0, coverSize, coverSize, 1, Kind: LayoutPageKind.Cover)], coverSize);
             }
             var samePacketAsPrevious = options.CopyOrder == CopyOrder.PerDocument || unit.Copy == lastCopy;
             if (options.AddSeparatorsBetweenFiles && lastDoc >= 0 && unit.Doc != lastDoc && samePacketAsPrevious)
             {
                 var separatorSize = options.SheetSize ?? docs[unit.Doc].Pages[selectedByDoc[unit.Doc][0]];
-                Append(SegmentKey(docs[unit.Doc], separatorSize), [new PagePlacement("$separator", 0, unit.Copy, 0, separatorSize, separatorSize, 1, Kind: LayoutPageKind.Separator)]);
+                Append(SegmentKey(docs[unit.Doc], separatorSize), [new PagePlacement("$separator", 0, unit.Copy, 0, separatorSize, separatorSize, 1, Kind: LayoutPageKind.Separator)], separatorSize);
             }
             lastDoc = unit.Doc;
             lastCopy = unit.Copy;
@@ -259,11 +265,12 @@ public static class LayoutCompiler
                     var bounds = new PageRectangle(slot % columns * cell.WidthPoints, slot / columns * cell.HeightPoints, cell.WidthPoints, cell.HeightPoints);
                     return new PagePlacement(docs[unit.Doc].ItemId, x + 1, unit.Copy, slot, source, cell, scale, rotated, TargetBounds: bounds);
                 }).ToImmutableArray();
-                Append(key, placements, startsFile: offset == 0);
+                Append(key, placements, sheetSize, startsFile: offset == 0);
             }
         }
         if (outputLimitExceeded) return Failed("OutputLimitExceeded", "The compiled page count exceeds the configured limit.");
         return new LayoutCompilation(pages.ToImmutable(), [], options.Duplex ? (pages.Count + 1) / 2 : pages.Count);
+
     }
 
     private static LayoutCompilation Failed(string code, string message) => new([], [new LayoutDiagnostic(code, message)], 0);

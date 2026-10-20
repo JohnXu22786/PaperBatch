@@ -37,6 +37,34 @@ jobs:
       - name: Run managed test runner
         run: dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
 
+      - name: Download and verify temporary PDFium fixture runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'pdfium-win-x64.tgz'
+          $extract = Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-test'
+          Invoke-WebRequest -Uri 'https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8111/pdfium-win-x64.tgz' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3452d11031050ec65e57f180215b57b9e6d465e3fbedafa8a77ad90885c7d23e') { throw 'Pinned PDFium archive digest mismatch.' }
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          tar -xzf $archive -C $extract
+          $dll = Get-ChildItem -Path $extract -Filter 'pdfium.dll' -File -Recurse | Select-Object -First 1
+          if ($null -eq $dll) { throw 'Pinned PDFium archive did not contain pdfium.dll.' }
+          if ((Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f') { throw 'Pinned PDFium DLL digest mismatch.' }
+          Add-Content $env:GITHUB_ENV "PAPERBATCH_PDFIUM_TEST_PATH=$($dll.FullName)"
+          Add-Content $env:GITHUB_ENV 'PAPERBATCH_PDFIUM_TEST_SHA256=a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f'
+
+      - name: Verify PDFium vector composition on the pinned Windows runtime
+        if: runner.os == 'Windows'
+        run: dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
+
+      - name: Remove temporary PDFium test runtime
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'pdfium-win-x64.tgz')
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-test')
+
       - name: Compile Python sources
         run: python -m compileall -q tools tests
 
