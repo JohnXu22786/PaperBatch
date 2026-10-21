@@ -26,9 +26,12 @@ The package is a lite shell prototype, not a complete offline renderer. It does
 not contain LibreOffice, Microsoft Office, WPS Office, PDFium, printer drivers,
 or fonts. Those runtimes are intentionally absent: there is no reviewed,
 license-cleared redistribution bundle for a full offline Windows runtime in
-this prototype. PDFium-dependent preview/preparation remains unavailable until
-the user configures a separately trusted runtime, and production print
-submission is not implemented. The package does not establish clean-PC
+this prototype. The package omits PDFium, so preparation and preview can operate
+only after the user supplies a separately trusted runtime using an explicit
+`PAPERBATCH_PDFIUM_RUNTIME_PATH` and matching
+`PAPERBATCH_PDFIUM_RUNTIME_SHA256`; the application verifies the digest before
+loading it. The package does not provide or select that runtime. Production
+print submission is not implemented. The package does not establish clean-PC
 installation, Office/WPS compatibility, a printer route, or physical output.
 
 The binary is unsigned. No paid signing certificate or signing service is
