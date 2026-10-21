@@ -883,7 +883,7 @@ public sealed class SourceSnapshotCache
         bool Retained,
         byte[]? ZoneIdentifier = null);
 
-    private sealed class PhysicalSourceFileAccess : ISourceFileAccess
+    internal sealed class PhysicalSourceFileAccess : ISourceFileAccess
     {
         public SourceFileIdentity GetPathIdentity(string path)
         {
@@ -1095,7 +1095,7 @@ public sealed class SourceSnapshotCache
         }
 
         [StructLayout(LayoutKind.Sequential)]
-        private struct LinuxStat
+        internal struct LinuxStat
         {
             public ulong Device;
             public ulong Inode;
@@ -1117,7 +1117,7 @@ public sealed class SourceSnapshotCache
         }
 
         [StructLayout(LayoutKind.Sequential)]
-        private struct LinuxTimespec
+        internal struct LinuxTimespec
         {
             public long Seconds;
             public long Nanoseconds;
