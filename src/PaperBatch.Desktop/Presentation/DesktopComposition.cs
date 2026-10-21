@@ -100,7 +100,7 @@ internal sealed class ProductionPresentationSources :
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
     private readonly Dictionary<string, string> _queueLocations = new(StringComparer.Ordinal);
-    private IReadOnlyList<string> _matchedRuleIds = [];
+    private IReadOnlyList<string> _resolutionSummaries = [];
     private readonly HashSet<string> _preparableQueueItems = new(StringComparer.Ordinal);
 
     public event Action<string>? PreparedArtifactChanged;
@@ -209,7 +209,7 @@ internal sealed class ProductionPresentationSources :
     private readonly Dictionary<string, List<PreflightFindingSnapshot>> _findings = new(StringComparer.Ordinal);
     public bool CanPrepare => _preparation is not null && _queue.Count > 0 &&
         _queue.All(item => _queueLocations.ContainsKey(item.Id) && _preparableQueueItems.Contains(item.Id));
-    public IReadOnlyList<string> MatchedRuleIds => _matchedRuleIds;
+    public IReadOnlyList<string> ResolutionSummaries => _resolutionSummaries;
 
     public async Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings, LayoutOptions layoutOptions,
         PaperBatch.Core.Recipes.JobRecipe? recipe = null, CancellationToken cancellationToken = default)
@@ -245,8 +245,8 @@ internal sealed class ProductionPresentationSources :
                     requestedSettings.ScalingMode, requestedSettings.Media, requestedSettings.PrinterId, requestedSettings.TrayId);
                 resolved.Add(PaperBatch.Core.Recipes.RecipeSettingsResolver.Resolve(recipe, recipeSource, type, batchDefaults));
             }
-            _matchedRuleIds = resolved.Where(item => item.MatchingRuleId is not null)
-                .Select(item => item.MatchingRuleId!).Distinct(StringComparer.Ordinal).ToArray();
+            _resolutionSummaries = resolved.Select((item, index) => FormatResolutionSummary(
+                Path.GetFileName(paths[index].Path), item)).ToArray();
             var first = resolved[0];
             if (resolved.Skip(1).Any(item => item.Values.ColorMode != first.Values.ColorMode ||
                 item.Values.DuplexMode != first.Values.DuplexMode || item.Values.PrinterId != first.Values.PrinterId ||
@@ -279,7 +279,7 @@ internal sealed class ProductionPresentationSources :
             perItemLayoutSettings = documentSettings;
             requestedSettings = sourceSettings[0];
         }
-        else _matchedRuleIds = [];
+        else _resolutionSummaries = [];
         var result = await _preparation.PrepareAsync(paths, requestedSettings, layoutOptions,
             "desktop-prepare-" + Guid.NewGuid().ToString("N"),
             new RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true), now,
@@ -289,6 +289,33 @@ internal sealed class ProductionPresentationSources :
             foreach (var item in _queue) RegisterPreparedRun(item.Id, run);
         }
         return result;
+    }
+
+    private static string FormatResolutionSummary(string fileName, PaperBatch.Core.Recipes.ResolvedRecipeSettings resolved)
+    {
+        string Origin(string field, string fallback = "batch/recipe defaults")
+        {
+            var source = resolved.Provenance.GetValueOrDefault(field, fallback);
+            if (source == "file override") return "file override/单文件覆盖";
+            if (source.StartsWith("rule ", StringComparison.Ordinal)) return "rule/规则 " + source[5..];
+            return "batch/recipe defaults/批次或配方默认值";
+        }
+        string Entry(string field, string label, string value, string fallback = "batch/recipe defaults") =>
+            $"{label}={value} ({Origin(field, fallback)})";
+        var ruleOrDefault = resolved.MatchingRuleId is null
+            ? "no matching rule/无匹配规则"
+            : "first matching rule/首个匹配规则 " + resolved.MatchingRuleId;
+        var noValue = "not selected/未选择";
+        return $"{fileName}: {ruleOrDefault}; requested/请求值 {Entry("copies", "copies/份数", resolved.Values.Copies.ToString(System.Globalization.CultureInfo.InvariantCulture))}; " +
+            $"{Entry("colorMode", "color mode/色彩模式", resolved.Values.ColorMode.ToString())}; " +
+            $"{Entry("duplexMode", "duplex mode/双面模式", resolved.Values.DuplexMode.ToString())}; " +
+            $"{Entry("orientation", "orientation/方向", resolved.Values.Orientation.ToString())}; " +
+            $"{Entry("scalingMode", "scaling/缩放", resolved.Values.ScalingMode.ToString())}; " +
+            $"{Entry("media", "media/纸张", resolved.Values.Media)}; " +
+            $"{Entry("printerId", "printer/打印机", resolved.Values.PrinterId ?? noValue)}; " +
+            $"{Entry("trayId", "tray/纸盒", resolved.Values.TrayId ?? noValue)}; " +
+            $"{Entry("nUp", "pages per sheet/每张页数", resolved.NUp?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "batch control/批次控件", "batch layout controls")}; " +
+            $"{Entry("pageRange", "page range/页码范围", resolved.PageRange ?? "all pages/全部页面", "batch page-range control")}.";
     }
 
     private static System.Collections.Immutable.ImmutableArray<PageRange> ParseRecipeRange(string value)

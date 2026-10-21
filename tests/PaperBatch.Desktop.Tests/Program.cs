@@ -460,7 +460,8 @@ static void RecipeDuplexRequestChangesCompiledLayout()
             artifacts: artifacts, runStore: store, preparation: coordinator);
         sources.ImportAsync([firstPath, secondPath]).GetAwaiter().GetResult();
         var recipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "r", "duplex",
-            [new RecipeSource("first", firstPath), new RecipeSource("second", secondPath)],
+            [new RecipeSource("first", firstPath) { Override = new RecipeSettingsOverride(DuplexMode: DuplexMode.LongEdge) },
+             new RecipeSource("second", secondPath)],
             new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter"))
         {
             Rules = [new RecipeSettingRule("duplex-rule", "*.pdf", "pdf", new RecipeSettingsOverride(DuplexMode: DuplexMode.LongEdge))]
@@ -478,6 +479,9 @@ static void RecipeDuplexRequestChangesCompiledLayout()
         Assert.Equal(2, composer.CompiledPageCount);
         Assert.True(composer.CompiledSides.SequenceEqual([PageSide.Front, PageSide.Back]));
         Assert.Equal(0, store.GetRecentRuns().Length);
+        Assert.True(sources.ResolutionSummaries[0].Contains("duplex mode/双面模式=LongEdge (file override/单文件覆盖)", StringComparison.Ordinal));
+        Assert.True(sources.ResolutionSummaries[1].Contains("duplex mode/双面模式=LongEdge (rule/规则 duplex-rule)", StringComparison.Ordinal));
+        Assert.True(sources.ResolutionSummaries[0].Contains("orientation/方向=Auto (batch/recipe defaults/批次或配方默认值)", StringComparison.Ordinal));
         var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
         Assert.True(viewModel.PreparationSettingsNote.Contains("not validated", StringComparison.OrdinalIgnoreCase));
@@ -715,7 +719,7 @@ sealed class FakePreparationSource(IReadOnlyList<QueueItemSnapshot> items) : IQu
 {
     public event Action<string>? PreparedArtifactChanged { add { } remove { } }
     public bool CanPrepare => true;
-    public IReadOnlyList<string> MatchedRuleIds => [];
+    public IReadOnlyList<string> ResolutionSummaries => [];
     public PrintSettings? Settings { get; private set; }
     public PaperBatch.Core.Layout.LayoutOptions? Options { get; private set; }
     public PaperBatch.Core.Recipes.JobRecipe? Recipe { get; private set; }

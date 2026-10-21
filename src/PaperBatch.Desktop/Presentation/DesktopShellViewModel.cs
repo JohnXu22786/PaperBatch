@@ -134,12 +134,12 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     {
         get
         {
-            var matches = _queueSource is IQueuePreparationPresentationSource source ? source.MatchedRuleIds : [];
+            var summaries = _queueSource is IQueuePreparationPresentationSource source ? source.ResolutionSummaries : [];
             if (_activeRecipe is null) return Localize("No recipe is loaded; batch controls supply these requested values.", "未加载配方；当前请求值来自批次控件。");
-            return matches.Count == 0
-                ? Localize("No matching rule is recorded yet; rules are resolved during preparation, then per-file overrides apply.", "尚无匹配规则记录；准备时解析规则，随后应用单文件覆盖值。")
-                : Localize("First matching rule: " + string.Join(", ", matches) + ". Per-file overrides take priority.",
-                    "首个匹配规则：" + string.Join("、", matches) + "。单文件覆盖值优先级最高。");
+            return summaries.Count == 0
+                ? Localize("Resolved values and their source will appear here after preparation.", "准备后将在此处显示解析值及其来源。")
+                : Localize("Per-file requested values and provenance: " + string.Join("\n", summaries),
+                    "每个文件的请求值及来源：" + string.Join("\n", summaries));
         }
     }
     public bool CanPrepareQueue => IsProductionMode && _queueSource is IQueuePreparationPresentationSource { CanPrepare: true };
