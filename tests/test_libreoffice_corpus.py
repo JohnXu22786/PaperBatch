@@ -170,9 +170,11 @@ class LibreOfficeCorpusTests(unittest.TestCase):
             pinned = SimpleNamespace(sha256="a" * 64, runtime_directory_sha256="b" * 64, close=lambda: None)
             profiles = []
             temporary_directories = []
+            launcher_modes = []
 
             def invoke(_engine, args, profile, _timeout, **kwargs):
                 profiles.append(profile)
+                launcher_modes.append(kwargs.get("use_launcher", False))
                 if "--version" in args:
                     return {"stdout": "LibreOffice 26.2.2.2", "stderr": "", "exitCode": 0, "timedOut": False, "identityVerified": True}
                 temporary_directories.append(kwargs["temporary_directory"])
@@ -194,6 +196,7 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertEqual(len(set(profiles)), 3)
         self.assertEqual(len(set(temporary_directories)), 2)
         self.assertTrue(all(path.name == "intermediate" for path in temporary_directories))
+        self.assertEqual(launcher_modes, [False, True, True])
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "corpus conversion requires the Linux seccomp sandbox")
     def test_exhausted_batch_budget_does_not_launch_version_probe(self):
@@ -263,6 +266,48 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertIn("exited with code 1", result["reason"])
         self.assertIn("no output PDF was produced", result["reason"])
         self.assertIn("stdout, stderr empty", result["reason"])
+
+    def test_prelaunch_deadline_report_does_not_claim_a_conversion_ran(self):
+        fixture = {"id": "docx_variant_000", "path": "variants/docx_000.docx", "sha256": "a" * 64, "size_bytes": 123}
+        command = {
+            "exitCode": None, "timedOut": False, "launchAttempted": False, "budgetExpiredBeforeLaunch": True,
+            "durationSeconds": 0.36, "stdout": "", "stderr": "total runtime budget exhausted before LibreOffice launch",
+        }
+
+        result = run_libreoffice_corpus.result_record(
+            fixture, status="failed", input_sha256="a" * 64, output_bytes=None,
+            output_sha256=None, page_count=None, command=command,
+        )
+
+        self.assertIn("before LibreOffice launch", result["reason"])
+        self.assertNotIn("during conversion", result["reason"])
+
+        setup_failure = run_libreoffice_corpus.result_record(
+            fixture, status="failed", input_sha256="a" * 64, output_bytes=None,
+            output_sha256=None, page_count=None,
+            command={"exitCode": None, "timedOut": False, "launchAttempted": False,
+                     "stderr": "runtime directory verification failed"},
+        )
+        self.assertIn("was not launched", setup_failure["reason"])
+        self.assertNotIn("during conversion", setup_failure["reason"])
+
+    def test_identity_failure_is_structured_even_when_process_and_pdf_succeed(self):
+        fixture = {"id": "docx_variant_000", "path": "variants/docx_000.docx", "sha256": "a" * 64, "size_bytes": 123}
+        command = {
+            "exitCode": 0, "timedOut": False, "launchAttempted": True,
+            "identityVerified": False, "identityFailure": "runtime components changed after conversion",
+            "stdout": "converted", "stderr": "identity verification failed",
+        }
+
+        result = run_libreoffice_corpus.result_record(
+            fixture, status="failed", input_sha256="a" * 64, output_bytes=100,
+            output_sha256="b" * 64, page_count=1, command=command, structure_valid=True,
+        )
+
+        self.assertFalse(result["identityVerified"])
+        self.assertEqual(result["identityFailure"], command["identityFailure"])
+        self.assertIn("runtime components changed", result["reason"])
+        self.assertIn("output PDF was 100 bytes", result["reason"])
 
 
 if __name__ == "__main__":

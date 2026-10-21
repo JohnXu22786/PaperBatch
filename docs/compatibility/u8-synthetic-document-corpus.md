@@ -29,7 +29,7 @@ dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.Compat
 
 ## Pinned LibreOffice synthetic corpus run
 
-The Linux x86_64 CI job runs the manifest-selected 30 scaled variants in each of DOCX, XLSX and PPTX through the directly invoked LibreOffice 26.2.2.2 binary already verified by the pinned archive signature and binary SHA-256. The command is:
+The Linux x86_64 CI job runs the manifest-selected 30 scaled variants in each of DOCX, XLSX and PPTX with LibreOffice 26.2.2.2, whose engine binary is verified by the pinned archive signature and binary SHA-256. The runner uses LibreOffice's launcher startup chain from an isolated program overlay and binds its `soffice.bin` entry to the sealed pinned engine image. The command is:
 
 ```sh
 python3 tools/run_libreoffice_corpus.py \

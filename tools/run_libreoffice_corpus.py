@@ -172,6 +172,9 @@ def result_record(
         "status": status,
         "exitCode": command.get("exitCode") if command else None,
         "timedOut": command.get("timedOut") if command else False,
+        "launchAttempted": command.get("launchAttempted") if command else False,
+        "identityVerified": command.get("identityVerified") if command else False,
+        "identityFailure": command.get("identityFailure") if command else None,
         "durationSeconds": command.get("durationSeconds") if command else 0,
         "outputPdfBytes": output_bytes,
         "outputPdfSha256": output_sha256,
@@ -187,6 +190,11 @@ def _conversion_failure_reason(
 ) -> str:
     if command is None:
         return "LibreOffice was not launched; no output PDF was produced."
+    if command.get("budgetExpiredBeforeLaunch"):
+        return "total corpus runtime budget exhausted before LibreOffice launch."
+    if command.get("launchAttempted") is False:
+        detail = command.get("stderr") or command.get("identityFailure") or "runtime preparation failed"
+        return f"LibreOffice was not launched; {_bounded_log(str(detail))}."
     if command.get("timedOut"):
         process = f"LibreOffice exceeded its per-file timeout after {command.get('durationSeconds')} seconds"
     else:
@@ -204,6 +212,9 @@ def _conversion_failure_reason(
     output = "no output PDF was produced" if output_bytes is None else f"output PDF was {output_bytes} bytes"
     if output_bytes is not None and not structure_valid:
         output += " but failed PDF structure validation"
+    if command.get("identityVerified") is False:
+        identity_failure = command.get("identityFailure") or command.get("stderr") or "pinned engine/runtime identity could not be verified"
+        return f"LibreOffice output was rejected because {_bounded_log(str(identity_failure))}; {output}."
     empty_logs = [name for name in ("stdout", "stderr") if not command.get(name)]
     details = f"; {', '.join(empty_logs)} empty" if empty_logs else ""
     return f"{process}; {output}{details}."
@@ -302,7 +313,8 @@ def run_corpus(engine_binary: str, expected_engine_sha256: str, timeout_seconds:
                 version = probe.invoke(engine_path, ["--version"], root / "version-profile",
                                        min(timeout_seconds, remaining), expected_engine_sha256=expected_engine_sha256,
                                        pinned_engine=pinned, max_output_file_bytes=MAX_PDF_BYTES,
-                                       max_log_chars=MAX_LOG_CHARS, disable_network=True)
+                                       max_log_chars=MAX_LOG_CHARS, disable_network=True,
+                                       deadline_monotonic=deadline)
             else:
                 version = {"exitCode": None, "timedOut": False, "durationSeconds": 0,
                            "identityVerified": False, "stderr": "total corpus runtime budget exhausted before version probe"}
@@ -353,7 +365,13 @@ def run_corpus(engine_binary: str, expected_engine_sha256: str, timeout_seconds:
                         run_dir / "profile", min(timeout_seconds, remaining),
                         expected_engine_sha256=expected_engine_sha256, pinned_engine=pinned,
                         max_output_file_bytes=MAX_PDF_BYTES, max_log_chars=MAX_LOG_CHARS, disable_network=True,
-                        temporary_directory=temporary_directory)
+                        temporary_directory=temporary_directory, use_launcher=True,
+                        deadline_monotonic=deadline)
+                    if command.get("budgetExpiredBeforeLaunch") or command.get("launchAttempted") is False:
+                        results.append(result_record(fixture, status="failed", input_sha256=input_sha256,
+                            output_bytes=None, output_sha256=None, page_count=None, command=command,
+                            reason=_conversion_failure_reason(command, None, False)))
+                        continue
                     if time.monotonic() >= deadline:
                         results.append(result_record(fixture, status="failed", input_sha256=input_sha256,
                             output_bytes=None, output_sha256=None, page_count=None, command=command,

@@ -266,6 +266,88 @@ def fixture_classic_xref_is_valid(
 
 
 class LibreOfficeProbeFixtureTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.uname().machine.lower() in {"x86_64", "amd64"}, "Linux x86_64 seccomp regression")
+    def test_launcher_mode_uses_verified_runtime_wrapper_under_no_network_sandbox(self):
+        with tempfile.TemporaryDirectory(prefix="paperbatch-lo-launcher-mode-test-") as directory:
+            program = Path(directory) / "program"
+            program.mkdir()
+            engine = program / "soffice.bin"
+            launcher = program / "soffice"
+            engine.write_text("#!/bin/sh\n[ \"$1\" = --wrapper-start ] || exit 81\nprintf 'pinned-engine-started\\n'\n", encoding="utf-8")
+            launcher.write_text("#!/bin/sh\nexec \"$(dirname \"$0\")/soffice.bin\" --wrapper-start\n", encoding="utf-8")
+            engine.chmod(0o700)
+            launcher.chmod(0o700)
+            digest = hashlib.sha256(engine.read_bytes()).hexdigest()
+
+            direct = probe_libreoffice_export.invoke(
+                engine, ["--version"], Path(directory) / "direct-profile", 5,
+                expected_engine_sha256=digest, disable_network=True, max_log_chars=100,
+            )
+            wrapped = probe_libreoffice_export.invoke(
+                engine, ["--version"], Path(directory) / "wrapper-profile", 5,
+                expected_engine_sha256=digest, disable_network=True, max_log_chars=100, use_launcher=True,
+                temporary_directory=Path(directory) / "intermediate",
+            )
+
+        self.assertEqual(direct["exitCode"], 81)
+        self.assertEqual(wrapped["exitCode"], 0)
+        self.assertEqual(wrapped["stdout"], "pinned-engine-started")
+        self.assertTrue(wrapped["executionTarget"].endswith("/soffice"))
+        self.assertTrue(wrapped["identityVerified"])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux runtime deadline regression")
+    def test_expired_absolute_deadline_does_not_launch_after_runtime_preparation(self):
+        with tempfile.TemporaryDirectory(prefix="paperbatch-lo-deadline-test-") as directory:
+            engine = Path(directory) / "soffice.bin"
+            engine.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            engine.chmod(0o700)
+            digest = hashlib.sha256(engine.read_bytes()).hexdigest()
+
+            with mock.patch.object(probe_libreoffice_export.subprocess, "run") as run_mock:
+                result = probe_libreoffice_export.invoke(
+                    engine, ["--version"], Path(directory) / "profile", 5,
+                    expected_engine_sha256=digest, deadline_monotonic=0,
+                )
+
+        run_mock.assert_not_called()
+        self.assertTrue(result["budgetExpiredBeforeLaunch"])
+        self.assertFalse(result["timedOut"])
+        self.assertIsNone(result["exitCode"])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux post-process identity regression")
+    def test_post_process_identity_failure_preserves_exit_and_bounded_logs(self):
+        with tempfile.TemporaryDirectory(prefix="paperbatch-lo-post-identity-test-") as directory:
+            engine = Path(directory) / "soffice.bin"
+            engine.write_text("#!/bin/sh\nprintf 'conversion-finished\\n'\nexit 0\n", encoding="utf-8")
+            engine.chmod(0o700)
+            digest = hashlib.sha256(engine.read_bytes()).hexdigest()
+            verify = probe_libreoffice_export.PinnedEngine.verify_runtime_directory
+            calls = 0
+
+            def fail_after_process(instance, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise probe_libreoffice_export.PinnedEngineError("runtime identity changed")
+                return verify(instance, **kwargs)
+
+            with mock.patch.object(
+                probe_libreoffice_export.PinnedEngine,
+                "verify_runtime_directory",
+                autospec=True,
+                side_effect=fail_after_process,
+            ):
+                result = probe_libreoffice_export.invoke(
+                    engine, ["--version"], Path(directory) / "profile", 5,
+                    expected_engine_sha256=digest, max_log_chars=100,
+                )
+
+        self.assertEqual(result["exitCode"], 0)
+        self.assertEqual(result["stdout"], "conversion-finished")
+        self.assertIn("identity verification failed", result["stderr"])
+        self.assertFalse(result["identityVerified"])
+        self.assertTrue(result["launchAttempted"])
+
     def test_classic_xref_rejects_an_in_use_object_zero_catalog(self):
         valid_pdf = minimal_pdf()
         xref_offset = valid_pdf.index(b"xref\n")
@@ -1834,9 +1916,9 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
                     expected_engine_sha256=expected_sha256,
                 )
 
-        self.assertIsNone(result["exitCode"])
+        self.assertEqual(result["exitCode"], 0)
         self.assertEqual(observed_child_output, ["original-image"])
-        self.assertEqual(result["stdout"], "")
+        self.assertEqual(result["stdout"], "original-image")
         self.assertEqual(result["command"][0], result["executionTarget"])
         self.assertTrue(result["executionTarget"].startswith("/proc/self/fd/"))
         self.assertFalse(result["identityVerified"])

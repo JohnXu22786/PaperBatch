@@ -252,7 +252,7 @@ class PinnedEngine:
                     os.close(self.runtime_directory_descriptor)
                     self.runtime_directory_descriptor = None
 
-    def verify_runtime_directory(self) -> str:
+    def verify_runtime_directory(self, *, verify_engine_image: bool = False) -> str:
         if self.runtime_directory_path is None:
             raise PinnedEngineError("The selected engine has no validated runtime directory.")
         observed = runtime_directory_sha256(
@@ -264,7 +264,54 @@ class PinnedEngine:
             raise PinnedEngineError(
                 "LibreOffice runtime components changed while the process was running; version/export evidence is blocked."
             )
+        if verify_engine_image and sys.platform.startswith("linux"):
+            engine_path = Path(self.runtime_directory_path) / Path(self.engine_path).name
+            with open_readonly_regular_file(engine_path) as engine_stream:
+                if sha256_stream(engine_stream).casefold() != self.sha256.casefold():
+                    raise PinnedEngineError(
+                        "The installed LibreOffice engine no longer matches the pinned engine image."
+                    )
         return observed
+
+    def create_launcher_overlay(self, overlay_directory: Path) -> Path:
+        """Create an isolated LO program view whose engine entry points at the sealed image."""
+        if not sys.platform.startswith("linux") or self.runtime_directory_path is None:
+            raise PinnedEngineError("The LibreOffice launcher overlay requires a verified Linux runtime directory.")
+        self.verify_runtime_directory(verify_engine_image=True)
+        source_directory = Path(self.runtime_directory_path)
+        overlay_directory.mkdir(parents=True, exist_ok=False)
+        for entry in os.scandir(source_directory):
+            if entry.name in {"soffice", "soffice.bin"}:
+                continue
+            target = overlay_directory / entry.name
+            os.symlink(entry.path, target, target_is_directory=entry.is_dir(follow_symlinks=False))
+
+        launcher_source = source_directory / "soffice"
+        with open_readonly_regular_file(launcher_source) as launcher_stream:
+            launcher_stat = os.fstat(launcher_stream.fileno())
+            if not stat.S_ISREG(launcher_stat.st_mode) or launcher_stat.st_size > 1024 * 1024:
+                raise PinnedEngineError("The LibreOffice launcher is not a bounded regular file.")
+            launcher_bytes = launcher_stream.read(1024 * 1024 + 1)
+            if len(launcher_bytes) != launcher_stat.st_size:
+                raise PinnedEngineError("The LibreOffice launcher changed while the overlay was being created.")
+        overlay_launcher = overlay_directory / "soffice"
+        overlay_launcher.write_bytes(launcher_bytes)
+        os.chmod(overlay_launcher, stat.S_IMODE(launcher_stat.st_mode))
+        if not (launcher_stat.st_mode & 0o111):
+            raise PinnedEngineError("The LibreOffice runtime launcher is not executable.")
+
+        engine_descriptor = self.stream.fileno()
+        engine_source = source_directory / Path(self.engine_path).name
+        engine_metadata = os.stat(engine_source, follow_symlinks=False)
+        engine_open = open_readonly_regular_file(engine_source)
+        try:
+            engine_status = os.fstat(engine_open.fileno())
+            if (engine_status.st_dev, engine_status.st_ino) != (engine_metadata.st_dev, engine_metadata.st_ino):
+                raise PinnedEngineError("The installed LibreOffice engine changed while the overlay was being created.")
+        finally:
+            engine_open.close()
+        os.symlink(f"/proc/{os.getpid()}/fd/{engine_descriptor}", overlay_directory / "soffice.bin")
+        return overlay_launcher
 
 
 def runtime_directory_sha256(
@@ -770,6 +817,8 @@ def invoke(
     max_log_chars: int | None = None,
     disable_network: bool = False,
     temporary_directory: Path | None = None,
+    use_launcher: bool = False,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, Any]:
     profile.mkdir(parents=True, exist_ok=True)
     command = [
@@ -784,6 +833,8 @@ def invoke(
     execution_target = str(executable)
     started = time.monotonic()
     owns_pinned_engine = pinned_engine is None
+    launch_attempted = False
+    completed_process: subprocess.CompletedProcess[str] | None = None
     try:
         if pinned_engine is None and expected_engine_sha256 is None:
             raise PinnedEngineError("No trusted engine SHA-256 pin was supplied before launch.")
@@ -791,8 +842,25 @@ def invoke(
             pinned_engine = open_pinned_engine(executable, expected_engine_sha256)
         execution_target = pinned_engine.launch_target
         command[0] = pinned_engine.launch_target
-        pinned_engine.verify_runtime_directory()
+        pinned_engine.verify_runtime_directory(verify_engine_image=use_launcher)
         launch_kwargs = dict(pinned_engine.launch_kwargs)
+        if use_launcher:
+            if not sys.platform.startswith("linux") or pinned_engine.runtime_directory_path is None:
+                raise PinnedEngineError("The LibreOffice launcher is supported only in a verified Linux runtime directory.")
+            if temporary_directory is None:
+                raise PinnedEngineError("The LibreOffice launcher requires an isolated temporary directory.")
+            launcher_path = pinned_engine.create_launcher_overlay(temporary_directory / "lo-program")
+            launcher_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            launcher_fd = os.open(launcher_path, launcher_flags)
+            try:
+                launcher_status = os.fstat(launcher_fd)
+                if not stat.S_ISREG(launcher_status.st_mode) or not (launcher_status.st_mode & 0o111):
+                    raise PinnedEngineError("The verified LibreOffice runtime launcher is not an executable regular file.")
+            finally:
+                os.close(launcher_fd)
+            execution_target = str(launcher_path)
+            command[0] = execution_target
+            launch_kwargs["executable"] = execution_target
         if temporary_directory is not None:
             temporary_directory.mkdir(parents=True, exist_ok=True)
             child_environment = dict(launch_kwargs.get("env", os.environ))
@@ -810,7 +878,28 @@ def invoke(
                     deny_child_network()
 
             launch_kwargs["preexec_fn"] = prepare_child
+        effective_timeout = timeout_seconds
+        if deadline_monotonic is not None:
+            effective_timeout = min(effective_timeout, deadline_monotonic - time.monotonic())
+            if effective_timeout <= 0:
+                return {
+                    "command": command,
+                    "exitCode": None,
+                    "stdout": "",
+                    "stderr": "total runtime budget exhausted before LibreOffice launch",
+                    "durationSeconds": round(time.monotonic() - started, 3),
+                    "timedOut": False,
+                    "launchAttempted": False,
+                    "budgetExpiredBeforeLaunch": True,
+                    "identityVerified": True,
+                    "identitySha256": pinned_engine.sha256,
+                    "identityBinding": pinned_engine.identity_binding,
+                    "runtimeDirectorySha256": pinned_engine.verify_runtime_directory(verify_engine_image=use_launcher),
+                    "requestedExecutablePath": str(executable),
+                    "executionTarget": execution_target,
+                }
         if max_log_chars is None:
+            launch_attempted = True
             result = subprocess.run(
                 command,
                 **launch_kwargs,
@@ -819,15 +908,17 @@ def invoke(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout_seconds,
+                timeout=effective_timeout,
             )
         else:
+            launch_attempted = True
             result = run_bounded_process(
                 command,
                 **launch_kwargs,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=effective_timeout,
                 max_log_chars=max_log_chars,
             )
+        completed_process = result
         return {
             "command": command,
             "exitCode": result.returncode,
@@ -835,10 +926,11 @@ def invoke(
             "stderr": result.stderr.strip(),
             "durationSeconds": round(time.monotonic() - started, 3),
             "timedOut": False,
+            "launchAttempted": True,
             "identityVerified": True,
             "identitySha256": pinned_engine.sha256,
             "identityBinding": pinned_engine.identity_binding,
-            "runtimeDirectorySha256": pinned_engine.verify_runtime_directory(),
+            "runtimeDirectorySha256": pinned_engine.verify_runtime_directory(verify_engine_image=use_launcher),
             "requestedExecutablePath": str(executable),
             "executionTarget": execution_target,
         }
@@ -858,6 +950,7 @@ def invoke(
             "stderr": (error.stderr or b"").decode("utf-8", "replace").strip() if isinstance(error.stderr, bytes) else (error.stderr or "").strip(),
             "durationSeconds": round(time.monotonic() - started, 3),
             "timedOut": True,
+            "launchAttempted": True,
             "identityVerified": identity_failure is None,
             "identitySha256": pinned_engine.sha256 if pinned_engine is not None else None,
             "identityBinding": pinned_engine.identity_binding if pinned_engine is not None else None,
@@ -867,13 +960,21 @@ def invoke(
             "executionTarget": execution_target,
         }
     except PinnedEngineError as error:
+        completed_stderr = completed_process.stderr.strip() if completed_process is not None else ""
+        if completed_process is not None:
+            detail = f"identity verification failed: {error}"
+            completed_stderr = f"{completed_stderr}\n{detail}" if completed_stderr else detail
+            if max_log_chars is not None and len(completed_stderr) > max_log_chars:
+                marker = " [truncated]"
+                completed_stderr = completed_stderr[:max(0, max_log_chars - len(marker))] + marker[:max_log_chars]
         return {
             "command": command,
-            "exitCode": None,
-            "stdout": "",
-            "stderr": str(error),
+            "exitCode": completed_process.returncode if completed_process is not None else None,
+            "stdout": completed_process.stdout.strip() if completed_process is not None else "",
+            "stderr": completed_stderr or str(error),
             "durationSeconds": round(time.monotonic() - started, 3),
             "timedOut": False,
+            "launchAttempted": launch_attempted,
             "identityVerified": False,
             "identitySha256": pinned_engine.sha256 if pinned_engine is not None else error.observed_sha256,
             "identityFailure": str(error),
@@ -882,13 +983,21 @@ def invoke(
             "executionTarget": execution_target,
         }
     except OSError as error:
+        completed_stderr = completed_process.stderr.strip() if completed_process is not None else ""
+        if completed_process is not None:
+            detail = f"post-process verification failed: {error}"
+            completed_stderr = f"{completed_stderr}\n{detail}" if completed_stderr else detail
+            if max_log_chars is not None and len(completed_stderr) > max_log_chars:
+                marker = " [truncated]"
+                completed_stderr = completed_stderr[:max(0, max_log_chars - len(marker))] + marker[:max_log_chars]
         return {
             "command": command,
-            "exitCode": None,
-            "stdout": "",
-            "stderr": str(error),
+            "exitCode": completed_process.returncode if completed_process is not None else None,
+            "stdout": completed_process.stdout.strip() if completed_process is not None else "",
+            "stderr": completed_stderr or str(error),
             "durationSeconds": round(time.monotonic() - started, 3),
             "timedOut": False,
+            "launchAttempted": launch_attempted,
             "identityVerified": False,
             "identityFailure": str(error),
             "runtimeDirectorySha256": pinned_engine.runtime_directory_sha256 if pinned_engine is not None else None,
@@ -896,13 +1005,21 @@ def invoke(
             "executionTarget": execution_target,
         }
     except subprocess.SubprocessError as error:
+        completed_stderr = completed_process.stderr.strip() if completed_process is not None else ""
+        if completed_process is not None:
+            detail = f"post-process verification failed: {error}"
+            completed_stderr = f"{completed_stderr}\n{detail}" if completed_stderr else detail
+            if max_log_chars is not None and len(completed_stderr) > max_log_chars:
+                marker = " [truncated]"
+                completed_stderr = completed_stderr[:max(0, max_log_chars - len(marker))] + marker[:max_log_chars]
         return {
             "command": command,
-            "exitCode": None,
-            "stdout": "",
-            "stderr": str(error),
+            "exitCode": completed_process.returncode if completed_process is not None else None,
+            "stdout": completed_process.stdout.strip() if completed_process is not None else "",
+            "stderr": completed_stderr or str(error),
             "durationSeconds": round(time.monotonic() - started, 3),
             "timedOut": False,
+            "launchAttempted": launch_attempted,
             "identityVerified": False,
             "identityFailure": str(error),
             "runtimeDirectorySha256": pinned_engine.runtime_directory_sha256 if pinned_engine is not None else None,
