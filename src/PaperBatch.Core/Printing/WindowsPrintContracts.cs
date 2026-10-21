@@ -81,7 +81,19 @@ public sealed record WindowsPrintJobOptions(
         var tray = settings.TrayId is null ? null : Require(capabilities, PrintOption.Tray, settings.TrayId);
         var color = Require(capabilities, PrintOption.Color, settings.ColorMode == ColorMode.Color ? "Color" : "Monochrome");
         var duplex = Require(capabilities, PrintOption.Duplex, settings.DuplexMode.ToString());
+        RequireCopies(capabilities, settings.Copies);
         return new WindowsPrintJobOptions(queueIdentity, capabilities.Fingerprint, media, tray, color, duplex);
+    }
+
+    private static void RequireCopies(PrinterCapabilitySnapshot snapshot, int copies)
+    {
+        if (!snapshot.Options.TryGetValue(PrintOption.Copies, out var capability) || capability.State != CapabilityState.Supported)
+            throw new PrintCapabilityException("Copies are not reported as supported by this driver.");
+        var maximum = capability.Values.Select(value => value.Split("..", StringSplitOptions.TrimEntries))
+            .Where(parts => parts.Length == 2 && parts[0] == "1" && int.TryParse(parts[1], out _))
+            .Select(parts => int.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture)).DefaultIfEmpty(0).Max();
+        if (copies < 1 || maximum < copies)
+            throw new PrintCapabilityException("The requested copy count is outside the driver's reported supported range.");
     }
 
     private static string Require(PrinterCapabilitySnapshot snapshot, PrintOption option, string requested)

@@ -65,6 +65,14 @@ internal static class PrintingTests
                 Options = capabilities.Options.SetItem(PrintOption.Color,
                     new PrintOptionCapability(CapabilityState.Unavailable, [], "access denied"))
             }, settings));
+        Assert.Throws<PrintCapabilityException>(() => WindowsPrintJobOptions.Map(
+            "queue-identity", capabilities with
+            {
+                Options = capabilities.Options.SetItem(PrintOption.Copies,
+                    new PrintOptionCapability(CapabilityState.Unknown, [], "driver did not report a copy limit"))
+            }, settings));
+        Assert.Throws<PrintCapabilityException>(() => WindowsPrintJobOptions.Map("queue-identity", capabilities,
+            settings with { Copies = 1000 }));
     }
 
     internal static void CapabilityMutationStopsBeforeSubmission()
@@ -216,6 +224,47 @@ internal static class PrintingTests
         Assert.True(RendererTests.OnePagePdf().SequenceEqual(backend.LastPdfBytes!));
     }
 
+    internal static void MissingExplicitQueueIsRejectedBeforeCapabilityLookup()
+    {
+        using var baseline = new Fixture();
+        var segment = baseline.PreparedRun.Segments[0] with { PrintSettings = Settings() with { PrinterId = null } };
+        var item = baseline.PreparedRun.Items[0] with { PrintSettings = Settings() with { PrinterId = null } };
+        var run = PreparedRun.Create("run-no-queue", FixedTime, Hash, [item], [segment], baseline.PreparedRun.FinalArtifact);
+        using var fixture = new Fixture(run);
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "unused", fixture.Artifacts);
+
+        var result = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "no-queue-key", FixedTime)
+            .GetAwaiter().GetResult();
+
+        Assert.Equal(PrintSubmissionStatus.Rejected, result.Status);
+        Assert.Equal(0, backend.CapabilityReads);
+        Assert.Equal(0, backend.SubmissionCount);
+        Assert.Equal(JobState.Ready, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+    }
+
+    internal static void RunSubmissionIsSequentialAndDoesNotResumeUnknownSegments()
+    {
+        using var seed = new Fixture();
+        var firstItem = seed.PreparedRun.Items[0];
+        var secondItem = firstItem with { ItemId = "item-2" };
+        var firstSegment = new CompatibleSegment("segment-1", 0, [firstItem.ItemId], "compat-1", Settings());
+        var secondSegment = new CompatibleSegment("segment-2", 1, [secondItem.ItemId], "compat-2", Settings());
+        var run = PreparedRun.Create("run-multi", FixedTime, Hash, [firstItem, secondItem],
+            [firstSegment, secondSegment], seed.PreparedRun.FinalArtifact);
+
+        using var fixture = new Fixture(run);
+        var uncertainBackend = new TestOnlySimulatedPrintBackend(Capabilities()) { ThrowAfterSubmitSideEffect = true };
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, uncertainBackend, static () => "multi-nonce", fixture.Artifacts);
+        var firstAttempt = coordinator.SubmitRunAsync(run, "multi-key", FixedTime).GetAwaiter().GetResult();
+        Assert.Equal(1, firstAttempt.Count);
+        Assert.Equal(PrintSubmissionStatus.NeedsReviewUnknown, firstAttempt[0].Status);
+        Assert.Equal(1, uncertainBackend.SubmissionCount);
+        Assert.Equal(JobState.Ready, fixture.Store.GetJobs(run.RunId)[1].State);
+        Assert.Equal(0, coordinator.SubmitRunAsync(run, "multi-key", FixedTime.AddMinutes(1)).GetAwaiter().GetResult().Count);
+        Assert.Equal(1, uncertainBackend.SubmissionCount);
+    }
+
     internal static void OsCompletionDoesNotConfirmPaperOutput()
     {
         using var fixture = new Fixture();
@@ -291,7 +340,8 @@ internal static class PrintingTests
             [PrintOption.Media] = new(CapabilityState.Supported, ["Letter", "A4"], null),
             [PrintOption.Tray] = new(CapabilityState.Supported, ["Tray1"], null),
             [PrintOption.Color] = new(CapabilityState.Supported, ["Color", "Monochrome"], null),
-            [PrintOption.Duplex] = new(CapabilityState.Supported, ["Simplex", "LongEdge", "ShortEdge"], null)
+            [PrintOption.Duplex] = new(CapabilityState.Supported, ["Simplex", "LongEdge", "ShortEdge"], null),
+            [PrintOption.Copies] = new(CapabilityState.Supported, ["1..999"], null)
         });
 
     private static PrinterCapabilitySnapshot ChangedCapabilities() => Capabilities() with

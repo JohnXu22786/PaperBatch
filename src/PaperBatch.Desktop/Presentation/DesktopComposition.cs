@@ -69,15 +69,23 @@ internal static class DesktopComposition
                 new PdfiumPageCompositionAdapter(pdfiumPath, pdfiumHash), artifactStore, store);
         }
 
-        // Unsupported formats have no renderer, and there is no print submission backend.
+        WindowsPrintCoordinator? printCoordinator = null;
+        if (printerBackend is not null && store is not null && !string.IsNullOrWhiteSpace(pdfiumPath) && !string.IsNullOrWhiteSpace(pdfiumHash))
+            printCoordinator = new WindowsPrintCoordinator(store,
+                new WindowsGdiPrintBackend(printerBackend, new PinnedPdfiumWindowsPrintRasterizer(pdfiumPath, pdfiumHash)),
+                artifacts: artifactStore);
+
+        // Unsupported formats have no renderer. Submission is available only with the pinned PDFium runtime and Windows backend.
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
             artifacts: artifactStore, previewRenderer: previewRenderer, runStore: store, preparation: preparation,
-            printerCapabilityReader: printerBackend);
+            printerCapabilityReader: printerBackend, printCoordinator: printCoordinator);
         return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE",
                 preparation is null
-                    ? "PDF pass-through and supported JPEG/PNG artifact rendering are available. Preparation and final preview require an explicitly configured PDFium runtime; read-only printer capability inspection is Windows-only; LibreOffice conversion and print submission remain unavailable."
-                    : "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Read-only local printer capability inspection is Windows-only; Office conversion and desktop print submission remain unavailable.", false));
+                    ? "PDF pass-through and supported JPEG/PNG artifact rendering are available. Preparation and final preview require an explicitly configured PDFium runtime; read-only printer capability inspection is Windows-only; LibreOffice conversion is unavailable."
+                    : printCoordinator is null
+                        ? "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Read-only local printer capability inspection is Windows-only; Office conversion and desktop print submission are unavailable."
+                        : "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Explicit Windows queue selection and a deliberate Print click submit the persisted PDF through the GDI coordinator; displayed states are OS spooler reports, not confirmation of paper output.", false));
     }
 }
 
@@ -91,7 +99,8 @@ internal sealed class ProductionPresentationSources :
     IHistoryPresentationSource,
     IRecipeManagementPresentationSource,
     IQueuePreparationPresentationSource,
-    IPrinterCapabilityPresentationSource
+    IPrinterCapabilityPresentationSource,
+    IPrintSubmissionPresentationSource
 {
     private readonly SourceIntakeService? _intake;
     private readonly RendererCoordinator _renderer;
@@ -102,6 +111,7 @@ internal sealed class ProductionPresentationSources :
     private readonly SqliteRunStore? _runStore;
     private readonly PreparedArtifactCoordinator? _preparation;
     private readonly IWindowsGdiNativeAdapter? _printerCapabilityReader;
+    private readonly WindowsPrintCoordinator? _printCoordinator;
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
     private readonly Dictionary<string, string> _queueLocations = new(StringComparer.Ordinal);
@@ -116,7 +126,7 @@ internal sealed class ProductionPresentationSources :
         SourceSnapshotCache? cache = null, bool rendererAvailable = false,
         RenderArtifactStore? artifacts = null, IPdfArtifactPreviewRenderer? previewRenderer = null,
         SqliteRunStore? runStore = null, PreparedArtifactCoordinator? preparation = null,
-        IWindowsGdiNativeAdapter? printerCapabilityReader = null)
+        IWindowsGdiNativeAdapter? printerCapabilityReader = null, WindowsPrintCoordinator? printCoordinator = null)
     {
         _intake = intake;
         _renderer = renderer ?? new RendererCoordinator(Array.Empty<IRendererAdapter>());
@@ -127,9 +137,46 @@ internal sealed class ProductionPresentationSources :
         _runStore = runStore;
         _preparation = preparation;
         _printerCapabilityReader = printerCapabilityReader;
+        _printCoordinator = printCoordinator;
     }
 
     public bool CanInspectPrinterCapabilities => _printerCapabilityReader is not null && OperatingSystem.IsWindows();
+    public bool CanSubmitPrintJobs => _printCoordinator is not null && OperatingSystem.IsWindows();
+
+    public async Task<IReadOnlyList<PrintJobSnapshot>> SubmitPreparedRunAsync(string queueItemId, CancellationToken cancellationToken = default)
+    {
+        if (!CanSubmitPrintJobs || _printCoordinator is null || _runStore is null ||
+            !_preparedRunsByQueueItem.TryGetValue(queueItemId, out var run) || run.FinalArtifact is null)
+            throw new InvalidOperationException("A persisted prepared PDF and configured Windows print backend are required.");
+        var results = await _printCoordinator.SubmitRunAsync(run, "desktop-print", DateTimeOffset.UtcNow,
+            cancellationToken).ConfigureAwait(false);
+        var rejected = results.FirstOrDefault(result => result.Status != PrintSubmissionStatus.Accepted);
+        var refreshed = await RefreshPrintJobsAsync(queueItemId, cancellationToken).ConfigureAwait(false);
+        return rejected?.Reason is null ? refreshed : refreshed.Select(job => job.JobId == rejected!.Job?.JobId
+            ? job with { Detail = $"Not accepted: {rejected.Reason}" }
+            : job).ToArray();
+    }
+
+    public async Task<IReadOnlyList<PrintJobSnapshot>> RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken = default)
+    {
+        if (_runStore is null || !_preparedRunsByQueueItem.TryGetValue(queueItemId, out var run)) return [];
+        if (_printCoordinator is not null)
+            foreach (var job in _runStore.GetJobs(run.RunId).Where(job => job.OsReceipt is not null))
+                await _printCoordinator.RefreshStatusAsync(job.JobId, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+        return _runStore.GetJobs(run.RunId).Select(job => new PrintJobSnapshot(job.JobId, job.SegmentIndex,
+            job.State.ToString(), job.State is JobState.NeedsReviewUnknown
+                ? "Submission outcome unknown; automatic retry is blocked."
+                : job.State is JobState.AcceptedByOs or JobState.OsProcessing or JobState.OsReportsComplete
+                    ? "Reported by the OS spooler; this does not confirm paper output."
+                    : job.State.ToString(), job.OsReceipt is not null && job.State is JobState.AcceptedByOs or JobState.OsProcessing or JobState.CancelRequested, job.State.ToString())).ToArray();
+    }
+
+    public async Task<bool> CancelPrintJobAsync(string jobId, CancellationToken cancellationToken = default)
+    {
+        if (_printCoordinator is null || _runStore?.GetJob(jobId)?.OsReceipt is null) return false;
+        var result = await _printCoordinator.CancelAsync(jobId, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+        return result.State == JobState.CancelObserved;
+    }
 
     public async Task<IReadOnlyList<PrinterQueueCapabilitySnapshot>> ReadPrinterCapabilitiesAsync(CancellationToken cancellationToken = default)
     {
@@ -151,13 +198,14 @@ internal sealed class ProductionPresentationSources :
                     $"{OptionName(pair.Key, chinese: true)}：{OptionState(pair.Value.State, chinese: true)}" +
                     FormatCapabilityValues(pair.Value.Values, chinese: true) +
                     (string.IsNullOrWhiteSpace(pair.Value.Detail) ? "" : $" — {FormatCapabilityDetail(pair.Value.Detail, chinese: true)}"));
-                result.Add(new PrinterQueueCapabilitySnapshot(snapshot.DisplayName, snapshot.DriverName,
+                result.Add(new PrinterQueueCapabilitySnapshot(snapshot.QueueIdentity, snapshot.DisplayName, snapshot.DriverName, snapshot,
                     $"Port: {snapshot.PortName}\n" + string.Join("\n", englishLines),
                     $"端口：{snapshot.PortName}\n" + string.Join("\n", chineseLines)));
             }
             catch (Exception error) when (error is not OperationCanceledException)
             {
-                result.Add(new PrinterQueueCapabilitySnapshot(queue.DisplayName, queue.DriverName,
+                result.Add(new PrinterQueueCapabilitySnapshot(queue.QueueIdentity, queue.DisplayName, queue.DriverName,
+                    null,
                     $"Capabilities unavailable ({error.GetType().Name}). Queue defaults were not changed and no job was submitted.",
                     $"无法读取能力（{error.GetType().Name}）。未更改队列默认设置，也未提交作业。"));
             }

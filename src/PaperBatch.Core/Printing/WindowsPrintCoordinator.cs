@@ -14,6 +14,26 @@ public sealed class WindowsPrintCoordinator(
 {
     private readonly Func<string> _nonceFactory = nonceFactory ?? (() => Guid.NewGuid().ToString("N"));
 
+    /// <summary>Submits ready segments in order and stops at the first non-accepted result.</summary>
+    public async Task<IReadOnlyList<PrintSubmissionResult>> SubmitRunAsync(
+        PreparedRun preparedRun, string idempotencyKeyPrefix, DateTimeOffset atUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(preparedRun);
+        ArgumentException.ThrowIfNullOrWhiteSpace(idempotencyKeyPrefix);
+        var results = new List<PrintSubmissionResult>();
+        foreach (var job in store.GetJobs(preparedRun.RunId))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (job.State != JobState.Ready) break;
+            var result = await SubmitAsync(job.JobId, preparedRun,
+                $"{idempotencyKeyPrefix}-{job.JobId}", atUtc, cancellationToken).ConfigureAwait(false);
+            results.Add(result);
+            if (result.Status != PrintSubmissionStatus.Accepted) break;
+        }
+        return results;
+    }
+
     public async Task<PrintSubmissionResult> SubmitAsync(
         string jobId,
         PreparedRun preparedRun,
