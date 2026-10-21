@@ -44,7 +44,7 @@ class DocumentCorpusTests(unittest.TestCase):
 
         self.assertEqual(manifest["synthetic"], True)
         self.assertEqual(manifest["schema_version"], 2)
-        self.assertGreaterEqual(len(manifest["fixtures"]), 16)
+        self.assertGreaterEqual(len(manifest["fixtures"]), 150)
         self.assertEqual(manifest["evidence_class"], "synthetic")
         self.assertTrue(manifest["simulation_only"])
         self.assertEqual(manifest["coverage_target"], {"minimum": 150, "maximum": 300})
@@ -98,6 +98,15 @@ class DocumentCorpusTests(unittest.TestCase):
         self.assertTrue(required.issubset(fixtures))
         self.assertEqual(manifest["counts"]["synthetic_fixtures"], len(fixtures))
         self.assertEqual(manifest["counts"]["parameter_variants_counted_as_compatibility"], 0)
+        self.assertEqual(manifest["counts"]["syntheticFixtureCount"], len(fixtures))
+        self.assertEqual(manifest["counts"]["compatibilityEvidenceCount"], 0)
+        self.assertEqual(manifest["counts"]["realEngineDeviceEvidenceCount"], 0)
+        digests = [fixture["sha256"] for fixture in manifest["fixtures"]]
+        self.assertEqual(len(digests), len(set(digests)), "fixtures must differ in content, not just filename")
+        self.assertLessEqual(sum(fixture["size_bytes"] for fixture in manifest["fixtures"]), 4 * 1024 * 1024)
+        self.assertLessEqual(max(fixture["size_bytes"] for fixture in manifest["fixtures"]), 1024 * 1024 + 1024)
+        strata = {fixture["stratum"] for fixture in manifest["fixtures"]}
+        self.assertTrue({"docx", "xlsx", "pptx", "pdf", "malformed"}.issubset(strata))
         for fixture_id in required:
             self.assertTrue(fixtures[fixture_id]["coverage_tags"], fixture_id)
         for fixture_id in {"docx_multilingual_fields_forms", "docx_annotations", "xlsx_mixed_page_sizes", "pptx_multilingual_fonts", "pdf_annotations_forms"}:
@@ -120,6 +129,43 @@ class DocumentCorpusTests(unittest.TestCase):
         duplicate = fixtures["fault_duplicate_member"]
         with zipfile.ZipFile(CORPUS_DIR / duplicate["path"]) as package:
             self.assertEqual(package.namelist().count("part.xml"), 2)
+
+    def test_scaled_variants_encode_their_declared_structural_differences(self) -> None:
+        manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
+        fixtures = {fixture["id"]: fixture for fixture in manifest["fixtures"]}
+        docx = fixtures["docx_variant_005"]
+        with zipfile.ZipFile(CORPUS_DIR / docx["path"]) as package:
+            document = ET.fromstring(package.read("word/document.xml"))
+        text = " ".join(node.text or "" for node in document.findall(f".//{DOCX_NS}t"))
+        self.assertEqual(len(re.findall(r"Case 005 section", text)), docx["expected"]["paragraphs_added"])
+        self.assertIn("005", text)
+
+        xlsx = fixtures["xlsx_variant_007"]
+        with zipfile.ZipFile(CORPUS_DIR / xlsx["path"]) as package:
+            sheet = ET.fromstring(package.read("xl/worksheets/sheet1.xml"))
+        self.assertEqual(len(sheet.findall(f".//{SHEET_NS}row")), xlsx["expected"]["data_rows"])
+        self.assertEqual(sheet.find(f"{SHEET_NS}dimension").attrib["ref"], f"A1:B{xlsx['expected']['data_rows']}")
+        self.assertIn("Case 007 row", " ".join(node.text or "" for node in sheet.findall(f".//{SHEET_NS}t")))
+        with zipfile.ZipFile(CORPUS_DIR / xlsx["path"]) as package:
+            workbook = ET.fromstring(package.read("xl/workbook.xml"))
+        print_area = workbook.find(f".//{SHEET_NS}definedName")
+        self.assertEqual(print_area.text, f"Data007!$A$1:$B${xlsx['expected']['print_area_end_row']}")
+
+        pptx = fixtures["pptx_variant_004"]
+        with zipfile.ZipFile(CORPUS_DIR / pptx["path"]) as package:
+            slide = ET.fromstring(package.read("ppt/slides/slide1.xml"))
+        self.assertEqual(len(slide.findall(f".//{DRAWING_NS}br")), pptx["expected"]["additional_text_runs"])
+
+        pdf = (CORPUS_DIR / fixtures["pdf_variant_004"]["path"]).read_bytes()
+        self.assertEqual(len(re.findall(rb"/Type\s*/Page\b", pdf)), fixtures["pdf_variant_004"]["expected"]["page_count"])
+        self.assertTrue(pdf.startswith(b"%PDF-1.4\n"))
+        startxref = re.search(rb"startxref\n(\d+)\n%%EOF", pdf)
+        self.assertIsNotNone(startxref)
+        self.assertEqual(pdf[int(startxref.group(1)) :].splitlines()[0], b"xref")
+        malformed = fixtures["malformed_variant_029"]
+        malformed_path = CORPUS_DIR / malformed["path"]
+        self.assertEqual(malformed_path.stat().st_size, malformed["expected"]["truncated_at_byte"])
+        self.assertFalse(zipfile.is_zipfile(malformed_path))
 
     def test_expanded_office_cases_use_format_parts_for_declared_features(self) -> None:
         manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))

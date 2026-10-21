@@ -399,6 +399,99 @@ def _build_pdf() -> bytes:
     return bytes(output)
 
 
+def _build_pdf_variant(index: int) -> tuple[bytes, dict[str, int]]:
+    """Build a small PDF with distinct page count, geometry, and authored text."""
+    page_count = 1 + index % 5
+    width, height = ((612, 792), (792, 612), (595, 842))[index % 3]
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>"]
+    page_refs = [3 + page * 2 for page in range(page_count)]
+    objects.append(b"<< /Type /Pages /Kids [" + b" ".join(f"{ref} 0 R".encode("ascii") for ref in page_refs) + f"] /Count {page_count} >>".encode("ascii"))
+    for page in range(page_count):
+        content_ref = 4 + page * 2
+        objects.extend([
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Resources << /Font << /F1 {3 + 2 * page_count} 0 R >> >> /Contents {content_ref} 0 R >>".encode("ascii"),
+            b"<< /Length " + str(len(stream := f"BT /F1 12 Tf 36 {height - 48} Td (Synthetic PDF case {index:03d}, page {page + 1}) Tj ET\n".encode("ascii"))).encode("ascii") + b" >>\nstream\n" + stream + b"endstream",
+        ])
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+    output = bytearray(b"%PDF-1.4\n%PaperBatch locally authored synthetic variant\n")
+    offsets = [0]
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(output))
+        output.extend(f"{number} 0 obj\n".encode("ascii") + body + b"\nendobj\n")
+    xref_offset = len(output)
+    output.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode("ascii"))
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    output.extend(f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii"))
+    return bytes(output), {"page_count": page_count, "page_width_points": width, "page_height_points": height, "renderer_output": False}
+
+
+def _scaled_specs() -> list[tuple[str, str, str, str, dict[str, Any], bytes]]:
+    """Create bounded variants whose document content or structure changes per case."""
+    from io import BytesIO
+
+    specs: list[tuple[str, str, str, str, dict[str, Any], bytes]] = []
+    for index in range(30):
+        # DOCX variants add a varying number of paragraphs and change paper size.
+        parts = dict(_docx_parts())
+        paragraphs = "".join(
+            f"<w:p><w:r><w:t>Case {index:03d} section {part + 1}: multilingual sample Ελληνικά 日本語 العربية</w:t></w:r></w:p>"
+            for part in range(1 + index % 6)
+        )
+        geometry = ((12240, 15840), (15840, 12240), (11906, 16838))[index % 3]
+        xml = parts["word/document.xml"].decode("utf-8").replace(
+            "<w:sectPr><w:pgSz w:w=\"15840\" w:h=\"12240\" w:orient=\"landscape\"/></w:sectPr>",
+            f"{paragraphs}<w:sectPr><w:pgSz w:w=\"{geometry[0]}\" w:h=\"{geometry[1]}\"/></w:sectPr>",
+        ).replace("PaperBatch synthetic corpus document", f"Synthetic DOCX case {index:03d}")
+        parts["word/document.xml"] = xml.encode("utf-8")
+        specs.append((f"docx_variant_{index:03d}", f"variants/docx_{index:03d}.docx", "docx",
+                      f"Synthetic DOCX variant with {1 + index % 6} authored paragraphs and page geometry {geometry[0]} by {geometry[1]} twips.",
+                      {"paragraphs_added": 1 + index % 6, "page_width_twips": geometry[0], "page_height_twips": geometry[1]}, _zip_package(list(parts.items()))))
+
+        # XLSX variants vary row count, cell content, and declared print range.
+        package = _build_xlsx()
+        with zipfile.ZipFile(BytesIO(package)) as source:
+            xparts = {name: source.read(name) for name in source.namelist()}
+        rows = 1 + index % 8
+        row_xml = "".join(f'<row r="{row}"><c r="A{row}" t="inlineStr"><is><t>Case {index:03d} row {row}</t></is></c><c r="B{row}"><v>{index * 10 + row}</v></c></row>' for row in range(1, rows + 1))
+        sheet_xml = xparts["xl/worksheets/sheet1.xml"].decode("utf-8")
+        sheet_prefix, sheet_data = sheet_xml.split("<sheetData>", 1)
+        sheet_prefix = sheet_prefix.replace('<dimension ref="A1:B3"/>', "")
+        _, sheet_suffix = sheet_data.split("</sheetData>", 1)
+        xparts["xl/worksheets/sheet1.xml"] = (sheet_prefix + f'<dimension ref="A1:B{rows}"/><sheetData>' + row_xml + "</sheetData>" + sheet_suffix).encode("utf-8")
+        sheet_name = f"Data{index:03d}"
+        print_area = f"{sheet_name}!$A$1:$B${rows}"
+        xparts["xl/workbook.xml"] = xparts["xl/workbook.xml"].replace(
+            b"VisibleData!$A$1:$B$3", print_area.encode("ascii")).replace(b"VisibleData", sheet_name.encode("ascii"))
+        specs.append((f"xlsx_variant_{index:03d}", f"variants/xlsx_{index:03d}.xlsx", "xlsx",
+                      f"Synthetic workbook with {rows} distinct data rows and a case-specific print area.",
+                      {"data_rows": rows, "case_number": index, "print_area_end_row": rows}, _zip_package(list(xparts.items()))))
+
+        # PPTX variants vary slide text density and shape count using authored text shapes.
+        pptx = _build_pptx()
+        with zipfile.ZipFile(BytesIO(pptx)) as source:
+            pparts = {name: source.read(name) for name in source.namelist()}
+        lines = "".join(f"<a:r><a:rPr lang=\"en-US\"/><a:t>Case {index:03d} text shape {shape + 1}</a:t></a:r><a:br/>" for shape in range(1 + index % 5))
+        slide = _pptx_slide(f"Synthetic slide case {index:03d}").replace(b"</a:p></p:txBody>", lines.encode("utf-8") + b"</a:p></p:txBody>")
+        pparts["ppt/slides/slide1.xml"] = slide
+        specs.append((f"pptx_variant_{index:03d}", f"variants/pptx_{index:03d}.pptx", "pptx",
+                      f"Synthetic presentation with case-specific text and {1 + index % 5} additional slide text runs.",
+                      {"slides": 2, "additional_text_runs": 1 + index % 5, "case_number": index}, _zip_package(list(pparts.items()))))
+
+        pdf_data, pdf_expected = _build_pdf_variant(index)
+        specs.append((f"pdf_variant_{index:03d}", f"variants/pdf_{index:03d}.pdf", "pdf",
+                      f"Hand-authored synthetic PDF variant with {pdf_expected['page_count']} pages and case-specific text; no renderer output.",
+                      pdf_expected, pdf_data))
+
+        # Deliberately truncated package prefixes exercise distinct safe failure offsets.
+        malformed = _zip_package([(f"synthetic_{index:03d}.xml", _xml(f"<root><case>{index:03d}</case></root>"))])
+        cut = 24 + index
+        specs.append((f"malformed_variant_{index:03d}", f"variants/malformed_{index:03d}.zip", "malformed",
+                      f"Synthetic ZIP prefix truncated at byte {cut} before its central directory.",
+                      {"zip_package": False, "truncated_at_byte": cut}, malformed[:cut]))
+    return specs
+
+
 def _build_pdf_annotations_forms() -> bytes:
     stream = b"BT /F1 12 Tf 72 720 Td (PaperBatch synthetic annotation and form sample) Tj ET\n"
     objects = [
@@ -530,7 +623,7 @@ def _fixture_specs() -> list[tuple[str, str, str, str, dict[str, Any], bytes]]:
             {"zip_package": False, "failure_reason": "truncated_without_central_directory"},
             docx[:96],
         ),
-    ] + _expanded_specs()
+    ] + _expanded_specs() + _scaled_specs()
 
 
 def generate_corpus(output_dir: Path) -> dict[str, Any]:
@@ -539,12 +632,15 @@ def generate_corpus(output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     entries = []
     for fixture_id, filename, file_format, scenario, expected, data in _fixture_specs():
-        (output_dir / filename).write_bytes(data)
+        fixture_path = output_dir / filename
+        fixture_path.parent.mkdir(parents=True, exist_ok=True)
+        fixture_path.write_bytes(data)
         entries.append(
             {
                 "id": fixture_id,
                 "path": filename,
                 "format": file_format,
+                "stratum": fixture_id.split("_", 1)[0],
                 "scenario": scenario,
                 "expected": expected,
                 "evidence_class": "synthetic",
@@ -552,6 +648,7 @@ def generate_corpus(output_dir: Path) -> dict[str, Any]:
                 "coverage_tags": [fixture_id.split("_", 1)[0], *fixture_id.split("_")[1:]],
                 "expected_outcome": {
                     "status": "unsupported" if fixture_id in {"encrypted_package_simulation", "legacy_ole_signature_simulation"}
+                    else "rejected" if file_format == "malformed"
                     else "rejected" if fixture_id in {
                         "docx_truncated_package", "fault_zip_path_traversal", "fault_oversized_member",
                         "fault_duplicate_member",
@@ -560,7 +657,8 @@ def generate_corpus(output_dir: Path) -> dict[str, Any]:
                         "docx_multilingual_fields_forms", "docx_annotations", "xlsx_mixed_page_sizes",
                         "pptx_multilingual_fonts", "pdf_annotations_forms", "opc_external_hyperlink_no_network",
                     } else "accepted",
-                    "reason": "Simulation marker only; no supported encrypted or legacy document is present." if fixture_id in {
+                    "reason": "Truncated synthetic ZIP input is expected to be rejected safely." if file_format == "malformed"
+                    else "Simulation marker only; no supported encrypted or legacy document is present." if fixture_id in {
                         "encrypted_package_simulation", "legacy_ole_signature_simulation",
                     } else "Valid external relationship metadata is inspected without requesting its target." if fixture_id == "opc_external_hyperlink_no_network"
                     else "Malformed or hazardous package is expected to be rejected safely." if fixture_id in {
@@ -578,7 +676,13 @@ def generate_corpus(output_dir: Path) -> dict[str, Any]:
         "evidence_class": "synthetic",
         "simulation_only": True,
         "provenance": "Generated by tools/generate_document_corpus.py; no renderer or external documents were used.",
-        "counts": {"synthetic_fixtures": len(entries), "parameter_variants_counted_as_compatibility": 0},
+        "counts": {
+            "synthetic_fixtures": len(entries),
+            "syntheticFixtureCount": len(entries),
+            "compatibilityEvidenceCount": 0,
+            "realEngineDeviceEvidenceCount": 0,
+            "parameter_variants_counted_as_compatibility": 0,
+        },
         "coverage_target": {"minimum": 150, "maximum": 300},
         "evidence_gaps": {
             "engine_generated": "absent",
