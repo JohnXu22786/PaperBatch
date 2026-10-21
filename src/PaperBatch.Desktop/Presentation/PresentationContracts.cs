@@ -9,7 +9,8 @@ internal enum ShellSection
 {
     Queue,
     History,
-    Templates
+    Templates,
+    Printers
 }
 
 internal sealed record QueueItemSnapshot(string Id, string Title, string Details, string Status);
@@ -26,6 +27,24 @@ internal sealed record HistoryEntrySnapshot(string Title, string Summary, string
 internal sealed record TemplateSnapshot(string RecipeId, string Name, string Summary, string SettingsSummary);
 
 internal sealed record WorkspaceStatusSnapshot(string Title, string Detail, bool IsDemo, bool InitializationFailed = false);
+
+internal sealed record PrinterQueueCapabilitySnapshot(
+    string DisplayName,
+    string DriverName,
+    string DetailsEnglish,
+    string DetailsChinese,
+    bool Chinese = false)
+{
+    public string Details => Chinese ? DetailsChinese : DetailsEnglish;
+    public string QueueDisplay => Chinese ? $"队列：{DisplayName}" : $"Queue: {DisplayName}";
+    public string DriverDisplay => Chinese ? $"驱动：{DriverName}" : $"Driver: {DriverName}";
+}
+
+internal interface IPrinterCapabilityPresentationSource
+{
+    bool CanInspectPrinterCapabilities { get; }
+    Task<IReadOnlyList<PrinterQueueCapabilitySnapshot>> ReadPrinterCapabilitiesAsync(CancellationToken cancellationToken = default);
+}
 
 internal interface IQueuePresentationSource
 {

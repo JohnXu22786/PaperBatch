@@ -9,6 +9,7 @@ using PaperBatch.Core.Domain;
 using PaperBatch.Core.Intake;
 using PaperBatch.Core.Layout;
 using PaperBatch.Core.Persistence;
+using PaperBatch.Core.Printing;
 using PaperBatch.Core.Preparation;
 using PaperBatch.Core.Recipes;
 using PaperBatch.Core.Rendering;
@@ -55,6 +56,7 @@ internal static class DesktopComposition
         ]);
         var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
         store.Initialize();
+        var printerBackend = OperatingSystem.IsWindows() ? new WindowsGdiNativeAdapter() : null;
         IPdfArtifactPreviewRenderer? previewRenderer = null;
         PreparedArtifactCoordinator? preparation = null;
         var pdfiumPath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH");
@@ -69,12 +71,13 @@ internal static class DesktopComposition
 
         // Unsupported formats have no renderer, and there is no print submission backend.
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
-            artifacts: artifactStore, previewRenderer: previewRenderer, runStore: store, preparation: preparation);
+            artifacts: artifactStore, previewRenderer: previewRenderer, runStore: store, preparation: preparation,
+            printerCapabilityReader: printerBackend);
         return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE",
                 preparation is null
-                    ? "PDF pass-through and supported JPEG/PNG artifact rendering are available. Preparation and final preview require an explicitly configured PDFium runtime; LibreOffice conversion and production print submission remain unavailable."
-                    : "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Printer capabilities, Office conversion and production print submission remain unavailable.", false));
+                    ? "PDF pass-through and supported JPEG/PNG artifact rendering are available. Preparation and final preview require an explicitly configured PDFium runtime; read-only printer capability inspection is Windows-only; LibreOffice conversion and print submission remain unavailable."
+                    : "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Read-only local printer capability inspection is Windows-only; Office conversion and desktop print submission remain unavailable.", false));
     }
 }
 
@@ -87,7 +90,8 @@ internal sealed class ProductionPresentationSources :
     IPreflightPresentationSource,
     IHistoryPresentationSource,
     IRecipeManagementPresentationSource,
-    IQueuePreparationPresentationSource
+    IQueuePreparationPresentationSource,
+    IPrinterCapabilityPresentationSource
 {
     private readonly SourceIntakeService? _intake;
     private readonly RendererCoordinator _renderer;
@@ -97,6 +101,7 @@ internal sealed class ProductionPresentationSources :
     private readonly IPdfArtifactPreviewRenderer? _previewRenderer;
     private readonly SqliteRunStore? _runStore;
     private readonly PreparedArtifactCoordinator? _preparation;
+    private readonly IWindowsGdiNativeAdapter? _printerCapabilityReader;
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
     private readonly Dictionary<string, string> _queueLocations = new(StringComparer.Ordinal);
@@ -110,7 +115,8 @@ internal sealed class ProductionPresentationSources :
     public ProductionPresentationSources(SourceIntakeService? intake = null, RendererCoordinator? renderer = null,
         SourceSnapshotCache? cache = null, bool rendererAvailable = false,
         RenderArtifactStore? artifacts = null, IPdfArtifactPreviewRenderer? previewRenderer = null,
-        SqliteRunStore? runStore = null, PreparedArtifactCoordinator? preparation = null)
+        SqliteRunStore? runStore = null, PreparedArtifactCoordinator? preparation = null,
+        IWindowsGdiNativeAdapter? printerCapabilityReader = null)
     {
         _intake = intake;
         _renderer = renderer ?? new RendererCoordinator(Array.Empty<IRendererAdapter>());
@@ -120,7 +126,123 @@ internal sealed class ProductionPresentationSources :
         _previewRenderer = previewRenderer;
         _runStore = runStore;
         _preparation = preparation;
+        _printerCapabilityReader = printerCapabilityReader;
     }
+
+    public bool CanInspectPrinterCapabilities => _printerCapabilityReader is not null && OperatingSystem.IsWindows();
+
+    public async Task<IReadOnlyList<PrinterQueueCapabilitySnapshot>> ReadPrinterCapabilitiesAsync(CancellationToken cancellationToken = default)
+    {
+        if (!CanInspectPrinterCapabilities || _printerCapabilityReader is null)
+            throw new PlatformNotSupportedException("Read-only printer capability inspection requires Windows.");
+        var queues = WindowsPrintCapabilityEnumerator.EnumerateLocalQueues();
+        var result = new List<PrinterQueueCapabilitySnapshot>(queues.Length);
+        foreach (var queue in queues)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var snapshot = await _printerCapabilityReader.GetCapabilitiesAsync(queue.QueueIdentity, cancellationToken).ConfigureAwait(false);
+                var englishLines = snapshot.Options.OrderBy(pair => pair.Key).Select(pair =>
+                    $"{OptionName(pair.Key, chinese: false)}: {OptionState(pair.Value.State, chinese: false)}" +
+                    FormatCapabilityValues(pair.Value.Values, chinese: false) +
+                    (string.IsNullOrWhiteSpace(pair.Value.Detail) ? "" : $" — {FormatCapabilityDetail(pair.Value.Detail, chinese: false)}"));
+                var chineseLines = snapshot.Options.OrderBy(pair => pair.Key).Select(pair =>
+                    $"{OptionName(pair.Key, chinese: true)}：{OptionState(pair.Value.State, chinese: true)}" +
+                    FormatCapabilityValues(pair.Value.Values, chinese: true) +
+                    (string.IsNullOrWhiteSpace(pair.Value.Detail) ? "" : $" — {FormatCapabilityDetail(pair.Value.Detail, chinese: true)}"));
+                result.Add(new PrinterQueueCapabilitySnapshot(snapshot.DisplayName, snapshot.DriverName,
+                    $"Port: {snapshot.PortName}\n" + string.Join("\n", englishLines),
+                    $"端口：{snapshot.PortName}\n" + string.Join("\n", chineseLines)));
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                result.Add(new PrinterQueueCapabilitySnapshot(queue.DisplayName, queue.DriverName,
+                    $"Capabilities unavailable ({error.GetType().Name}). Queue defaults were not changed and no job was submitted.",
+                    $"无法读取能力（{error.GetType().Name}）。未更改队列默认设置，也未提交作业。"));
+            }
+        }
+        return result;
+    }
+
+    private static string OptionName(PrintOption option, bool chinese) => option switch
+    {
+        PrintOption.Media => chinese ? "纸张" : "Media",
+        PrintOption.Tray => chinese ? "纸盒" : "Tray",
+        PrintOption.Color => chinese ? "彩色" : "Color",
+        PrintOption.Duplex => chinese ? "双面" : "Duplex",
+        PrintOption.Resolution => chinese ? "分辨率" : "Resolution",
+        PrintOption.Finishing => chinese ? "装订" : "Finishing",
+        PrintOption.Copies => chinese ? "份数" : "Copies",
+        _ => option.ToString()
+    };
+
+    private static string OptionState(CapabilityState state, bool chinese) => state switch
+    {
+        CapabilityState.Supported => chinese ? "支持" : "Supported",
+        CapabilityState.Unsupported => chinese ? "不支持" : "Unsupported",
+        CapabilityState.Unavailable => chinese ? "不可用" : "Unavailable",
+        CapabilityState.Unknown => chinese ? "未知" : "Unknown",
+        _ => state.ToString()
+    };
+
+    internal static string FormatCapabilityValues(ImmutableArray<string> values, bool chinese) => values.IsDefaultOrEmpty
+        ? string.Empty
+        : chinese
+            ? $"（驱动报告值：{string.Join("、", values)}）"
+            : $" (Driver-reported values: {string.Join(", ", values)})";
+
+    internal static string FormatCapabilityDetail(string detail, bool chinese)
+    {
+        if (!chinese) return $"Driver text: {detail}";
+        var localized = detail switch
+        {
+            "The driver did not report duplex capability." => "驱动未报告双面能力。",
+            "The driver did not report a copy limit." => "驱动未报告份数上限。",
+            "This driver did not provide a verified finishing-option inventory." => "此驱动未提供经过验证的装订选项清单。",
+            "The driver did not report color-device capability." => "驱动未报告彩色设备能力。",
+            "The driver did not report resolutions." => "驱动未报告分辨率。",
+            "The driver returned invalid resolution values." => "驱动返回了无效的分辨率值。",
+            "The driver reported Media names but its native identifiers could not be mapped exactly." => "驱动报告了纸张名称，但无法将其与原生标识符准确对应。",
+            "The driver reported Tray names but its native identifiers could not be mapped exactly." => "驱动报告了纸盒名称，但无法将其与原生标识符准确对应。",
+            "The driver reported Color names but its native identifiers could not be mapped exactly." => "驱动报告了彩色选项名称，但无法将其与原生标识符准确对应。",
+            "The driver reported Duplex names but its native identifiers could not be mapped exactly." => "驱动报告了双面选项名称，但无法将其与原生标识符准确对应。",
+            "The driver reported Resolution names but its native identifiers could not be mapped exactly." => "驱动报告了分辨率名称，但无法将其与原生标识符准确对应。",
+            "The driver reported Finishing names but its native identifiers could not be mapped exactly." => "驱动报告了装订选项名称，但无法将其与原生标识符准确对应。",
+            "The driver reported Copies names but its native identifiers could not be mapped exactly." => "驱动报告了份数名称，但无法将其与原生标识符准确对应。",
+            "Winspool's legacy duplex flag does not identify the supported edge modes." => "Winspool 的旧式双面标志无法确定支持的翻页边缘模式。",
+            "The driver returned too many media types to inspect safely." => "驱动返回的纸张类型过多，无法安全检查。",
+            "The driver returned too many trays to inspect safely." => "驱动返回的纸盒过多，无法安全检查。",
+            "The driver reports no media types." => "驱动报告不支持纸张类型。",
+            "The driver reports no trays." => "驱动报告不支持纸盒。",
+            "The driver could not enumerate media types." => "驱动无法枚举纸张类型。",
+            "The driver could not enumerate trays." => "驱动无法枚举纸盒。",
+            "The driver returned empty media types names." => "驱动返回的纸张类型名称为空。",
+            "The driver returned empty trays names." => "驱动返回的纸盒名称为空。",
+            "The driver returned too many resolutions to inspect safely." => "驱动返回的分辨率过多，无法安全检查。",
+            "The driver could not enumerate resolutions." => "驱动无法枚举分辨率。",
+            "The driver reports no discrete resolutions." => "驱动报告没有离散分辨率。",
+            "Color mode was reported; monochrome support is not inferred." => "驱动报告支持彩色模式；不会据此推断是否支持黑白模式。",
+            _ when detail.StartsWith("The driver did not return ", StringComparison.Ordinal) =>
+                $"驱动未返回{DriverDetailSuffix(detail, "The driver did not return ")}。",
+            _ when detail.StartsWith("The driver reports no ", StringComparison.Ordinal) =>
+                $"驱动报告不支持{DriverDetailSuffix(detail, "The driver reports no ")}。",
+            _ when detail.StartsWith("The driver returned too many ", StringComparison.Ordinal) =>
+                $"驱动返回的{DriverDetailSuffix(detail, "The driver returned too many ")}，无法安全检查。",
+            _ when detail.StartsWith("The driver could not enumerate ", StringComparison.Ordinal) =>
+                $"驱动无法枚举{DriverDetailSuffix(detail, "The driver could not enumerate ")}。",
+            _ => null
+        };
+        return localized is null ? $"驱动文本：{detail}" : localized;
+    }
+
+    private static string DriverDetailSuffix(string detail, string prefix) => detail[prefix.Length..].TrimEnd('.') switch
+    {
+        "media types" => "纸张类型",
+        "trays" => "纸盒",
+        "resolutions" => "分辨率",
+        var suffix => suffix
+    };
 
     public bool IsAvailable => _intake is not null;
 
