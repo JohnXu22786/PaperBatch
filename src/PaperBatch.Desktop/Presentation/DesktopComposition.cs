@@ -148,7 +148,7 @@ internal sealed class ProductionPresentationSources :
     {
         if (_intake is null) throw new InvalidOperationException("Source intake is not configured.");
         var seenPaths = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-        var inputs = paths.Select(path => new SourceInput(path, IntentionalCopy: !seenPaths.Add(Path.GetFullPath(path)))).ToArray();
+        var inputs = paths.Select(path => new SourceInput(path, IntentionalCopy: IsRepeatedPath(path))).ToArray();
         var prepared = await _intake.PrepareAsync(inputs, cancellationToken: cancellationToken).ConfigureAwait(false);
         var queueItemIdBySnapshot = new Dictionary<string, string>(StringComparer.Ordinal);
         try
@@ -212,6 +212,16 @@ internal sealed class ProductionPresentationSources :
                             findings.Add(new("Source cache", "Cleanup failed", "The temporary source snapshot could not be released."));
                     }
                 }
+            }
+        }
+
+        bool IsRepeatedPath(string path)
+        {
+            try { return !seenPaths.Add(Path.GetFullPath(path)); }
+            catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException or System.Security.SecurityException)
+            {
+                // Let source intake report an isolated per-entry path diagnostic.
+                return false;
             }
         }
     }

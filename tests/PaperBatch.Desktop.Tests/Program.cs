@@ -133,13 +133,17 @@ static void SourceIntakeErrorsRemainVisibleAndAppend()
     try
     {
         viewModel.ImportFilesAsync([Path.Combine(cacheRoot, "missing-a.pdf")]).GetAwaiter().GetResult();
-        viewModel.ImportFilesAsync([Path.Combine(cacheRoot, "missing-b.pdf")]).GetAwaiter().GetResult();
+        var mixedImport = viewModel.ImportFilesAsync(["bad\0path.pdf", Path.Combine(cacheRoot, "missing-b.pdf")]);
+        mixedImport.GetAwaiter().GetResult();
 
-        Assert.Equal(2, viewModel.QueueItems.Count);
+        Assert.Equal(3, viewModel.QueueItems.Count);
         Assert.Equal("Needs attention", viewModel.QueueItems[0].Status);
-        Assert.Equal("InputVanished", viewModel.PreflightFindings.Single().Title);
-        Assert.Equal(2, viewModel.QueueItems.Count);
-        Assert.Equal("2 ITEMS IN QUEUE", viewModel.QueueStateLabel);
+        var invalidRow = viewModel.QueueItems.Single(item => item.Title == "bad\0path.pdf");
+        var missingRow = viewModel.QueueItems.Single(item => item.Title == "missing-b.pdf");
+        Assert.Equal("InvalidPath", sources.GetFindings(invalidRow.Id).Single().Title);
+        Assert.Equal("InputVanished", sources.GetFindings(missingRow.Id).Single().Title);
+        Assert.Equal(3, viewModel.QueueItems.Count);
+        Assert.Equal("3 ITEMS IN QUEUE", viewModel.QueueStateLabel);
         Assert.True(viewModel.CanImportFiles);
     }
     finally
