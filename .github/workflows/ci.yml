@@ -32,10 +32,18 @@ jobs:
           if ($manifest.target -ne 'win-x64' -or -not $manifest.selfContained) { throw 'Unexpected package target.' }
           if ($manifest.license -ne 'AGPL-3.0-only' -or $manifest.signed) { throw 'Package legal or signing metadata is incorrect.' }
           if ($manifest.files.Count -eq 0) { throw 'Package manifest contains no files.' }
+          if ($manifest.dependencyLockFiles.Count -ne 2) { throw 'Expected desktop and core dependency lockfiles.' }
+          foreach ($lock in $manifest.dependencyLockFiles) {
+            if (-not (Test-Path -LiteralPath $lock.path -PathType Leaf)) { throw "Source lockfile missing: $($lock.path)" }
+            if ((Get-FileHash -LiteralPath $lock.path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $lock.sha256) { throw "Lockfile digest mismatch: $($lock.path)" }
+          }
           foreach ($file in $manifest.files) {
             $path = Join-Path 'artifacts/windows-x64-lite' $file.path
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Manifest file missing: $($file.path)" }
             if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $file.sha256) { throw "Manifest digest mismatch: $($file.path)" }
+          }
+          foreach ($notice in @('LICENSE', 'THIRD-PARTY-UI-NOTICES.md', 'THIRD-PARTY-CORE-NOTICES.md', 'DOTNET-THIRD-PARTY-NOTICES.txt')) {
+            if (-not (Test-Path -LiteralPath (Join-Path 'artifacts/windows-x64-lite' $notice) -PathType Leaf)) { throw "Package notice missing: $notice" }
           }
           if (-not (Test-Path 'artifacts/windows-x64-lite/PaperBatch-windows-x64-lite.zip')) { throw 'Package archive missing.' }
 
