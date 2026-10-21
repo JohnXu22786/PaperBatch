@@ -114,6 +114,55 @@ internal static class CoreTests
         Assert.Equal("ok", ReadScalar(databasePath, "PRAGMA quick_check;"));
     }
 
+    internal static void SqliteHistoryAndRecipesPersist()
+    {
+        using var temporary = new TemporaryDirectory();
+        var databasePath = Path.Combine(temporary.Path, "workspace.db");
+        var store = new SqliteRunStore(databasePath);
+        store.Initialize();
+        var retention = new RetentionMetadata(FixedTime.AddDays(30), RetainWhileUnresolved: true);
+        store.CreateRun(CreateRun("a-history-older", "segment-older"), "history-key-1", retention);
+        var newerRunParts = CreateRun("z-history-newer", "segment-newer");
+        store.CreateRun(PreparedRun.Create("z-history-newer", FixedTime.AddMinutes(1), Hash,
+            newerRunParts.Items, newerRunParts.Segments), "history-key-2", retention);
+        Assert.Equal("z-history-newer", store.GetRecentRuns().First().RunId);
+        Assert.Equal(1, store.GetRecentRuns(1).Length);
+        Assert.Throws<ArgumentOutOfRangeException>(() => store.GetRecentRuns(0));
+
+        var recipe = new JobRecipe(1, "recipe-1", "Office packet", [new RecipeSource("source-1", "/docs/a.pdf")],
+            new RecipePrintSettings(2, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter"));
+        store.SaveRecipe(recipe);
+        var reopened = new SqliteRunStore(databasePath);
+        reopened.Initialize();
+        var restoredRecipe = reopened.GetRecipes().Single().Recipe;
+        Assert.Equal(recipe.Name, restoredRecipe.Name);
+        Assert.Equal(recipe.Sources[0], restoredRecipe.Sources[0]);
+        Assert.Equal(recipe.Settings, restoredRecipe.Settings);
+        Assert.Throws<UnsupportedSchemaVersionException>(() => reopened.SaveRecipe(recipe with { SchemaVersion = 2 }));
+        var oversized = recipe with { RecipeId = "large", Name = "Large", Sources =
+            Enumerable.Range(0, 500).Select(index => new RecipeSource($"source-{index}", "/" + new string('a', 2047))).ToImmutableArray() };
+        Assert.Throws<InvalidDataException>(() => reopened.SaveRecipe(oversized));
+        ExecuteSql(databasePath, "UPDATE recipes SET recipe_json = '{\"schemaVersion\":999}' WHERE recipe_id = 'recipe-1';");
+        Assert.Throws<UnsupportedSchemaVersionException>(() => reopened.GetRecipes());
+        reopened.SaveRecipe(recipe);
+        Assert.True(reopened.DeleteRecipe(recipe.RecipeId));
+        Assert.True(reopened.GetRecipes().IsEmpty);
+        Assert.Equal("ok", ReadScalar(databasePath, "PRAGMA quick_check;"));
+
+        using var boundedDirectory = new TemporaryDirectory();
+        var boundedPath = Path.Combine(boundedDirectory.Path, "bounded.db");
+        var boundedStore = new SqliteRunStore(boundedPath);
+        boundedStore.Initialize();
+        ExecuteSql(boundedPath, """
+            WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM n WHERE value < 1000)
+            INSERT INTO runs (run_id, request_key, created_utc, state, prepared_run_json, retention_expires_utc, retain_while_unresolved)
+            SELECT 'seed-' || value, 'request-' || value, '2026-10-18T12:30:00.0000000+00:00', 'Ready', '{}',
+                   '2030-01-01T00:00:00.0000000+00:00', 0 FROM n;
+            """);
+        Assert.Throws<InvalidOperationException>(() => boundedStore.CreateRun(CreateRun("over-limit", "over-limit-segment"),
+            "over-limit-request", new RetentionMetadata(FixedTime.AddDays(30), true)));
+    }
+
     internal static void SqliteRejectsFutureSchemaVersionsWithoutDowngrading()
     {
         using var temporary = new TemporaryDirectory();

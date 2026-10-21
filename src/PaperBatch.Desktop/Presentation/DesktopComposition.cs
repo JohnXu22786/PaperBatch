@@ -1,11 +1,15 @@
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using Avalonia;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using PaperBatch.Core.Domain;
 using PaperBatch.Core.Intake;
 using PaperBatch.Core.Persistence;
+using PaperBatch.Core.Recipes;
 using PaperBatch.Core.Rendering;
+using PaperBatch.Core.Serialization;
 
 namespace PaperBatch.Desktop.Presentation;
 
@@ -23,7 +27,8 @@ internal static class DesktopComposition
             var sources = new ProductionPresentationSources();
             return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
                 new WorkspaceStatusSnapshot("PRODUCTION MODE · INITIALIZATION FAILED",
-                    $"Local application services could not initialize ({exception.GetType().Name}). No files were loaded and no jobs were created.", false));
+                    $"Local application services could not initialize ({exception.GetType().Name}). No files were loaded and no jobs were created.", false,
+                    InitializationFailed: true));
         }
     }
 
@@ -58,7 +63,7 @@ internal static class DesktopComposition
         _ = intake;
         _ = renderer;
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
-            artifacts: artifactStore, previewRenderer: previewRenderer);
+            artifacts: artifactStore, previewRenderer: previewRenderer, runStore: store);
         return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE",
                 "PDF pass-through and supported JPEG/PNG artifact rendering are available. Final preview needs a registered prepared run and explicitly configured PDFium runtime; LibreOffice conversion and production print submission remain unavailable.", false));
@@ -81,6 +86,7 @@ internal sealed class ProductionPresentationSources :
     private readonly bool _rendererAvailable;
     private readonly RenderArtifactStore? _artifacts;
     private readonly IPdfArtifactPreviewRenderer? _previewRenderer;
+    private readonly SqliteRunStore? _runStore;
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
 
@@ -88,7 +94,8 @@ internal sealed class ProductionPresentationSources :
 
     public ProductionPresentationSources(SourceIntakeService? intake = null, RendererCoordinator? renderer = null,
         SourceSnapshotCache? cache = null, bool rendererAvailable = false,
-        RenderArtifactStore? artifacts = null, IPdfArtifactPreviewRenderer? previewRenderer = null)
+        RenderArtifactStore? artifacts = null, IPdfArtifactPreviewRenderer? previewRenderer = null,
+        SqliteRunStore? runStore = null)
     {
         _intake = intake;
         _renderer = renderer ?? new RendererCoordinator(Array.Empty<IRendererAdapter>());
@@ -96,6 +103,7 @@ internal sealed class ProductionPresentationSources :
         _rendererAvailable = rendererAvailable;
         _artifacts = artifacts;
         _previewRenderer = previewRenderer;
+        _runStore = runStore;
     }
 
     public bool IsAvailable => _intake is not null;
@@ -177,9 +185,25 @@ internal sealed class ProductionPresentationSources :
         ArgumentException.ThrowIfNullOrWhiteSpace(queueItemId);
         ArgumentNullException.ThrowIfNull(run);
         if (run.FinalArtifact is null) throw new InvalidOperationException("A prepared run without a final PDF cannot be previewed.");
+        if (_runStore is not null)
+        {
+            var existing = _runStore.GetPreparedRun(run.RunId);
+            if (existing is null)
+            {
+                _runStore.CreateRun(run, CreateRunRequestKey(run.RunId),
+                    new RetentionMetadata(run.CreatedAtUtc.AddDays(30), RetainWhileUnresolved: true));
+            }
+            else if (!string.Equals(PreparedRunJson.Serialize(existing), PreparedRunJson.Serialize(run), StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("The prepared run ID is already stored with different run metadata.");
+            }
+        }
         _preparedRunsByQueueItem[queueItemId] = run;
         PreparedArtifactChanged?.Invoke(queueItemId);
     }
+
+    private static string CreateRunRequestKey(string runId) =>
+        "desktop-prepared-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(runId))).ToLowerInvariant();
 
     public void InvalidatePreparedRun(string queueItemId)
     {
@@ -218,6 +242,46 @@ internal sealed class ProductionPresentationSources :
             [new("Rendering", _rendererAvailable ? "Not run" : "Unavailable", _rendererAvailable
                 ? "No preflight or artifact result exists for this queue item."
                 : "No renderer is configured; source content was not rendered.")];
-    public IReadOnlyList<HistoryEntrySnapshot> GetHistoryEntries() => [];
-    public IReadOnlyList<TemplateSnapshot> GetTemplates() => [];
+    public string? HistoryReadError { get; private set; }
+
+    public IReadOnlyList<HistoryEntrySnapshot> GetHistoryEntries()
+    {
+        HistoryReadError = null;
+        if (_runStore is null) return [];
+        try
+        {
+            return _runStore.GetRecentRuns()
+                .Select(run => new HistoryEntrySnapshot(
+                    $"Run {run.RunId[..Math.Min(8, run.RunId.Length)]}",
+                    $"Created {run.CreatedAtUtc.ToLocalTime():g} · {_runStore.GetJobs(run.RunId).Length} job(s)",
+                    run.State.ToString()))
+                .ToArray();
+        }
+        catch (Exception exception) when (exception is System.Text.Json.JsonException or InvalidDataException or FormatException or NotSupportedException or System.Data.Common.DbException)
+        {
+            HistoryReadError = "Saved run history could not be read. The local history data may be damaged or use a newer schema.";
+            return [];
+        }
+    }
+
+    public string? TemplateReadError { get; private set; }
+
+    public IReadOnlyList<TemplateSnapshot> GetTemplates()
+    {
+        TemplateReadError = null;
+        if (_runStore is null) return [];
+        try
+        {
+            return _runStore.GetRecipes()
+                .Select(saved => new TemplateSnapshot(saved.Recipe.Name,
+                    $"Saved locally · {saved.Recipe.Sources.Length} source(s)",
+                    $"Defaults: {saved.Recipe.Settings.Copies} copies · {saved.Recipe.Settings.ColorMode} · {saved.Recipe.Settings.DuplexMode} · {saved.Recipe.Settings.Media} (not applied)"))
+                .ToArray();
+        }
+        catch (Exception exception) when (exception is System.Text.Json.JsonException or InvalidDataException or FormatException or UnsupportedSchemaVersionException or System.Data.Common.DbException)
+        {
+            TemplateReadError = "Saved recipes could not be read. The local recipe data may be damaged or use a newer schema.";
+            return [];
+        }
+    }
 }

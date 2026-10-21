@@ -152,6 +152,7 @@ var tests = new List<(string Name, Action Run)>
     ("per-document copies distinguish covers from file separators", LayoutTests.PerDocumentCopiesKeepCoversAndFileSeparatorsDistinct),
     ("run aggregation preserves uncertainty and OS completion", CoreTests.RunAggregationPreservesUncertaintyAndOsCompletion),
     ("SQLite migrations are idempotent and preserve v1 records", CoreTests.SqliteMigrationsAreIdempotentAndPreserveV1Records),
+    ("SQLite history query and saved recipes persist with strict bounds", CoreTests.SqliteHistoryAndRecipesPersist),
     ("SQLite rejects future schema versions without downgrading", CoreTests.SqliteRejectsFutureSchemaVersionsWithoutDowngrading),
     ("SQLite rejects undefined persisted enum values", CoreTests.SqliteRejectsUndefinedPersistedEnumValues),
     ("run creation is atomic and persists allowlisted metadata", CoreTests.RunCreationIsAtomicAndPersistsMetadataOnly),

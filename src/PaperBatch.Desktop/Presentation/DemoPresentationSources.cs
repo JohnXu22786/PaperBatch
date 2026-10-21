@@ -54,9 +54,13 @@ internal sealed class DemoPresentationSources :
         new HistoryEntrySnapshot("Sample run B", "Example history row · no output created", "Example only")
     ];
 
+    public string? HistoryReadError => null;
+
     public IReadOnlyList<TemplateSnapshot> GetTemplates() =>
     [
         new TemplateSnapshot("Sample classroom packet", "Example recipe · not saved", "A4 · one-sided · sample values"),
         new TemplateSnapshot("Sample office handout", "Example recipe · not saved", "Letter · two-sided · sample values")
     ];
+
+    public string? TemplateReadError => null;
 }
