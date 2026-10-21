@@ -27,6 +27,7 @@ var tests = new (string Name, Action Run)[]
     ("production preview raster comes from the persisted prepared artifact", ProductionPreviewReadsPreparedArtifact),
     ("preparation controls forward requested layout settings and invalidate previews", PreparationControlsForwardRequestedSettingsAndInvalidate),
     ("recipe device-profile conflicts do not persist or compose an artifact", RecipeDeviceConflictCreatesNoRunOrFinalArtifact),
+    ("recipe duplex requests change compiled physical-face layout while remaining unvalidated", RecipeDuplexRequestChangesCompiledLayout),
     ("corrupt saved recipes leave production shell available with an error state", CorruptSavedRecipesRemainVisibleAsAnError),
     ("recipe lifecycle strictly imports, renames, exports without overwrite, and deletes", RecipeLifecycleIsExplicitAndBounded),
     ("corrupt saved history leaves production shell available with an error state", CorruptSavedHistoryRemainsVisibleAsAnError),
@@ -436,6 +437,59 @@ static void RecipeDeviceConflictCreatesNoRunOrFinalArtifact()
     }
 }
 
+static void RecipeDuplexRequestChangesCompiledLayout()
+{
+    var root = Path.Combine(Path.GetTempPath(), "paperbatch-recipe-duplex-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var firstPath = Path.Combine(root, "first.pdf");
+        var secondPath = Path.Combine(root, "second.pdf");
+        File.WriteAllBytes(firstPath, TestOnePagePdf());
+        File.WriteAllBytes(secondPath, TestOnePagePdf());
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+        var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+        var renderer = new RendererCoordinator([new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts))]);
+        var intake = new SourceIntakeService(cache);
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
+        var composer = new LayoutCaptureComposer();
+        var coordinator = new PreparedArtifactCoordinator(intake, cache, renderer, new ConflictTestInspector(),
+            new ConflictTestInspector(), composer, artifacts, store);
+        var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
+            artifacts: artifacts, runStore: store, preparation: coordinator);
+        sources.ImportAsync([firstPath, secondPath]).GetAwaiter().GetResult();
+        var recipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "r", "duplex",
+            [new RecipeSource("first", firstPath), new RecipeSource("second", secondPath)],
+            new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter"))
+        {
+            Rules = [new RecipeSettingRule("duplex-rule", "*.pdf", "pdf", new RecipeSettingsOverride(DuplexMode: DuplexMode.LongEdge))]
+        };
+
+        try
+        {
+            sources.PrepareQueueAsync(
+                new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit),
+                new LayoutOptions(), recipe).GetAwaiter().GetResult();
+            throw new InvalidOperationException("The recording composer should stop after capturing the layout.");
+        }
+        catch (LayoutCapturedException) { }
+
+        Assert.Equal(2, composer.CompiledPageCount);
+        Assert.True(composer.CompiledSides.SequenceEqual([PageSide.Front, PageSide.Back]));
+        Assert.Equal(0, store.GetRecentRuns().Length);
+        var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
+            new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+        Assert.True(viewModel.PreparationSettingsNote.Contains("not validated", StringComparison.OrdinalIgnoreCase));
+    }
+    finally
+    {
+        try { Directory.Delete(root, recursive: true); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+}
+
 static byte[] TestOnePagePdf()
 {
     var objects = new[] { "<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -700,6 +754,21 @@ sealed class ConflictTestComposer : IPageCompositionAdapter
         throw new InvalidOperationException("Device conflict should stop before composition.");
     }
 }
+
+sealed class LayoutCaptureComposer : IPageCompositionAdapter
+{
+    public int CompiledPageCount { get; private set; }
+    public IReadOnlyList<PageSide> CompiledSides { get; private set; } = [];
+    public Task ComposePdfAsync(LayoutCompilation compilation, IEnumerable<PdfCompositionSource> sources,
+        Stream destination, CancellationToken cancellationToken = default)
+    {
+        CompiledPageCount = compilation.Pages.Length;
+        CompiledSides = compilation.Pages.Select(page => page.Side).ToArray();
+        throw new LayoutCapturedException();
+    }
+}
+
+sealed class LayoutCapturedException : Exception { }
 
 sealed class FakePreviewSource : IFinalPreviewPresentationSource
 {

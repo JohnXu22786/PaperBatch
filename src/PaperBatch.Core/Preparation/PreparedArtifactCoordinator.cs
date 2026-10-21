@@ -187,7 +187,8 @@ public sealed class PreparedArtifactCoordinator(
             Add(System.Text.Json.JsonSerializer.Serialize(item.PrintSettings));
         }
         Add(System.Text.Json.JsonSerializer.Serialize(settings));
-        Add(System.Text.Json.JsonSerializer.Serialize(perItemLayoutSettings));
+        Add(System.Text.Json.JsonSerializer.Serialize(perItemLayoutSettings?.Select(document => document is null ? null :
+            document with { Ranges = document.Ranges.IsDefault ? [] : document.Ranges }).ToArray()));
         Add(System.Text.Json.JsonSerializer.Serialize(new
         {
             options.Copies,

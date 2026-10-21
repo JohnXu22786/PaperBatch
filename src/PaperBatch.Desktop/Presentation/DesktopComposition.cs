@@ -256,6 +256,10 @@ internal sealed class ProductionPresentationSources :
                     .Distinct(StringComparer.Ordinal).ToArray();
                 return new(null, null, [$"Per-file device requests resolve differently ({string.Join(", ", sources)}). The current prepared-run model requires one device profile per compatible segment and this shell cannot validate per-file device settings; no artifact was created."], false);
             }
+            // The layout compiler needs to know whether sheets are duplex so it can
+            // keep file boundaries on the correct physical face. This remains a
+            // requested layout value; it is not validation of printer capability.
+            layoutOptions = layoutOptions with { Duplex = first.Values.DuplexMode != DuplexMode.Simplex };
             var sourceSettings = new List<PrintSettings>(resolved.Count);
             var documentSettings = new List<LayoutDocumentSettings>(resolved.Count);
             foreach (var item in resolved)
