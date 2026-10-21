@@ -2,6 +2,10 @@
 
 PaperBatch is an AGPL-3.0 project for preparing and printing ordered batches of mixed documents. Work starts with U0: a reproducible compatibility lab that records which native assumptions have evidence and which still need a licensed Windows and printer test environment.
 
+## Windows x64 packaging prototype
+
+The current prototype builds an unsigned, self-contained Windows x64 lite shell package in CI. It intentionally excludes Office/WPS, LibreOffice, PDFium, fonts, and printer drivers; see [the packaging notes](docs/packaging/windows-x64-lite-prototype.md) for build steps, manifests, and limitations. It is not a full offline renderer or a stable/beta release.
+
 ## U0 compatibility probe
 
 The compatibility probe targets .NET 10 and has no NuGet dependencies. The shared core adds a separate .NET 10 library with a pinned SQLite provider for durable run/job metadata. The probe reports exact runtime/architecture, optional PDFium binary identity and PE exports, Office-suite executable/product identity/version/bitness evidence, print-spooler/queue/driver inventory, separate route, job-ID, and physical-device output evidence, and the open/complete state of G1.
