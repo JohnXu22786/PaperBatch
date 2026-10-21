@@ -259,15 +259,20 @@ public sealed class PdfiumArtifactInspector
     }
 
     public async Task<PdfRasterPage> RenderPageAsync(Stream pdf, int pageNumber, int maximumDimension, CancellationToken cancellationToken)
+        => await RenderPageAtDpiAsync(pdf, pageNumber, 72, maximumDimension, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Renders one page at a bounded print DPI from the explicitly pinned PDFium runtime.</summary>
+    public async Task<PdfRasterPage> RenderPageAtDpiAsync(Stream pdf, int pageNumber, int dpi, int maximumDimension, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(pdf);
         if (!pdf.CanRead) throw new ArgumentException("The PDF stream must be readable.", nameof(pdf));
         if (pageNumber <= 0) throw new ArgumentOutOfRangeException(nameof(pageNumber));
-        if (maximumDimension is < 64 or > 4096) throw new ArgumentOutOfRangeException(nameof(maximumDimension));
+        if (dpi is < 72 or > 600) throw new ArgumentOutOfRangeException(nameof(dpi));
+        if (maximumDimension is < 64 or > 16384) throw new ArgumentOutOfRangeException(nameof(maximumDimension));
         if (!pdf.CanSeek) throw new ArgumentException("The PDF stream must support seeking for bounded page preview.", nameof(pdf));
         var inspected = await InspectPageSizesAsync(pdf, pageNumber, cancellationToken).ConfigureAwait(false);
         var size = inspected.PageSizes[0];
-        var scale = Math.Min(1d, maximumDimension / Math.Max(size.WidthPoints, size.HeightPoints));
+        var scale = Math.Min(dpi / 72d, maximumDimension / Math.Max(size.WidthPoints, size.HeightPoints));
         var width = Math.Max(1, (int)Math.Round(size.WidthPoints * scale));
         var height = Math.Max(1, (int)Math.Round(size.HeightPoints * scale));
         var stride = checked(width * 4);
