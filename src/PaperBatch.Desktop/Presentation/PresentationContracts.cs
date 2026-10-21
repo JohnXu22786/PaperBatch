@@ -21,7 +21,7 @@ internal sealed record PreflightFindingSnapshot(string Title, string Status, str
 
 internal sealed record HistoryEntrySnapshot(string Title, string Summary, string Status);
 
-internal sealed record TemplateSnapshot(string Name, string Summary, string SettingsSummary);
+internal sealed record TemplateSnapshot(string RecipeId, string Name, string Summary, string SettingsSummary);
 
 internal sealed record WorkspaceStatusSnapshot(string Title, string Detail, bool IsDemo, bool InitializationFailed = false);
 
@@ -72,6 +72,26 @@ internal interface IHistoryPresentationSource
 
 internal interface ITemplatePresentationSource
 {
-    IReadOnlyList<TemplateSnapshot> GetTemplates();
+    IReadOnlyList<TemplateSnapshot> GetTemplates(bool chinese = false);
     string? TemplateReadError { get; }
 }
+
+internal interface IRecipeManagementPresentationSource : ITemplatePresentationSource
+{
+    bool IsRecipeStoreAvailable { get; }
+    JobRecipeSnapshot CreateRecipe(string name, IReadOnlyList<string> queueItemIds, RecipeDefaultsSnapshot defaults);
+    void SaveRecipe(JobRecipeSnapshot recipe);
+    JobRecipeSnapshot GetRecipe(string recipeId);
+    bool DeleteRecipe(string recipeId);
+    void ImportRecipe(string path);
+    void ExportRecipe(string recipeId, string path);
+    IReadOnlyList<string> GetRecipeSourceLocations(string recipeId);
+}
+
+internal sealed record JobRecipeSnapshot(int SchemaVersion, string RecipeId, string Name,
+    System.Collections.Immutable.ImmutableArray<PaperBatch.Core.Recipes.RecipeSource> Sources,
+    PaperBatch.Core.Recipes.RecipePrintSettings Settings);
+
+internal sealed record RecipeDefaultsSnapshot(int Copies, PaperBatch.Core.Domain.ColorMode ColorMode,
+    PaperBatch.Core.Domain.DuplexMode DuplexMode, PaperBatch.Core.Domain.Orientation Orientation,
+    PaperBatch.Core.Domain.ScalingMode ScalingMode, string Media);

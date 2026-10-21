@@ -272,8 +272,9 @@
               <TextBlock Text="{Binding TemplateDescription}"
                          FontSize="12" Foreground="#526176" TextWrapping="Wrap" />
             </StackPanel>
-            <ItemsControl ItemsSource="{Binding Templates}">
-              <ItemsControl.ItemTemplate>
+            <ListBox ItemsSource="{Binding Templates}" SelectedItem="{Binding SelectedTemplate, Mode=TwoWay}"
+                     AutomationProperties.Name="Saved recipes">
+              <ListBox.ItemTemplate>
                 <DataTemplate x:DataType="presentation:TemplateSnapshot">
                   <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="12" Padding="17" Margin="0,4">
                     <StackPanel Spacing="5">
@@ -283,8 +284,21 @@
                     </StackPanel>
                   </Border>
                 </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
+              </ListBox.ItemTemplate>
+            </ListBox>
+            <StackPanel Spacing="8" IsVisible="{Binding CanManageRecipes}">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Content="{Binding CreateRecipeLabel}" Click="CreateRecipeClick" AutomationProperties.Name="Create recipe from queue" />
+                <Button Content="{Binding RenameRecipeLabel}" Click="RenameRecipeClick" IsEnabled="{Binding HasSelectedTemplate}" />
+                <Button Content="{Binding DeleteRecipeLabel}" Click="DeleteRecipeClick" IsEnabled="{Binding HasSelectedTemplate}" />
+                <Button Content="{Binding RefreshRecipesLabel}" Click="RefreshRecipesClick" />
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Content="{Binding ImportRecipeLabel}" Click="ImportRecipeClick" />
+                <Button Content="{Binding ExportRecipeLabel}" Click="ExportRecipeClick" IsEnabled="{Binding HasSelectedTemplate}" />
+                <Button Content="{Binding LoadRecipeLabel}" Click="LoadRecipeClick" IsEnabled="{Binding CanLoadSelectedRecipe}" />
+              </StackPanel>
+            </StackPanel>
           </StackPanel>
         </Grid>
         </StackPanel>

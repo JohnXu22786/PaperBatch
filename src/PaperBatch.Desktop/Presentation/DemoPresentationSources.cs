@@ -56,10 +56,10 @@ internal sealed class DemoPresentationSources :
 
     public string? HistoryReadError => null;
 
-    public IReadOnlyList<TemplateSnapshot> GetTemplates() =>
+    public IReadOnlyList<TemplateSnapshot> GetTemplates(bool chinese = false) =>
     [
-        new TemplateSnapshot("Sample classroom packet", "Example recipe · not saved", "A4 · one-sided · sample values"),
-        new TemplateSnapshot("Sample office handout", "Example recipe · not saved", "Letter · two-sided · sample values")
+        new TemplateSnapshot("sample-classroom", "Sample classroom packet", "Example recipe · not saved", "A4 · one-sided · sample values"),
+        new TemplateSnapshot("sample-office", "Sample office handout", "Example recipe · not saved", "Letter · two-sided · sample values")
     ];
 
     public string? TemplateReadError => null;

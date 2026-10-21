@@ -23,6 +23,7 @@ var tests = new (string Name, Action Run)[]
     ("production presentation exposes unavailable production capabilities without demo rows", ProductionPresentationIsExplicitlyUnavailable),
     ("production preview raster comes from the persisted prepared artifact", ProductionPreviewReadsPreparedArtifact),
     ("corrupt saved recipes leave production shell available with an error state", CorruptSavedRecipesRemainVisibleAsAnError),
+    ("recipe lifecycle strictly imports, renames, exports without overwrite, and deletes", RecipeLifecycleIsExplicitAndBounded),
     ("corrupt saved history leaves production shell available with an error state", CorruptSavedHistoryRemainsVisibleAsAnError),
     ("presentation assembly keeps native backends behind shared core contracts", PresentationAssemblyReferencesCoreWithoutNativeImports)
 };
@@ -272,6 +273,7 @@ static void ProductionPresentationIsExplicitlyUnavailable()
             InitializationFailed: true));
     Assert.Equal("History unavailable", failedViewModel.HistoryTitle);
     Assert.Equal("Recipes unavailable", failedViewModel.TemplateTitle);
+    Assert.True(!failedViewModel.CanManageRecipes);
     Assert.Contains("could not initialize", failedViewModel.HistoryDescription);
 
     var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
@@ -342,6 +344,10 @@ static void ProductionPreviewReadsPreparedArtifact()
             viewModel.NavigateCommand.Execute("Templates");
             Assert.Equal("Saved recipes", viewModel.TemplateTitle);
             Assert.Contains("not applied", viewModel.Templates.Single().SettingsSummary);
+            viewModel.SetLanguage("zh-CN");
+            Assert.Contains("个来源", viewModel.Templates.Single().Summary);
+            Assert.Contains("未应用", viewModel.Templates.Single().SettingsSummary);
+            Assert.Equal("从队列创建…", viewModel.CreateRecipeLabel);
             viewModel.InvalidatePreparedRun("queue-item");
             Assert.True(!viewModel.HasPreviewImage);
             Assert.Equal("FINAL PREVIEW UNAVAILABLE", viewModel.PreviewHeading);
@@ -376,6 +382,7 @@ static void CorruptSavedRecipesRemainVisibleAsAnError()
             new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
         Assert.Empty(viewModel.Templates);
         Assert.Equal("Recipes unavailable", viewModel.TemplateTitle);
+        Assert.True(!viewModel.CanManageRecipes);
         Assert.Contains("damaged", viewModel.TemplateDescription);
 
         store.DeleteRecipe("recipe-corrupt");
@@ -397,6 +404,62 @@ static void CorruptSavedRecipesRemainVisibleAsAnError()
     {
         if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
+}
+
+static void RecipeLifecycleIsExplicitAndBounded()
+{
+    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-recipe-lifecycle-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
+        var source = new ProductionPresentationSources(runStore: store);
+        var recipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "recipe-lifecycle", "Packet",
+            [new RecipeSource("source-a", "/tmp/a.pdf")],
+            new RecipePrintSettings(2, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter"));
+        source.SaveRecipe(new JobRecipeSnapshot(recipe.SchemaVersion, recipe.RecipeId, recipe.Name, recipe.Sources, recipe.Settings));
+        var renamed = source.GetRecipe(recipe.RecipeId) with { Name = "Renamed packet" };
+        source.SaveRecipe(renamed);
+        Assert.Equal("Renamed packet", source.GetTemplates().Single().Name);
+
+        var exportedPath = Path.Combine(root, "export.json");
+        source.ExportRecipe(recipe.RecipeId, exportedPath);
+        Assert.Equal("Renamed packet", JobRecipeJson.Parse(File.ReadAllBytes(exportedPath)).Name);
+        Assert.Throws<IOException>(() => source.ExportRecipe(recipe.RecipeId, exportedPath));
+
+        var importPath = Path.Combine(root, "import.json");
+        File.WriteAllText(importPath, JobRecipeJson.Serialize(recipe with { RecipeId = "imported", Name = "Imported packet" }));
+        source.ImportRecipe(importPath);
+        Assert.Equal(2, source.GetTemplates().Count);
+        Assert.Throws<InvalidOperationException>(() => source.ImportRecipe(importPath));
+        Assert.Throws<InvalidDataException>(() => source.ImportRecipe(WriteOversizedRecipe(root)));
+        Assert.True(source.DeleteRecipe("imported"));
+        Assert.True(source.DeleteRecipe(recipe.RecipeId));
+        Assert.Empty(source.GetTemplates());
+
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+        var intake = new SourceIntakeService(cache);
+        source = new ProductionPresentationSources(intake, runStore: store);
+        var initiallyLoaded = source.ImportAsync([Path.Combine(root, "missing.pdf")]).GetAwaiter().GetResult();
+        var created = source.CreateRecipe("Missing source recipe", initiallyLoaded.Select(item => item.Id).ToArray(),
+            new RecipeDefaultsSnapshot(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter"));
+        source.SaveRecipe(created);
+        var viewModel = new DesktopShellViewModel(source, source, source, source, source, source,
+            new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+        var saved = viewModel.Templates.Single();
+        viewModel.LoadRecipeSourcesAsync(saved, replaceQueue: false).GetAwaiter().GetResult();
+        Assert.Equal(2, viewModel.QueueItems.Count);
+        Assert.True(viewModel.QueueItems.All(item => item.Status == "Needs attention"));
+    }
+    finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+}
+
+static string WriteOversizedRecipe(string root)
+{
+    var path = Path.Combine(root, "oversized.json");
+    File.WriteAllBytes(path, new byte[JobRecipeJson.MaximumRecipeBytes + 1]);
+    return path;
 }
 
 static void CorruptSavedHistoryRemainsVisibleAsAnError()
@@ -540,7 +603,7 @@ sealed class FakeHistorySource : IHistoryPresentationSource
 
 sealed class FakeTemplateSource : ITemplatePresentationSource
 {
-    public IReadOnlyList<TemplateSnapshot> GetTemplates() => [];
+    public IReadOnlyList<TemplateSnapshot> GetTemplates(bool chinese = false) => [];
     public string? TemplateReadError => null;
 }
 
