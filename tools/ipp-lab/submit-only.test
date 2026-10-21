@@ -1,0 +1,20 @@
+TRANSFER length
+
+{
+  NAME "Submit synthetic PDF"
+  OPERATION Print-Job
+
+  GROUP operation-attributes-tag
+  ATTR charset attributes-charset utf-8
+  ATTR naturalLanguage attributes-natural-language en
+  ATTR uri printer-uri $printer_uri
+  ATTR name requesting-user-name paperbatch-lab
+  ATTR name job-name paperbatch-synthetic-print
+  ATTR mimeMediaType document-format application/pdf
+
+  FILE synthetic.pdf
+
+  STATUS successful-ok
+  EXPECT job-id OF-TYPE integer WITH-VALUE >0
+  DISPLAY job-id
+}
