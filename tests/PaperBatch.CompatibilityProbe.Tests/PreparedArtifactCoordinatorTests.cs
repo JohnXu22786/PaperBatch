@@ -23,6 +23,7 @@ internal static class PreparedArtifactCoordinatorTests
 
         var root = Path.Combine(Path.GetTempPath(), "paperbatch-prepared-e2e-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
+        var stage = "initialize fixtures";
         try
         {
             var firstPath = Path.Combine(root, "first.pdf");
@@ -46,6 +47,7 @@ internal static class PreparedArtifactCoordinatorTests
             var settings = new PrintSettings(2, ColorMode.Color, DuplexMode.Simplex, "Letter",
                 Orientation.Auto, ScalingMode.ShrinkToFit);
 
+            stage = "initial preparation";
             var result = pipeline.PrepareAsync(
                 [new SourceInput(firstPath), new SourceInput(secondPath), new SourceInput(firstPath, IntentionalCopy: true)],
                 settings,
@@ -64,6 +66,7 @@ internal static class PreparedArtifactCoordinatorTests
             Assert.True(firstBytes.SequenceEqual(File.ReadAllBytes(firstPath)));
             Assert.True(secondBytes.SequenceEqual(File.ReadAllBytes(secondPath)));
 
+            stage = "idempotent replay";
             var retry = pipeline.PrepareAsync(
                 [new SourceInput(firstPath), new SourceInput(secondPath), new SourceInput(firstPath, IntentionalCopy: true)],
                 settings,
@@ -74,6 +77,7 @@ internal static class PreparedArtifactCoordinatorTests
             Assert.True(retry.Succeeded);
             Assert.True(retry.Persistence!.Replayed);
             Assert.Equal(run.RunId, retry.Run!.RunId);
+            stage = "concurrent idempotent replay";
             var concurrentRetries = Task.WhenAll(Enumerable.Range(0, 2).Select(_ => pipeline.PrepareAsync(
                 [new SourceInput(firstPath), new SourceInput(secondPath), new SourceInput(firstPath, IntentionalCopy: true)],
                 settings,
@@ -83,12 +87,14 @@ internal static class PreparedArtifactCoordinatorTests
                 FixedTime.AddMinutes(2)))).GetAwaiter().GetResult();
             Assert.True(concurrentRetries.All(result => result.Succeeded && result.Persistence!.Replayed && result.Run!.RunId == run.RunId));
 
+            stage = "persisted artifact inspection";
             var reopenedRun = store.GetPreparedRun(run.RunId)!;
             Assert.Equal(run.FinalArtifact, reopenedRun.FinalArtifact);
             using var finalPdf = artifacts.OpenRead(run.FinalArtifact.ArtifactId);
             var finalPages = inspector.GetPageSizesAsync(finalPdf, CancellationToken.None).GetAwaiter().GetResult();
             Assert.Equal(run.FinalArtifact.PageCount, finalPages.Count);
 
+            stage = "copy layout preparation";
             var copied = pipeline.PrepareAsync([new SourceInput(firstPath)], settings,
                 new LayoutOptions(Copies: 2), "copied-layout-key",
                 new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true), FixedTime.AddMinutes(1))
@@ -98,6 +104,7 @@ internal static class PreparedArtifactCoordinatorTests
             Assert.Equal(1, copied.Run.Items[0].PrintSettings.Copies);
             Assert.Equal(1, copied.Run.Segments[0].PrintSettings.Copies);
 
+            stage = "per-document layout preparation";
             var perDocument = pipeline.PrepareAsync(
                 [new SourceInput(firstPath), new SourceInput(secondPath)], settings,
                 new LayoutOptions(NUp: NUpMode.One), "per-document-layout-key",
@@ -114,6 +121,7 @@ internal static class PreparedArtifactCoordinatorTests
             Assert.True(perDocument.Run.Segments[0].ItemIds.SequenceEqual([perDocument.Run.Items[0].ItemId]));
             Assert.True(perDocument.Run.Segments[1].ItemIds.SequenceEqual([perDocument.Run.Items[1].ItemId]));
 
+            stage = "orientation identity preparation";
             var changedLaterProfile = pipeline.PrepareAsync(
                 [new SourceInput(firstPath), new SourceInput(secondPath)], settings,
                 new LayoutOptions(NUp: NUpMode.One), "per-document-orientation-key",
@@ -125,6 +133,7 @@ internal static class PreparedArtifactCoordinatorTests
             Assert.True(perDocument.Run.SnapshotFingerprint != changedLaterProfile.Run!.SnapshotFingerprint,
                 "A later file's requested orientation is part of the prepared-run identity.");
 
+            stage = "caller-cancelled preparation";
             using var cancelledToken = new CancellationTokenSource();
             cancelledToken.Cancel();
             var cancelled = pipeline.PrepareAsync([new SourceInput(firstPath)], settings, new LayoutOptions(),
@@ -132,6 +141,11 @@ internal static class PreparedArtifactCoordinatorTests
                 FixedTime.AddMinutes(3), cancelledToken.Token).GetAwaiter().GetResult();
             Assert.True(cancelled.IsCancelled);
             Assert.True(cancelled.Run is null);
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidOperationException(
+                $"Prepared artifact test failed during stage '{stage}': {exception.GetType().Name}: {exception.Message}", exception);
         }
         finally
         {
