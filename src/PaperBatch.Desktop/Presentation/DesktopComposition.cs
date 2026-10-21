@@ -100,6 +100,7 @@ internal sealed class ProductionPresentationSources :
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
     private readonly Dictionary<string, string> _queueLocations = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _queueSourceHashes = new(StringComparer.Ordinal);
     private IReadOnlyList<string> _resolutionSummaries = [];
     private readonly HashSet<string> _preparableQueueItems = new(StringComparer.Ordinal);
 
@@ -139,6 +140,7 @@ internal sealed class ProductionPresentationSources :
     {
         _queue.RemoveAll(item => string.Equals(item.Id, queueItemId, StringComparison.Ordinal));
         _queueLocations.Remove(queueItemId);
+        _queueSourceHashes.Remove(queueItemId);
         _preparableQueueItems.Remove(queueItemId);
     }
 
@@ -157,7 +159,11 @@ internal sealed class ProductionPresentationSources :
                 // Queue identity belongs to the row. A source snapshot can be shared or
                 // replaced independently and must never alias two intentional copies.
                 var id = Guid.NewGuid().ToString("N");
-                if (source.Snapshot is { } capturedSnapshot) queueItemIdBySnapshot[capturedSnapshot.SnapshotId] = id;
+                if (source.Snapshot is { } capturedSnapshot)
+                {
+                    queueItemIdBySnapshot[capturedSnapshot.SnapshotId] = id;
+                    _queueSourceHashes[id] = capturedSnapshot.Sha256;
+                }
                 var title = Path.GetFileName(source.SourcePath);
                 var findings = source.Diagnostics.Select(diagnostic => new PreflightFindingSnapshot(
                     diagnostic.Code.ToString(), diagnostic.Severity.ToString(), diagnostic.Message)).ToList();
@@ -212,7 +218,8 @@ internal sealed class ProductionPresentationSources :
 
     private readonly Dictionary<string, List<PreflightFindingSnapshot>> _findings = new(StringComparer.Ordinal);
     public bool CanPrepare => _preparation is not null && _queue.Count > 0 &&
-        _queue.All(item => _queueLocations.ContainsKey(item.Id) && _preparableQueueItems.Contains(item.Id));
+        _queue.All(item => _queueLocations.ContainsKey(item.Id) && _queueSourceHashes.ContainsKey(item.Id) &&
+            _preparableQueueItems.Contains(item.Id));
     public IReadOnlyList<string> ResolutionSummaries => _resolutionSummaries;
 
     public async Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings, LayoutOptions layoutOptions,
@@ -222,9 +229,10 @@ internal sealed class ProductionPresentationSources :
             return new(null, null, ["A trusted PDFium runtime and a nonempty local queue are required before preparation."], false);
         var now = DateTimeOffset.UtcNow;
         var seenPaths = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-        var paths = _queue.Select(item => _queueLocations.TryGetValue(item.Id, out var path)
-            ? new SourceInput(path, IntentionalCopy: !seenPaths.Add(Path.GetFullPath(path)))
-            : throw new InvalidOperationException("A queue source location is no longer available.")).ToArray();
+        var paths = _queue.Select(item => _queueLocations.TryGetValue(item.Id, out var path) &&
+            _queueSourceHashes.TryGetValue(item.Id, out var expectedSha256)
+                ? new SourceInput(path, IntentionalCopy: !seenPaths.Add(Path.GetFullPath(path)), ExpectedSha256: expectedSha256)
+                : throw new InvalidOperationException("A queue source snapshot is no longer available. Reimport the source before preparing.")).ToArray();
         IReadOnlyList<PrintSettings>? perItemPrintSettings = null;
         IReadOnlyList<LayoutDocumentSettings>? perItemLayoutSettings = null;
         if (recipe is not null)

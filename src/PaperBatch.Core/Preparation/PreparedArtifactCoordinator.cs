@@ -62,8 +62,9 @@ public sealed class PreparedArtifactCoordinator(
         ArgumentNullException.ThrowIfNull(printSettings);
         ArgumentNullException.ThrowIfNull(layoutOptions);
         ArgumentNullException.ThrowIfNull(retention);
+        var inputArray = inputs.ToArray();
         var diagnostics = new List<string>();
-        var prepared = await intake.PrepareAsync(inputs, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var prepared = await intake.PrepareAsync(inputArray, cancellationToken: cancellationToken).ConfigureAwait(false);
         var retainedSnapshots = prepared.Items.Where(item => item.Snapshot is not null)
             .Select(item => item.Snapshot!.SnapshotId).Distinct(StringComparer.Ordinal).ToArray();
         try
@@ -78,6 +79,16 @@ public sealed class PreparedArtifactCoordinator(
                 diagnostics.AddRange(prepared.Items.SelectMany(item => item.Diagnostics).Select(item => item.Message));
                 if (diagnostics.Count == 0) diagnostics.Add("Every selected source must pass intake preflight before preparation.");
                 return new(null, null, diagnostics, IsCancelled: false);
+            }
+            for (var sourceIndex = 0; sourceIndex < inputArray.Length; sourceIndex++)
+            {
+                var expectedSha256 = inputArray[sourceIndex].ExpectedSha256;
+                if (expectedSha256 is not null && !string.Equals(expectedSha256,
+                    prepared.Items[sourceIndex].Snapshot!.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    diagnostics.Add($"{Path.GetFileName(prepared.Items[sourceIndex].SourcePath)} changed after queue preflight. Reimport the source before preparing; no final artifact was created.");
+                    return new(null, null, diagnostics, IsCancelled: false);
+                }
             }
             var items = new List<PreparedItem>(prepared.Items.Length);
             var layoutDocuments = new List<LayoutDocument>(prepared.Items.Length);

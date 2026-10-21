@@ -42,7 +42,7 @@ public enum IntakeDiagnosticCode
 public sealed record IntakeDiagnostic(IntakeSeverity Severity, IntakeDiagnosticCode Code, string Message);
 
 /// <summary>A user-selected path and whether a repeated path is an intentional extra copy.</summary>
-public sealed record SourceInput(string Path, bool IntentionalCopy = false);
+public sealed record SourceInput(string Path, bool IntentionalCopy = false, string? ExpectedSha256 = null);
 
 /// <summary>Provides path attributes for deterministic source-enumeration tests and adapters.</summary>
 public interface ISourcePathAttributeAccess

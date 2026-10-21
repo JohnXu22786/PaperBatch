@@ -26,6 +26,7 @@ var tests = new (string Name, Action Run)[]
     ("headless shell identifies demo data and has no print action", HeadlessShellIsExplicitlyDemoOnly),
     ("production presentation exposes unavailable production capabilities without demo rows", ProductionPresentationIsExplicitlyUnavailable),
     ("production preview raster comes from the persisted prepared artifact", ProductionPreviewReadsPreparedArtifact),
+    ("source changes after queue preflight stop before final rendering or persistence", ChangedSourceAfterPreflightCreatesNoPreparedArtifact),
     ("preparation controls forward requested layout settings and invalidate previews", PreparationControlsForwardRequestedSettingsAndInvalidate),
     ("recipe device-profile conflicts do not persist or compose an artifact", RecipeDeviceConflictCreatesNoRunOrFinalArtifact),
     ("recipe duplex requests change compiled physical-face layout while remaining unvalidated", RecipeDuplexRequestChangesCompiledLayout),
@@ -390,6 +391,46 @@ static void ProductionPreviewReadsPreparedArtifact()
             Assert.Equal("FINAL PREVIEW UNAVAILABLE", viewModel.PreviewHeading);
         }
         finally { window.Close(); }
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+static void ChangedSourceAfterPreflightCreatesNoPreparedArtifact()
+{
+    var root = Path.Combine(Path.GetTempPath(), "paperbatch-changed-source-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var path = Path.Combine(root, "source.pdf");
+        File.WriteAllBytes(path, TestOnePagePdf());
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+        var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+        var renderer = new RendererCoordinator([new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts))]);
+        var intake = new SourceIntakeService(cache);
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
+        var composer = new ConflictTestComposer();
+        var coordinator = new PreparedArtifactCoordinator(intake, cache, renderer, new ConflictTestInspector(),
+            new ConflictTestInspector(), composer, artifacts, store);
+        var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
+            artifacts: artifacts, runStore: store, preparation: coordinator);
+        var queueItem = sources.ImportAsync([path]).GetAwaiter().GetResult().Single();
+        File.AppendAllText(path, "\n% changed after preflight\n");
+
+        var result = sources.PrepareQueueAsync(
+            new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit),
+            new LayoutOptions()).GetAwaiter().GetResult();
+
+        Assert.True(!result.Succeeded);
+        Assert.True(result.Diagnostics.Any(message => message.Contains("changed after queue preflight", StringComparison.Ordinal)));
+        Assert.Null(result.Run);
+        Assert.Null(result.Persistence);
+        Assert.Equal(0, composer.Calls);
+        Assert.Equal(0, store.GetRecentRuns().Length);
+        Assert.True(sources.GetQueueItems().Any(item => item.Id == queueItem.Id));
     }
     finally
     {
