@@ -43,8 +43,15 @@ class DocumentCorpusTests(unittest.TestCase):
         manifest = json.loads(manifest_bytes)
 
         self.assertEqual(manifest["synthetic"], True)
-        self.assertEqual(manifest["schema_version"], 1)
-        self.assertEqual(len(manifest["fixtures"]), 5)
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertGreaterEqual(len(manifest["fixtures"]), 16)
+        self.assertEqual(manifest["evidence_class"], "synthetic")
+        self.assertTrue(manifest["simulation_only"])
+        self.assertEqual(manifest["coverage_target"], {"minimum": 150, "maximum": 300})
+        self.assertEqual(manifest["evidence_gaps"]["engine_generated"], "absent")
+        self.assertEqual(manifest["evidence_gaps"]["human_reviewed"], "absent")
+        self.assertEqual(manifest["evidence_gaps"]["oem_driver"], "absent")
+        self.assertEqual(manifest["evidence_gaps"]["physical_output"], "absent")
         identifiers = [fixture["id"] for fixture in manifest["fixtures"]]
         self.assertEqual(len(identifiers), len(set(identifiers)))
 
@@ -57,6 +64,10 @@ class DocumentCorpusTests(unittest.TestCase):
         self.assertEqual(actual_paths, declared_paths)
 
         for fixture in manifest["fixtures"]:
+            self.assertEqual(fixture["evidence_class"], "synthetic")
+            self.assertTrue(fixture["simulation_only"])
+            self.assertTrue(fixture["coverage_tags"])
+            self.assertIn(fixture["expected_outcome"]["status"], {"accepted", "rejected", "unsupported", "synthetic_only"})
             data = (CORPUS_DIR / fixture["path"]).read_bytes()
             self.assertEqual(len(data), fixture["size_bytes"], fixture["id"])
             self.assertEqual(generate_document_corpus.sha256(data), fixture["sha256"], fixture["id"])
@@ -68,6 +79,97 @@ class DocumentCorpusTests(unittest.TestCase):
         self.assertNotIn(b"\r", manifest_bytes)
         self.assertNotIn(b"\r", regenerated_manifest)
         self.assertEqual(regenerated_manifest, manifest_bytes)
+
+    def test_manifest_has_breadth_without_claiming_real_engine_coverage(self) -> None:
+        manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
+        fixtures = {fixture["id"]: fixture for fixture in manifest["fixtures"]}
+        required = {
+            "docx_multilingual_fields_forms",
+            "docx_annotations",
+            "xlsx_mixed_page_sizes",
+            "pptx_multilingual_fonts",
+            "pdf_annotations_forms",
+            "encrypted_package_simulation",
+            "legacy_ole_signature_simulation",
+            "fault_zip_path_traversal",
+            "fault_oversized_member",
+            "opc_external_hyperlink_no_network",
+        }
+        self.assertTrue(required.issubset(fixtures))
+        self.assertEqual(manifest["counts"]["synthetic_fixtures"], len(fixtures))
+        self.assertEqual(manifest["counts"]["parameter_variants_counted_as_compatibility"], 0)
+        for fixture_id in required:
+            self.assertTrue(fixtures[fixture_id]["coverage_tags"], fixture_id)
+        for fixture_id in {"docx_multilingual_fields_forms", "docx_annotations", "xlsx_mixed_page_sizes", "pptx_multilingual_fonts", "pdf_annotations_forms"}:
+            self.assertEqual(fixtures[fixture_id]["expected_outcome"]["status"], "synthetic_only", fixture_id)
+        for fixture_id in {"fault_zip_path_traversal", "fault_oversized_member"}:
+            self.assertEqual(fixtures[fixture_id]["expected_outcome"]["status"], "rejected", fixture_id)
+        external = fixtures["opc_external_hyperlink_no_network"]
+        self.assertEqual(external["expected_outcome"]["status"], "synthetic_only")
+        self.assertFalse(external["expected"]["network_fetch_expected"])
+
+    def test_fault_archives_are_bounded_and_inspected_without_extraction(self) -> None:
+        manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
+        fixtures = {fixture["id"]: fixture for fixture in manifest["fixtures"]}
+        traversal = fixtures["fault_zip_path_traversal"]
+        with zipfile.ZipFile(CORPUS_DIR / traversal["path"]) as package:
+            self.assertIn("../outside.txt", package.namelist())
+        oversized = fixtures["fault_oversized_member"]
+        with zipfile.ZipFile(CORPUS_DIR / oversized["path"]) as package:
+            self.assertEqual(package.getinfo("payload.bin").file_size, 1024 * 1024)
+        duplicate = fixtures["fault_duplicate_member"]
+        with zipfile.ZipFile(CORPUS_DIR / duplicate["path"]) as package:
+            self.assertEqual(package.namelist().count("part.xml"), 2)
+
+    def test_expanded_office_cases_use_format_parts_for_declared_features(self) -> None:
+        manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
+        fixtures = {fixture["id"]: fixture for fixture in manifest["fixtures"]}
+        with zipfile.ZipFile(CORPUS_DIR / fixtures["docx_multilingual_fields_forms"]["path"]) as package:
+            doc = ET.fromstring(package.read("word/document.xml"))
+            text = "".join(node.text or "" for node in doc.findall(f".//{DOCX_NS}t"))
+            self.assertIn("日本語", text)
+            self.assertEqual(len(doc.findall(f".//{DOCX_NS}fldSimple")), 1)
+            self.assertEqual(len(doc.findall(f".//{DOCX_NS}sdt")), 1)
+        with zipfile.ZipFile(CORPUS_DIR / fixtures["docx_annotations"]["path"]) as package:
+            doc = ET.fromstring(package.read("word/document.xml"))
+            self.assertEqual(len(doc.findall(f".//{DOCX_NS}commentRangeStart")), 1)
+            self.assertEqual(len(doc.findall(f".//{DOCX_NS}commentReference")), 1)
+            self.assertIn("word/comments.xml", package.namelist())
+            footnotes = ET.fromstring(package.read("word/footnotes.xml"))
+            footnote_entries = footnotes.findall(f"{DOCX_NS}footnote")
+            self.assertEqual([(entry.attrib[f"{DOCX_NS}id"], entry.attrib.get(f"{DOCX_NS}type")) for entry in footnote_entries], [("-1", "separator"), ("0", "continuationSeparator"), ("1", None)])
+        with zipfile.ZipFile(CORPUS_DIR / fixtures["xlsx_mixed_page_sizes"]["path"]) as package:
+            sheet_sizes = []
+            for sheet_path in ("xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml"):
+                sheet = ET.fromstring(package.read(sheet_path))
+                page_setup = sheet.find(f"{SHEET_NS}pageSetup")
+                self.assertIsNotNone(page_setup)
+                sheet_sizes.append(page_setup.attrib["paperSize"])
+            self.assertEqual(sheet_sizes, ["1", "9"])
+        with zipfile.ZipFile(CORPUS_DIR / fixtures["pptx_multilingual_fonts"]["path"]) as package:
+            slide = ET.fromstring(package.read("ppt/slides/slide1.xml"))
+            text = "".join(node.text or "" for node in slide.findall(f".//{DRAWING_NS}t"))
+            theme = ET.fromstring(package.read("ppt/theme/theme1.xml"))
+            font_names = [node.attrib.get("typeface") for node in theme.findall(f".//{DRAWING_NS}latin")]
+            self.assertIn("日本語", text)
+            self.assertIn("Noto Sans", font_names)
+            self.assertIn("Liberation Sans", font_names)
+        with zipfile.ZipFile(CORPUS_DIR / fixtures["opc_external_hyperlink_no_network"]["path"]) as package:
+            document = ET.fromstring(package.read("word/document.xml"))
+            relationships = ET.fromstring(package.read("word/_rels/document.xml.rels"))
+            hyperlink = document.find(f".//{DOCX_NS}hyperlink")
+            self.assertIsNotNone(hyperlink)
+            relationship_ids = {relation.attrib["Id"] for relation in relationships}
+            self.assertIn(hyperlink.attrib["{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"], relationship_ids)
+            self.assertEqual(relationships[0].attrib["TargetMode"], "External")
+        pdf = (CORPUS_DIR / fixtures["pdf_annotations_forms"]["path"]).read_bytes()
+        self.assertTrue(pdf.startswith(b"%PDF-1.4\n"))
+        self.assertIn(b"/Subtype /Text", pdf)
+        self.assertIn(b"/Subtype /Widget", pdf)
+        self.assertIn(b"/AcroForm << /Fields [4 0 R]", pdf)
+        startxref = re.search(rb"startxref\n(\d+)\n%%EOF", pdf)
+        self.assertIsNotNone(startxref)
+        self.assertEqual(pdf[int(startxref.group(1)) :].splitlines()[0], b"xref")
 
     def test_fixture_structures_match_their_declared_scenarios(self) -> None:
         manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))

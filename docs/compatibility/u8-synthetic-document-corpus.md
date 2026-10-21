@@ -1,20 +1,22 @@
-# U8 synthetic document corpus seed
+# U8 synthetic document corpus
 
-`tests/fixtures/synthetic_documents/` contains five small, synthetic inputs for later document-package and PDF parser tests: a DOCX with a table and two page sections, an XLSX with a hidden sheet and print area, a two-slide PPTX, a hand-authored two-page PDF, and a deliberately truncated DOCX package. The JSON manifest records each fixture's scenario, expected structural facts, byte size, and SHA-256 digest.
-
-## Regenerate and verify
-
-From the repository root, run:
+`tests/fixtures/synthetic_documents/` contains deterministic, locally authored fixtures for structural parser and fault handling tests. The manifest includes provenance, byte length, SHA-256, scenario coverage tags, expected outcome and an explicit evidence class for each entry. Regenerate and run the focused checks with:
 
 ```sh
 python3 tools/generate_document_corpus.py
-python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m unittest tests/test_document_corpus.py
 ```
 
-The generator uses only the Python standard library. It writes OPC ZIP entries without compression and assigns fixed ZIP timestamps and metadata so output bytes do not depend on the current time or operating system. The PDF is assembled directly from a small fixed set of PDF objects; no renderer is launched. Use `--output-dir PATH` to generate a temporary copy for inspection.
+The generator uses the Python standard library only. OPC-like ZIP packages use stored entries with fixed timestamps and metadata; PDF bytes are assembled directly. The malformed archive fixtures are data only. Tests inspect archive names and declared sizes without extracting them, and no fixture script or document is launched.
 
-## Provenance and limits
+## Coverage and expected outcomes
 
-All fixture contents were authored by the generator for PaperBatch. They contain no personal or customer documents, copied online content, proprietary fonts, credentials, or vendor output. The office packages and PDF are structural test inputs. Their presence does not show that Microsoft Office, WPS, LibreOffice, PDFium, the PaperBatch application, a printer driver, or physical printing can open or render them correctly. The malformed DOCX intentionally ends before its ZIP central directory and is expected to be rejected as a package. These files do not close G1 or any compatibility gate.
+The current set covers synthetic DOCX sections/tables, multilingual text, field/form markers, comments and footnotes; XLSX hidden sheets, print area and mixed page setup; PPTX multilingual text and generic font family names; hand-authored PDF page syntax and a text annotation plus AcroForm widget; and fault cases for a truncated package, traversal name, duplicate ZIP entry, bounded 1 MiB member, opaque encrypted-container simulation, and a legacy OLE signature simulation. A separate external hyperlink relationship case represents a valid DOCX hyperlink/OPC relationship and has a no-network expected outcome; it is not classified as a malformed package. Outcomes marked `synthetic_only` describe structural intent without an engine claim; `rejected` marks hazardous or malformed packages; `unsupported` marks the encryption and legacy simulations. Those last entries are not valid encrypted or Office binary files. Feature structures inside the synthetic packages do not certify application interoperability.
 
-This is a seed for U8's continuing work, not the planned 150–300 public or sanitized real-engine/device cases. Later engine outputs and human-reviewed references should be added as distinct evidence records without replacing these inputs. Each record should identify the source fixture digest, renderer and version, executable digest where available, operating-system/build, exact command and relevant settings, output digest, and review/reference identifier. A person must review any image or physical-output reference and record what it verifies. Keep licenses and redistribution provenance with imported material; exclude anything that cannot be shared safely. Synthetic fixtures, renderer outputs, human-reviewed references, and physical printer evidence must remain distinguishable in manifests and reports.
+The manifest count is a synthetic-input inventory only. Parameter changes do not count as compatibility evidence. The approved planning target is 150–300 public or sanitized real engine/device cases; the current corpus is 16 synthetic fixtures and remains below that target. The report does not represent real world compatibility coverage.
+
+## Provenance and evidence gaps
+
+Every fixture was authored in `tools/generate_document_corpus.py`. No customer or third-party documents, licensed fonts, vendor binaries, external renderer output, credentials or network resources are included. The manifest marks all entries `synthetic` and `simulation_only`; it currently records engine-generated, human-reviewed, Office/WPS, OEM-driver and physical-output evidence as absent. These fixtures do not close G1 or another compatibility gate. Add future engine outputs and human-reviewed references as separate evidence records, including source digest, engine/version and executable digest where available, operating system/build, exact command/settings, output digest and review/reference identifier.
+
+ZIP hostile inputs must remain inert. Do not extract untrusted entries into shared paths or follow external relationships when testing them. These fixtures are bounded test data and are not a security certification or a substitute for a sandboxed archive parser.
