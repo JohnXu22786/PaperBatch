@@ -30,6 +30,12 @@ internal interface IQueuePresentationSource
     IReadOnlyList<QueueItemSnapshot> GetQueueItems();
 }
 
+internal interface IQueueEditingPresentationSource : IQueuePresentationSource
+{
+    void Move(string queueItemId, int delta);
+    void Remove(string queueItemId);
+}
+
 internal interface IQueueImportPresentationSource : IQueuePresentationSource
 {
     bool IsAvailable { get; }

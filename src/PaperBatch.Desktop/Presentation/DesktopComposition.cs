@@ -67,6 +67,7 @@ internal static class DesktopComposition
 
 internal sealed class ProductionPresentationSources :
     IQueueImportPresentationSource,
+    IQueueEditingPresentationSource,
     IEffectiveSettingsPresentationSource,
     IFinalPreviewPresentationSource,
     IPreparedArtifactPresentationSource,
@@ -100,6 +101,18 @@ internal sealed class ProductionPresentationSources :
     public bool IsAvailable => _intake is not null;
 
     public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => _queue.ToArray();
+
+    public void Move(string queueItemId, int delta)
+    {
+        var index = _queue.FindIndex(item => string.Equals(item.Id, queueItemId, StringComparison.Ordinal));
+        var target = index + delta;
+        if (index < 0 || target < 0 || target >= _queue.Count) return;
+        var item = _queue[index];
+        _queue.RemoveAt(index);
+        _queue.Insert(target, item);
+    }
+
+    public void Remove(string queueItemId) => _queue.RemoveAll(item => string.Equals(item.Id, queueItemId, StringComparison.Ordinal));
 
     public async Task<IReadOnlyList<QueueItemSnapshot>> ImportAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default)
     {

@@ -11,6 +11,8 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     private readonly IEffectiveSettingsPresentationSource _settingsSource;
     private readonly IFinalPreviewPresentationSource _previewSource;
     private readonly IPreflightPresentationSource _preflightSource;
+    private readonly IHistoryPresentationSource _historySource;
+    private readonly ITemplatePresentationSource _templateSource;
     private QueueItemSnapshot? _selectedQueueItem;
     private PreviewSnapshot? _currentPreview;
     private IReadOnlyList<EffectiveSettingSnapshot> _effectiveSettings = [];
@@ -22,6 +24,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     private CancellationTokenSource? _previewRefreshCancellation;
     private Task _previewRefreshTask = Task.CompletedTask;
     private long _previewRequestNumber;
+    private string _language = "en";
 
     public DesktopShellViewModel(
         IQueuePresentationSource queueSource,
@@ -45,11 +48,15 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         if (_previewSource is IPreparedArtifactPresentationSource preparedArtifacts)
             preparedArtifacts.PreparedArtifactChanged += OnPreparedArtifactChanged;
         _preflightSource = preflightSource;
+        _historySource = historySource;
+        _templateSource = templateSource;
         QueueItems = new ObservableCollection<QueueItemSnapshot>(queueSource.GetQueueItems());
         HistoryEntries = historySource.GetHistoryEntries();
         Templates = templateSource.GetTemplates();
         _workspaceStatus = workspaceStatus ?? new WorkspaceStatusSnapshot("Demo mode", "Synthetic sample data only.", true);
         NavigateCommand = new RelayCommand(Navigate, CanNavigate);
+        MoveQueueItemCommand = new RelayCommand(MoveQueueItem, CanMoveQueueItem);
+        RemoveQueueItemCommand = new RelayCommand(_ => RemoveSelectedQueueItem(), _ => SelectedQueueItem is not null);
 
         if (QueueItems.Count > 0)
         {
@@ -61,11 +68,71 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     public ObservableCollection<QueueItemSnapshot> QueueItems { get; }
 
-    public IReadOnlyList<HistoryEntrySnapshot> HistoryEntries { get; }
+    public IReadOnlyList<HistoryEntrySnapshot> HistoryEntries { get; private set; }
 
-    public IReadOnlyList<TemplateSnapshot> Templates { get; }
+    public IReadOnlyList<TemplateSnapshot> Templates { get; private set; }
 
     public ICommand NavigateCommand { get; }
+
+    public ICommand MoveQueueItemCommand { get; }
+
+    public ICommand RemoveQueueItemCommand { get; }
+
+    public int LanguageIndex
+    {
+        get => _language == "zh-CN" ? 1 : 0;
+        set => SetLanguage(value == 1 ? "zh-CN" : "en");
+    }
+
+    public void SetLanguage(string? language)
+    {
+        var next = string.Equals(language, "zh-CN", StringComparison.OrdinalIgnoreCase) ? "zh-CN" : "en";
+        if (!SetProperty(ref _language, next, nameof(LanguageIndex))) return;
+        OnPropertyChanged(nameof(LanguageIndex));
+        if (IsDemoMode)
+        {
+            HistoryEntries = _historySource.GetHistoryEntries().Select(entry => entry with
+            {
+                Title = Localize(entry.Title, entry.Title switch
+                {
+                    "Sample run A" => "示例运行 A",
+                    "Sample run B" => "示例运行 B",
+                    _ => entry.Title
+                }),
+                Summary = Localize(entry.Summary, entry.Summary switch
+                {
+                    "Example history row · no pages submitted" => "示例历史记录 · 未提交页面",
+                    "Example history row · no output created" => "示例历史记录 · 未生成输出",
+                    _ => entry.Summary
+                }),
+                Status = Localize(entry.Status, entry.Status == "Example only" ? "仅供示例" : entry.Status)
+            }).ToArray();
+            Templates = _templateSource.GetTemplates().Select(template => template with
+            {
+                Name = Localize(template.Name, template.Name switch
+                {
+                    "Sample classroom packet" => "示例课堂资料包",
+                    "Sample office handout" => "示例办公讲义",
+                    _ => template.Name
+                }),
+                Summary = Localize(template.Summary, template.Summary == "Example recipe · not saved" ? "示例配方 · 未保存" : template.Summary),
+                SettingsSummary = Localize(template.SettingsSummary, template.SettingsSummary switch
+                {
+                    "A4 · one-sided · sample values" => "A4 · 单面 · 示例值",
+                    "Letter · two-sided · sample values" => "Letter · 双面 · 示例值",
+                    _ => template.SettingsSummary
+                })
+            }).ToArray();
+        }
+        foreach (var property in new[] { nameof(SectionQueueLabel), nameof(SectionHistoryLabel), nameof(SectionTemplatesLabel),
+                     nameof(ActiveSectionTitle), nameof(HistoryEyebrow), nameof(HistoryTitle), nameof(HistoryDescription), nameof(HistoryEntries), nameof(TemplateEyebrow), nameof(TemplateTitle), nameof(TemplateDescription), nameof(Templates) })
+            OnPropertyChanged(property);
+    }
+
+    public string SectionQueueLabel => Localize("Queue and review", "队列与审核");
+    public string SectionHistoryLabel => Localize("History", "历史记录");
+    public string SectionTemplatesLabel => Localize("Templates", "模板");
+
 
     public async Task ImportFilesAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default)
     {
@@ -126,21 +193,21 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         preparedArtifacts.InvalidatePreparedRun(queueItemId);
     }
 
-    public string HistoryEyebrow => _workspaceStatus.IsDemo ? "HISTORY · SAMPLE VIEW" : "HISTORY";
+    public string HistoryEyebrow => _workspaceStatus.IsDemo ? Localize("HISTORY · SAMPLE VIEW", "历史记录 · 示例") : Localize("HISTORY", "历史记录");
 
-    public string HistoryTitle => _workspaceStatus.IsDemo ? "Example activity" : "Print history unavailable";
+    public string HistoryTitle => _workspaceStatus.IsDemo ? Localize("Example activity", "示例活动") : Localize("Print history unavailable", "打印历史记录不可用");
 
     public string HistoryDescription => _workspaceStatus.IsDemo
-        ? "These rows are illustrative. This shell does not save completed runs or print records."
-        : "No persisted runs are available in the current core read API.";
+        ? Localize("These rows are illustrative. This shell does not save completed runs or print records.", "这些示例行仅供说明。此界面不会保存已完成的运行或打印记录。")
+        : Localize("No persisted runs are available in the current core read API.", "当前核心读取接口无法提供已保存的运行记录。");
 
-    public string TemplateEyebrow => _workspaceStatus.IsDemo ? "TEMPLATES · SAMPLE VIEW" : "TEMPLATES";
+    public string TemplateEyebrow => _workspaceStatus.IsDemo ? Localize("TEMPLATES · SAMPLE VIEW", "模板 · 示例") : Localize("TEMPLATES", "模板");
 
-    public string TemplateTitle => _workspaceStatus.IsDemo ? "Example recipes" : "Saved recipes unavailable";
+    public string TemplateTitle => _workspaceStatus.IsDemo ? Localize("Example recipes", "示例配方") : Localize("Saved recipes unavailable", "已保存的配方不可用");
 
     public string TemplateDescription => _workspaceStatus.IsDemo
-        ? "These sample cards are not saved recipes and do not change application settings."
-        : "Recipe persistence and application are unavailable in the current core API.";
+        ? Localize("These sample cards are not saved recipes and do not change application settings.", "这些示例卡片不是已保存配方，也不会更改应用设置。")
+        : Localize("Recipe persistence and application are unavailable in the current core API.", "当前核心接口不支持配方持久化和应用。");
 
     public string QueueDescription => _workspaceStatus.IsDemo
         ? "Selecting a row updates only the sample preview and sample settings."
@@ -172,6 +239,8 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
             }
 
             RefreshSelectedItem();
+            (MoveQueueItemCommand as RelayCommand)?.NotifyCanExecuteChanged();
+            (RemoveQueueItemCommand as RelayCommand)?.NotifyCanExecuteChanged();
         }
     }
 
@@ -228,9 +297,9 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     public string ActiveSectionTitle => ActiveSection switch
     {
-        ShellSection.Queue => "Queue and review",
-        ShellSection.History => "History",
-        ShellSection.Templates => "Templates",
+        ShellSection.Queue => SectionQueueLabel,
+        ShellSection.History => SectionHistoryLabel,
+        ShellSection.Templates => SectionTemplatesLabel,
         _ => "PaperBatch"
     };
 
@@ -241,6 +310,39 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         var sources = new DemoPresentationSources();
         return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("DEMO MODE", "Synthetic sample data only. No files, renderers, printers, or jobs are used.", true));
+    }
+
+    private string Localize(string english, string chinese) => _language == "zh-CN" ? chinese : english;
+
+    private bool CanMoveQueueItem(object? parameter) => SelectedQueueItem is not null &&
+        int.TryParse(parameter?.ToString(), out var delta) &&
+        QueueItems.IndexOf(SelectedQueueItem) + delta >= 0 && QueueItems.IndexOf(SelectedQueueItem) + delta < QueueItems.Count;
+
+    private void MoveQueueItem(object? parameter)
+    {
+        if (!CanMoveQueueItem(parameter) || !int.TryParse(parameter?.ToString(), out var delta)) return;
+        var index = QueueItems.IndexOf(SelectedQueueItem!);
+        var selected = SelectedQueueItem!;
+        QueueItems.Move(index, index + delta);
+        (MoveQueueItemCommand as RelayCommand)?.NotifyCanExecuteChanged();
+        if (_queueSource is IQueueEditingPresentationSource editable) editable.Move(selected.Id, delta);
+        if (_previewSource is IPreparedArtifactPresentationSource preparedArtifacts)
+            foreach (var item in QueueItems) preparedArtifacts.InvalidatePreparedRun(item.Id);
+        OnPropertyChanged(nameof(QueueStateLabel));
+    }
+
+    public void MoveSelectedQueueItem(int delta) => MoveQueueItemCommand.Execute(delta);
+
+    public void RemoveSelectedQueueItem()
+    {
+        if (SelectedQueueItem is not { } selected) return;
+        var index = QueueItems.IndexOf(selected);
+        if (_previewSource is IPreparedArtifactPresentationSource preparedArtifacts)
+            preparedArtifacts.InvalidatePreparedRun(selected.Id);
+        if (_queueSource is IQueueEditingPresentationSource editable) editable.Remove(selected.Id);
+        QueueItems.Remove(selected);
+        SelectedQueueItem = QueueItems.Count == 0 ? null : QueueItems[Math.Min(index, QueueItems.Count - 1)];
+        OnPropertyChanged(nameof(QueueStateLabel));
     }
 
     private static bool CanNavigate(object? parameter) => TryGetSection(parameter, out _);
@@ -334,11 +436,9 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     private sealed class RelayCommand(Action<object?> execute, Predicate<object?> canExecute) : ICommand
     {
-        public event EventHandler? CanExecuteChanged
-        {
-            add { }
-            remove { }
-        }
+        public event EventHandler? CanExecuteChanged;
+
+        public void NotifyCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
 
         public bool CanExecute(object? parameter) => canExecute(parameter);
 

@@ -45,19 +45,19 @@
 
           <Grid ColumnDefinitions="4,*" Margin="0,0,0,4">
             <Border Grid.Column="0" Background="#7DD3FC" CornerRadius="2" IsVisible="{Binding IsQueueSection}" />
-            <Button x:Name="QueueNavigation" Grid.Column="1" Classes="navigation" Content="Queue and review"
+            <Button x:Name="QueueNavigation" Grid.Column="1" Classes="navigation" Content="{Binding SectionQueueLabel}"
                     Command="{Binding NavigateCommand}" CommandParameter="Queue"
                     AutomationProperties.Name="Open queue and review" />
           </Grid>
           <Grid ColumnDefinitions="4,*" Margin="0,0,0,4">
             <Border Grid.Column="0" Background="#7DD3FC" CornerRadius="2" IsVisible="{Binding IsHistorySection}" />
-            <Button x:Name="HistoryNavigation" Grid.Column="1" Classes="navigation" Content="History"
+            <Button x:Name="HistoryNavigation" Grid.Column="1" Classes="navigation" Content="{Binding SectionHistoryLabel}"
                     Command="{Binding NavigateCommand}" CommandParameter="History"
                     AutomationProperties.Name="Open history" />
           </Grid>
           <Grid ColumnDefinitions="4,*">
             <Border Grid.Column="0" Background="#7DD3FC" CornerRadius="2" IsVisible="{Binding IsTemplatesSection}" />
-            <Button x:Name="TemplatesNavigation" Grid.Column="1" Classes="navigation" Content="Templates"
+            <Button x:Name="TemplatesNavigation" Grid.Column="1" Classes="navigation" Content="{Binding SectionTemplatesLabel}"
                     Command="{Binding NavigateCommand}" CommandParameter="Templates"
                     AutomationProperties.Name="Open templates" />
           </Grid>
@@ -80,9 +80,11 @@
           <TextBlock Text="A local-first workspace preview for preparing ordered document batches."
                      FontSize="13" Foreground="#526176" />
         </StackPanel>
-        <Border Grid.Column="1" Background="#E8EDF4" CornerRadius="18" Padding="13,8" VerticalAlignment="Center">
-          <TextBlock Text="DESKTOP SHELL PREVIEW" FontSize="10" FontWeight="SemiBold" Foreground="#334155" />
-        </Border>
+        <ComboBox Grid.Column="1" SelectedIndex="{Binding LanguageIndex}" Width="150" VerticalAlignment="Center"
+                  AutomationProperties.Name="Interface language">
+          <ComboBoxItem Content="English" Tag="en" />
+          <ComboBoxItem Content="简体中文" Tag="zh-CN" />
+        </ComboBox>
       </Grid>
 
       <Border x:Name="SampleDataBanner" Grid.Row="1" Background="#FFF5D6" BorderBrush="#E9C46A" BorderThickness="1"
@@ -113,8 +115,16 @@
                       <TextBlock Text="{Binding QueueStateLabel}" FontSize="9" FontWeight="SemiBold" Foreground="#475569" />
                     </Border>
                   </Grid>
-                  <Button Content="Add documents…" Click="AddDocumentsClick" HorizontalAlignment="Left" IsEnabled="{Binding CanImportFiles}"
-                          AutomationProperties.Name="Add documents to the queue" />
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button Content="Add documents…" Click="AddDocumentsClick" IsEnabled="{Binding CanImportFiles}"
+                            AutomationProperties.Name="Add documents to the queue" />
+                    <Button Content="Move up" Command="{Binding MoveQueueItemCommand}" CommandParameter="-1"
+                            AutomationProperties.Name="Move selected document up" />
+                    <Button Content="Move down" Command="{Binding MoveQueueItemCommand}" CommandParameter="1"
+                            AutomationProperties.Name="Move selected document down" />
+                    <Button Content="Remove" Command="{Binding RemoveQueueItemCommand}"
+                            AutomationProperties.Name="Remove selected document" />
+                  </StackPanel>
                   <ListBox ItemsSource="{Binding QueueItems}" SelectedItem="{Binding SelectedQueueItem, Mode=TwoWay}"
                            Background="Transparent" BorderThickness="0" Padding="0"
                            AutomationProperties.Name="Document queue">
