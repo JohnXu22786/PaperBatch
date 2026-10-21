@@ -280,6 +280,7 @@ static void ResourceStressProfileSelfCheck()
     cancelled.Cancel();
     var cancelledReport = ResourceStressProfile.Run(10, 100, TimeSpan.FromSeconds(30), cancelled.Token);
     Assert.Equal("cancelled", cancelledReport.Status);
+    Assert.Equal("The stress profile was cancelled by the caller.", cancelledReport.Failure);
     Assert.True(cancelledReport.TemporaryFixturesRemoved);
 }
 

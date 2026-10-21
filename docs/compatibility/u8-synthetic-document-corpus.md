@@ -25,7 +25,7 @@ Run it manually with:
 dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -- --resource-stress --report resource-stress-report.json
 ```
 
-`--files` and `--pages` select workload size; `--max-files` and `--max-pages` set stricter per-run caps (the hard maxima are 1,000 files and 10,000 pages). The page count must divide evenly across files. `--budget-seconds` accepts 1–900 seconds (default 300). A budget expiry or fixture/enumeration failure returns a nonzero exit and a JSON status when report serialization is reached. Ordinary CI runs a small deterministic self-check only; it does not run the full stress profile or enforce machine-specific performance thresholds. This profile is a local synthetic model-construction measurement, not a final reference-machine baseline or compatibility evidence.
+`--files` and `--pages` select workload size; `--max-files` and `--max-pages` set stricter per-run caps (the hard maxima are 1,000 files and 10,000 pages). The page count must divide evenly across files. `--budget-seconds` accepts 1–900 seconds (default 300). A budget expiry or Ctrl+C returns a nonzero exit and a JSON `cancelled` status after temporary fixtures are removed; fixture or enumeration failures also return nonzero with a failure status. Ordinary CI runs a small deterministic self-check only; it does not run the full stress profile or enforce machine-specific performance thresholds. This profile is a local synthetic model-construction measurement, not a final reference-machine baseline or compatibility evidence.
 
 ## Provenance and evidence gaps
 

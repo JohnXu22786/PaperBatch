@@ -40,11 +40,26 @@ internal static class ResourceStressProfile
             budgetSeconds is < 1 or > MaximumBudgetSeconds || pages % files != 0)
             return Usage();
 
-        var result = Run(files, pages, TimeSpan.FromSeconds(budgetSeconds)) with
+        using var cancellation = new CancellationTokenSource();
+        ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
         {
-            ReportLocation = reportPath ?? "stdout",
-            Limits = new { maximumFiles, maximumLogicalPages = maximumPages, maximumBudgetSeconds = MaximumBudgetSeconds, configuredBudgetMilliseconds = budgetSeconds * 1_000L }
+            eventArgs.Cancel = true;
+            cancellation.Cancel();
         };
+        Console.CancelKeyPress += cancelHandler;
+        ResourceStressReport result;
+        try
+        {
+            result = Run(files, pages, TimeSpan.FromSeconds(budgetSeconds), cancellation.Token) with
+            {
+                ReportLocation = reportPath ?? "stdout",
+                Limits = new { maximumFiles, maximumLogicalPages = maximumPages, maximumBudgetSeconds = MaximumBudgetSeconds, configuredBudgetMilliseconds = budgetSeconds * 1_000L }
+            };
+        }
+        finally
+        {
+            Console.CancelKeyPress -= cancelHandler;
+        }
         var json = JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true });
         if (reportPath is null) Console.WriteLine(json);
         else
@@ -134,7 +149,9 @@ internal static class ResourceStressProfile
         catch (OperationCanceledException)
         {
             status = "cancelled";
-            failure = "The configured time budget expired before the workload completed.";
+            failure = cancellationToken.IsCancellationRequested
+                ? "The stress profile was cancelled by the caller."
+                : "The configured time budget expired before the workload completed.";
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException)
         {
