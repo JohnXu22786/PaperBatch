@@ -8,8 +8,11 @@ import hashlib
 import json
 import os
 import platform
+import platform
 import re
 import shutil
+import signal
+import threading
 import stat
 import struct
 import subprocess
@@ -629,14 +632,129 @@ def open_pinned_engine(executable: Path, expected_sha256: str):
         raise
 
 
+def deny_child_network() -> None:
+    """Install a Linux x86_64 seccomp filter denying socket and io_uring syscalls."""
+    if not sys.platform.startswith("linux") or platform.machine().lower() not in {"x86_64", "amd64"}:
+        raise OSError("The no-network LibreOffice sandbox requires Linux x86_64 seccomp.")
+
+    import ctypes
+    import errno
+
+    class SockFilter(ctypes.Structure):
+        _fields_ = [("code", ctypes.c_ushort), ("jt", ctypes.c_ubyte), ("jf", ctypes.c_ubyte), ("k", ctypes.c_uint)]
+
+    class SockFprog(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_ushort), ("filter", ctypes.POINTER(SockFilter))]
+
+    instructions = [
+        SockFilter(0x20, 0, 0, 4),
+        SockFilter(0x15, 1, 0, 0xC000003E),
+        SockFilter(0x06, 0, 0, 0x80000000),
+        SockFilter(0x20, 0, 0, 0),
+        SockFilter(0x45, 0, 1, 0x40000000),
+        SockFilter(0x06, 0, 0, 0x00050000 | errno.EPERM),
+    ]
+    blocked_syscalls = (41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 288, 425, 426, 427)
+    for syscall_number in blocked_syscalls:
+        instructions.append(SockFilter(0x15, 0, 1, syscall_number))
+        instructions.append(SockFilter(0x06, 0, 0, 0x00050000 | errno.EPERM))
+    instructions.append(SockFilter(0x06, 0, 0, 0x7FFF0000))
+    program = (SockFilter * len(instructions))(*instructions)
+    filter_program = SockFprog(len(instructions), program)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong]
+    libc.prctl.restype = ctypes.c_int
+    if libc.prctl(38, 1, None, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    if libc.prctl(22, 2, ctypes.byref(filter_program), 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def run_bounded_process(
+    command: list[str],
+    *,
+    timeout_seconds: float,
+    max_log_chars: int,
+    **popen_kwargs: Any,
+) -> subprocess.CompletedProcess:
+    """Drain child pipes continuously while retaining only bounded log prefixes."""
+    captured: dict[str, str] = {"stdout": "", "stderr": ""}
+    truncated = {"stdout": False, "stderr": False}
+    streams: dict[str, Any] = {}
+    popen_kwargs = dict(popen_kwargs)
+    popen_kwargs.update({
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    })
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+    process = subprocess.Popen(command, **popen_kwargs)
+    streams["stdout"] = process.stdout
+    streams["stderr"] = process.stderr
+
+    def drain(name: str) -> None:
+        pieces: list[str] = []
+        kept = 0
+        stream = streams[name]
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                break
+            remaining = max_log_chars - kept
+            if remaining > 0:
+                retained = chunk[:remaining]
+                pieces.append(retained)
+                kept += len(retained)
+            if len(chunk) > max(remaining, 0):
+                truncated[name] = True
+        captured[name] = "".join(pieces)
+
+    readers = [threading.Thread(target=drain, args=(name,), daemon=True) for name in streams]
+    for reader in readers:
+        reader.start()
+    timed_out = False
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            process.kill()
+        process.wait()
+    for reader in readers:
+        reader.join()
+    for stream in streams.values():
+        stream.close()
+    for name in captured:
+        if truncated[name]:
+            marker = " [truncated]"
+            captured[name] = captured[name][:max(0, max_log_chars - len(marker))] + marker[:max_log_chars]
+    if timed_out:
+        raise subprocess.TimeoutExpired(command, timeout_seconds, output=captured["stdout"], stderr=captured["stderr"])
+    return subprocess.CompletedProcess(command, process.returncode, captured["stdout"], captured["stderr"])
+
+
 def invoke(
     executable: Path,
     args: list[str],
     profile: Path,
-    timeout_seconds: int,
+    timeout_seconds: float,
     *,
     expected_engine_sha256: str | None = None,
     pinned_engine: PinnedEngine | None = None,
+    max_output_file_bytes: int | None = None,
+    max_log_chars: int | None = None,
+    disable_network: bool = False,
+    temporary_directory: Path | None = None,
 ) -> dict[str, Any]:
     profile.mkdir(parents=True, exist_ok=True)
     command = [
@@ -659,16 +777,42 @@ def invoke(
         execution_target = pinned_engine.launch_target
         command[0] = pinned_engine.launch_target
         pinned_engine.verify_runtime_directory()
-        result = subprocess.run(
-            command,
-            **pinned_engine.launch_kwargs,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-        )
+        launch_kwargs = dict(pinned_engine.launch_kwargs)
+        if temporary_directory is not None:
+            temporary_directory.mkdir(parents=True, exist_ok=True)
+            child_environment = dict(launch_kwargs.get("env", os.environ))
+            for variable in ("TMPDIR", "TMP", "TEMP"):
+                child_environment[variable] = str(temporary_directory.resolve())
+            launch_kwargs["env"] = child_environment
+        if disable_network and not sys.platform.startswith("linux"):
+            raise PinnedEngineError("The corpus conversion requires the Linux no-network sandbox.")
+        if (max_output_file_bytes is not None and sys.platform.startswith("linux")) or disable_network:
+            def prepare_child() -> None:
+                if max_output_file_bytes is not None:
+                    import resource
+                    resource.setrlimit(resource.RLIMIT_FSIZE, (max_output_file_bytes, max_output_file_bytes))
+                if disable_network:
+                    deny_child_network()
+
+            launch_kwargs["preexec_fn"] = prepare_child
+        if max_log_chars is None:
+            result = subprocess.run(
+                command,
+                **launch_kwargs,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+            )
+        else:
+            result = run_bounded_process(
+                command,
+                **launch_kwargs,
+                timeout_seconds=timeout_seconds,
+                max_log_chars=max_log_chars,
+            )
         return {
             "command": command,
             "exitCode": result.returncode,
@@ -723,6 +867,20 @@ def invoke(
             "executionTarget": execution_target,
         }
     except OSError as error:
+        return {
+            "command": command,
+            "exitCode": None,
+            "stdout": "",
+            "stderr": str(error),
+            "durationSeconds": round(time.monotonic() - started, 3),
+            "timedOut": False,
+            "identityVerified": False,
+            "identityFailure": str(error),
+            "runtimeDirectorySha256": pinned_engine.runtime_directory_sha256 if pinned_engine is not None else None,
+            "requestedExecutablePath": str(executable),
+            "executionTarget": execution_target,
+        }
+    except subprocess.SubprocessError as error:
         return {
             "command": command,
             "exitCode": None,
@@ -1053,7 +1211,11 @@ def find_last_pdf_keyword_position(data: bytes, keyword: bytes, limit: int) -> i
     return None
 
 
-def inspect_pdf(path: Path) -> tuple[int | None, bool, bool, bool, str | None]:
+def inspect_pdf(
+    path: Path,
+    *,
+    expected_text: str | None = EXPECTED_FIXTURE_TEXT,
+) -> tuple[int | None, bool, bool, bool, str | None]:
     try:
         with open_readonly_regular_file(path) as stream:
             file_status = os.fstat(stream.fileno())
@@ -1101,7 +1263,7 @@ def inspect_pdf(path: Path) -> tuple[int | None, bool, bool, bool, str | None]:
         data,
         xref_offset,
         startxref_position,
-        expected_text=EXPECTED_FIXTURE_TEXT,
+        expected_text=expected_text,
         expected_content_observation=expected_content,
     )
     return size, True, structure_valid, bool(expected_content and expected_content[0]), output_sha256

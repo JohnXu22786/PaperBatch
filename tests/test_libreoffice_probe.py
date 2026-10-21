@@ -1334,10 +1334,13 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
                     Path(directory) / "profile",
                     5,
                     expected_engine_sha256=expected_sha256,
+                    temporary_directory=Path(directory).parent / (Path(directory).name + "-isolated-temp"),
                 )
 
         child_environment = run_process.call_args.kwargs["env"]
-        self.assertEqual(0, result["exitCode"])
+        for variable in ("TMPDIR", "TMP", "TEMP"):
+            self.assertEqual(str((Path(directory).parent / (Path(directory).name + "-isolated-temp")).resolve()), child_environment[variable])
+        self.assertEqual(0, result["exitCode"], result)
         self.assertEqual([executable.parent.resolve()], observed_library_paths)
         self.assertFalse("LD_PRELOAD" in child_environment, "LD_PRELOAD must be removed from the child environment")
         self.assertFalse("LD_AUDIT" in child_environment, "LD_AUDIT must be removed from the child environment")
@@ -1961,6 +1964,20 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertEqual(report["export"]["status"], "blocked")
         self.assertFalse(report["export"]["outputStructureValid"])
+
+    def test_structural_pdf_inspection_does_not_require_smoke_fixture_text(self):
+        without_fixture_text = minimal_pdf(page_content=b"BT /F1 11 Tf (Corpus fixture text) Tj ET\n")
+        with tempfile.TemporaryDirectory(prefix="paperbatch-corpus-pdf-test-") as directory:
+            pdf_path = Path(directory) / "corpus.pdf"
+            pdf_path.write_bytes(without_fixture_text)
+
+            smoke_result = probe_libreoffice_export.inspect_pdf(pdf_path)
+            corpus_result = probe_libreoffice_export.inspect_pdf(pdf_path, expected_text=None)
+
+        self.assertTrue(smoke_result[2])
+        self.assertFalse(smoke_result[3])
+        self.assertTrue(corpus_result[2])
+        self.assertFalse(corpus_result[3])
 
     def test_startxref_text_inside_a_comment_cannot_verify_pdf_structure(self):
         with tempfile.TemporaryDirectory(prefix="paperbatch-commented-startxref-test-") as directory:

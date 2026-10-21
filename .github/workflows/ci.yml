@@ -185,6 +185,51 @@ jobs:
         id: managed-test-runner
         run: dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
 
+      - name: Convert bounded synthetic OOXML corpus with pinned LibreOffice
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          report="$RUNNER_TEMP/paperbatch-lo-corpus-report.json"
+          set +e
+          python3 tools/run_libreoffice_corpus.py \
+            --engine-binary "$PAPERBATCH_LO_ENGINE_PATH" \
+            --expected-engine-sha256 "$PAPERBATCH_LO_ENGINE_SHA256" \
+            --timeout-seconds 60 --budget-seconds 900 --output "$report"
+          corpus_exit=$?
+          python3 - "$report" "$GITHUB_STEP_SUMMARY" <<'PYCODE'
+          import json
+          import sys
+          from pathlib import Path
+          report = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+          with Path(sys.argv[2]).open('a', encoding='utf-8') as summary:
+              summary.write('\n## Synthetic OOXML LibreOffice execution\n\n')
+              if report.get('status') == 'blocked':
+                  summary.write(f"Blocked: {report.get('reason', 'unknown reason')}\n")
+              else:
+                  engine = report['engine']
+                  counts = report['counts']
+                  summary.write(f"LibreOffice: `{engine['version']}`; binary SHA-256: `{engine['binarySha256']}`.\n\n")
+                  summary.write(f"Synthetic source specimens: {counts['syntheticSourceSpecimens']}; selected: {counts['selectedForLibreOffice']}; converted: {counts['successfulLibreOfficeConversions']}; failed: {counts['failedLibreOfficeConversions']}. Human fidelity, Office/WPS, OEM/device and physical output: 0. Compatibility evidence: 0.\n\n")
+                  summary.write('| Input ID | Manifest SHA-256 | Status | Exit | Timed out | PDF bytes | PDF SHA-256 | Page inspection |\n|---|---|---:|---:|---:|---:|---|---|\n')
+                  for item in report['results']:
+                      page = item['pageInspection']
+                      summary.write(f"| `{item['inputId']}` | `{item['manifestSha256']}` | {item['status']} | {item['exitCode']} | {item['timedOut']} | {item['outputPdfBytes']} | `{item['outputPdfSha256']}` | {page['status']}; valid={page['structureValid']}; pages={page['pageCount']} |\n")
+                  summary.write('\n### Skipped synthetic specimens\n\n')
+                  for item in report['skipped']:
+                      summary.write(f"- `{item['id']}` (`{item['sha256']}`): {item['reason']}\n")
+                  summary.write('\nLibreOffice execution is not fidelity review, Office/WPS compatibility, printer validation or paper proof. G1/G3/G4 and U8 native/device/clean-PC evidence remain open.\n')
+          PYCODE
+          exit "$corpus_exit"
+
+      - name: Upload synthetic OOXML LibreOffice report
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-ooxml-libreoffice-report
+          path: ${{ runner.temp }}/paperbatch-lo-corpus-report.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Verify PDFium vector composition on the pinned Windows runtime
         id: pdfiumverify
         if: runner.os == 'Windows'
