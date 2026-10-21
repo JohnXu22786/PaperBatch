@@ -64,8 +64,9 @@ internal interface IPreparedArtifactPresentationSource
 internal interface IQueuePreparationPresentationSource
 {
     bool CanPrepare { get; }
+    IReadOnlyList<string> MatchedRuleIds { get; }
     Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings, LayoutOptions layoutOptions,
-        CancellationToken cancellationToken = default);
+        PaperBatch.Core.Recipes.JobRecipe? recipe = null, CancellationToken cancellationToken = default);
 }
 
 internal interface IPreflightPresentationSource

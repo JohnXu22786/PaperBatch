@@ -43,26 +43,25 @@ public sealed record RecipeSettingRule(string RuleId, string FileNameGlob, strin
 public sealed record ResolvedRecipeSettings(RecipePrintSettings Values, int? NUp, string? PageRange,
     IReadOnlyDictionary<string, string> Provenance, string? MatchingRuleId);
 
-/// <summary>Resolves app defaults, recipe defaults, the first matching rule, then a source override.</summary>
+/// <summary>Resolves batch/recipe defaults, the first matching rule, then a source override.</summary>
 public static class RecipeSettingsResolver
 {
     public static ResolvedRecipeSettings Resolve(JobRecipe recipe, RecipeSource source, string sourceType,
-        RecipePrintSettings appDefaults)
+        RecipePrintSettings batchDefaults)
     {
         ArgumentNullException.ThrowIfNull(recipe);
         ArgumentNullException.ThrowIfNull(source);
-        ArgumentNullException.ThrowIfNull(appDefaults);
+        ArgumentNullException.ThrowIfNull(batchDefaults);
         if (sourceType is not ("pdf" or "jpeg" or "png")) throw new ArgumentOutOfRangeException(nameof(sourceType));
         var selectedRule = (recipe.Rules.IsDefault ? [] : recipe.Rules)
             .FirstOrDefault(rule => (rule.SourceType is null || rule.SourceType == sourceType) &&
                 IsMatch(Path.GetFileName(source.Location), rule.FileNameGlob));
         var provenance = new Dictionary<string, string>(StringComparer.Ordinal);
         var values = new RecipePrintSettings(
-            appDefaults.Copies, appDefaults.ColorMode, appDefaults.DuplexMode, appDefaults.Orientation,
-            appDefaults.ScalingMode, appDefaults.Media, appDefaults.PrinterId, appDefaults.TrayId);
-        values = recipe.Settings;
+            batchDefaults.Copies, batchDefaults.ColorMode, batchDefaults.DuplexMode, batchDefaults.Orientation,
+            batchDefaults.ScalingMode, batchDefaults.Media, batchDefaults.PrinterId, batchDefaults.TrayId);
         foreach (var field in new[] { "copies", "colorMode", "duplexMode", "orientation", "scalingMode", "media", "printerId", "trayId" })
-            provenance[field] = "recipe";
+            provenance[field] = "batch/recipe defaults";
         var nUp = (int?)null;
         var range = (string?)null;
         if (selectedRule is not null)
@@ -244,6 +243,8 @@ public static class JobRecipeJson
             {
                 throw new JsonException("Source locations cannot contain NUL characters.");
             }
+            if (recipe.SchemaVersion == 1 && source.Override is not null)
+                throw new JsonException("Recipe schema version 1 cannot contain per-source setting overrides.");
 
             if (!sourceIds.Add(source.SourceId))
             {

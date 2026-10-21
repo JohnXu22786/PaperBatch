@@ -77,11 +77,27 @@ internal static class PreparedArtifactCoordinatorTests
             Assert.True(copied.Succeeded, string.Join("; ", copied.Diagnostics));
             Assert.Equal(2, copied.Run!.FinalArtifact!.PageCount);
 
+            var perDocument = pipeline.PrepareAsync(
+                [new SourceInput(firstPath), new SourceInput(secondPath)], settings,
+                new LayoutOptions(NUp: NUpMode.One), "per-document-layout-key",
+                new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true), FixedTime.AddMinutes(2),
+                [settings with { Copies = 2 }, settings with { Copies = 1 }],
+                [new LayoutDocumentSettings(Copies: 2), new LayoutDocumentSettings(Copies: 1)])
+                .GetAwaiter().GetResult();
+            Assert.True(perDocument.Succeeded, string.Join("; ", perDocument.Diagnostics));
+            Assert.Equal(4, perDocument.Run!.FinalArtifact!.PageCount);
+            Assert.Equal(2, perDocument.Run.Segments.Length);
+            Assert.Equal(2, perDocument.Run.Items[0].PrintSettings.Copies);
+            Assert.Equal(1, perDocument.Run.Items[1].PrintSettings.Copies);
+            Assert.True(perDocument.Run.FinalArtifact.Sha256 != reopenedRun.FinalArtifact!.Sha256);
+            Assert.True(perDocument.Run.Segments[0].ItemIds.SequenceEqual([perDocument.Run.Items[0].ItemId]));
+            Assert.True(perDocument.Run.Segments[1].ItemIds.SequenceEqual([perDocument.Run.Items[1].ItemId]));
+
             using var cancelledToken = new CancellationTokenSource();
             cancelledToken.Cancel();
             var cancelled = pipeline.PrepareAsync([new SourceInput(firstPath)], settings, new LayoutOptions(),
                 "cancelled-layout-key", new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true),
-                FixedTime.AddMinutes(2), cancelledToken.Token).GetAwaiter().GetResult();
+                FixedTime.AddMinutes(3), cancelledToken.Token).GetAwaiter().GetResult();
             Assert.True(cancelled.IsCancelled);
             Assert.True(cancelled.Run is null);
         }

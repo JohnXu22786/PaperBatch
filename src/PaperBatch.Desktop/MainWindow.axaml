@@ -195,7 +195,7 @@
                     <TextBlock Text="{Binding PreparationSettingsHeading}" Classes="eyebrow" />
                     <TextBlock Text="{Binding SettingsHeading}" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
                   </StackPanel>
-                  <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="5">
+                  <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="5">
                     <StackPanel Grid.Row="0" Grid.Column="0" Spacing="3">
                       <TextBlock Text="{Binding CopiesLabel}" FontSize="10" />
                       <NumericUpDown Minimum="1" Maximum="999" Value="{Binding RequestedCopies}" AutomationProperties.Name="{Binding CopiesLabel}" />
@@ -228,6 +228,8 @@
                             IsEnabled="{Binding CanPrepareQueue}" AutomationProperties.Name="{Binding PrepareLabel}" />
                     <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2" Text="{Binding PreparationSettingsNote}"
                                FontSize="10" Foreground="#64748B" TextWrapping="Wrap" />
+                    <TextBlock Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2" Text="{Binding PreparationResolutionNote}"
+                               FontSize="10" Foreground="#475569" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
                   </Grid>
                   <ItemsControl ItemsSource="{Binding EffectiveSettings}">
                     <ItemsControl.ItemTemplate>

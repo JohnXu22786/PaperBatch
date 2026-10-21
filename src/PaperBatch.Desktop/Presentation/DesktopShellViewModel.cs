@@ -36,6 +36,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     private int _duplexIndex;
     private string _pageRange = "";
     private ColorMode _requestedColorMode = ColorMode.Color;
+    private PaperBatch.Core.Recipes.JobRecipe? _activeRecipe;
 
     public DesktopShellViewModel(
         IQueuePresentationSource queueSource,
@@ -129,6 +130,18 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     public IReadOnlyList<string> DuplexOptions => IsChinese ? ["单面", "双面长边", "双面短边"] : ["Simplex", "Long edge", "Short edge"];
     public string PreparationSettingsNote => Localize("Values above are requested for this batch or explicitly loaded recipe. Recipe defaults apply only after you load that recipe. Printer and tray capabilities are not connected; media, color and duplex requests are not validated against a device. Nothing will be printed.",
         "以上是此批次或明确加载的配方请求值。仅在加载配方后应用其默认值。打印机和纸盒能力尚未连接；纸张、颜色和双面请求未经设备验证。不会提交打印。");
+    public string PreparationResolutionNote
+    {
+        get
+        {
+            var matches = _queueSource is IQueuePreparationPresentationSource source ? source.MatchedRuleIds : [];
+            if (_activeRecipe is null) return Localize("No recipe is loaded; batch controls supply these requested values.", "未加载配方；当前请求值来自批次控件。");
+            return matches.Count == 0
+                ? Localize("No matching rule is recorded yet; rules are resolved during preparation, then per-file overrides apply.", "尚无匹配规则记录；准备时解析规则，随后应用单文件覆盖值。")
+                : Localize("First matching rule: " + string.Join(", ", matches) + ". Per-file overrides take priority.",
+                    "首个匹配规则：" + string.Join("、", matches) + "。单文件覆盖值优先级最高。");
+        }
+    }
     public bool CanPrepareQueue => IsProductionMode && _queueSource is IQueuePreparationPresentationSource { CanPrepare: true };
 
     public async Task PrepareQueueAsync(CancellationToken cancellationToken = default)
@@ -146,10 +159,11 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         var options = new LayoutOptions(Copies: RequestedCopies, NUp: RequestedNUp switch { 2 => NUpMode.Two, 4 => NUpMode.Four, _ => NUpMode.One },
             Duplex: duplex != DuplexMode.Simplex, Fit: scaling == ScalingMode.ActualSize ? FitMode.ActualSize : FitMode.ShrinkToFit,
             SheetSize: size, Ranges: ranges);
-        var result = await source.PrepareQueueAsync(settings, options, cancellationToken).ConfigureAwait(true);
+        var result = await source.PrepareQueueAsync(settings, options, _activeRecipe, cancellationToken).ConfigureAwait(true);
         OperationError = result.Succeeded ? null : string.Join(" ", result.Diagnostics);
         if (result.Succeeded) await RefreshSelectedItemAsync().ConfigureAwait(true);
         OnPropertyChanged(nameof(PrepareLabel));
+        OnPropertyChanged(nameof(PreparationResolutionNote));
     }
 
     private static System.Collections.Immutable.ImmutableArray<PageRange> ParsePageRange(string value)
@@ -221,7 +235,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
             }).ToArray();
         }
         foreach (var property in new[] { nameof(SectionQueueLabel), nameof(SectionHistoryLabel), nameof(SectionTemplatesLabel),
-                     nameof(ActiveSectionTitle), nameof(HistoryEyebrow), nameof(HistoryTitle), nameof(HistoryDescription), nameof(HistoryEntries), nameof(TemplateEyebrow), nameof(TemplateTitle), nameof(TemplateDescription), nameof(Templates), nameof(CreateRecipeLabel), nameof(RenameRecipeLabel), nameof(DeleteRecipeLabel), nameof(ImportRecipeLabel), nameof(ExportRecipeLabel), nameof(LoadRecipeLabel), nameof(RefreshRecipesLabel), nameof(PreparationSettingsHeading), nameof(SettingsHeading), nameof(CopiesLabel), nameof(OrientationLabel), nameof(ScalingLabel), nameof(NUpLabel), nameof(MediaLabel), nameof(DuplexLabel), nameof(PageRangeLabel), nameof(OrientationOptions), nameof(ScalingOptions), nameof(DuplexOptions), nameof(PreparationSettingsNote), nameof(PrepareLabel) })
+                     nameof(ActiveSectionTitle), nameof(HistoryEyebrow), nameof(HistoryTitle), nameof(HistoryDescription), nameof(HistoryEntries), nameof(TemplateEyebrow), nameof(TemplateTitle), nameof(TemplateDescription), nameof(Templates), nameof(CreateRecipeLabel), nameof(RenameRecipeLabel), nameof(DeleteRecipeLabel), nameof(ImportRecipeLabel), nameof(ExportRecipeLabel), nameof(LoadRecipeLabel), nameof(RefreshRecipesLabel), nameof(PreparationSettingsHeading), nameof(SettingsHeading), nameof(CopiesLabel), nameof(OrientationLabel), nameof(ScalingLabel), nameof(NUpLabel), nameof(MediaLabel), nameof(DuplexLabel), nameof(PageRangeLabel), nameof(OrientationOptions), nameof(ScalingOptions), nameof(DuplexOptions), nameof(PreparationSettingsNote), nameof(PreparationResolutionNote), nameof(PrepareLabel) })
             OnPropertyChanged(property);
     }
 
@@ -319,6 +333,9 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         if (savedRecipe.Settings.Media is not ("Letter" or "A4"))
             throw new InvalidOperationException("This recipe requests a sheet size not supported by the desktop layout controls. Its sources were not loaded.");
         var paths = manager.GetRecipeSourceLocations(recipe.RecipeId);
+        _activeRecipe = new PaperBatch.Core.Recipes.JobRecipe(savedRecipe.SchemaVersion, savedRecipe.RecipeId,
+            savedRecipe.Name, savedRecipe.Sources, savedRecipe.Settings) { Rules = savedRecipe.Rules };
+        OnPropertyChanged(nameof(PreparationResolutionNote));
         var imported = await importer.ImportAsync(paths, cancellationToken).ConfigureAwait(true);
         RequestedCopies = savedRecipe.Settings.Copies;
         OrientationIndex = savedRecipe.Settings.Orientation switch { Orientation.Portrait => 1, Orientation.Landscape => 2, _ => 0 };

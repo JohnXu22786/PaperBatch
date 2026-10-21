@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using System.Text.Json;
+using System.Text;
 using PaperBatch.Desktop;
 using PaperBatch.Core.Intake;
 using PaperBatch.Core.Domain;
@@ -9,6 +10,7 @@ using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Rendering;
 using PaperBatch.Core.Preparation;
 using PaperBatch.Core.Recipes;
+using PaperBatch.Core.Layout;
 using PaperBatch.Desktop.Presentation;
 
 var tests = new (string Name, Action Run)[]
@@ -24,6 +26,7 @@ var tests = new (string Name, Action Run)[]
     ("production presentation exposes unavailable production capabilities without demo rows", ProductionPresentationIsExplicitlyUnavailable),
     ("production preview raster comes from the persisted prepared artifact", ProductionPreviewReadsPreparedArtifact),
     ("preparation controls forward requested layout settings and invalidate previews", PreparationControlsForwardRequestedSettingsAndInvalidate),
+    ("recipe device-profile conflicts do not persist or compose an artifact", RecipeDeviceConflictCreatesNoRunOrFinalArtifact),
     ("corrupt saved recipes leave production shell available with an error state", CorruptSavedRecipesRemainVisibleAsAnError),
     ("recipe lifecycle strictly imports, renames, exports without overwrite, and deletes", RecipeLifecycleIsExplicitAndBounded),
     ("corrupt saved history leaves production shell available with an error state", CorruptSavedHistoryRemainsVisibleAsAnError),
@@ -384,6 +387,74 @@ static void PreparationControlsForwardRequestedSettingsAndInvalidate()
     Assert.True(source.InvalidatedIds.Contains("a"));
 }
 
+static void RecipeDeviceConflictCreatesNoRunOrFinalArtifact()
+{
+    var root = Path.Combine(Path.GetTempPath(), "paperbatch-device-conflict-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var firstPath = Path.Combine(root, "first.pdf");
+        var secondPath = Path.Combine(root, "second.pdf");
+        File.WriteAllBytes(firstPath, TestOnePagePdf());
+        File.WriteAllBytes(secondPath, TestOnePagePdf());
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+        var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+        var renderer = new RendererCoordinator([new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts))]);
+        var intake = new SourceIntakeService(cache);
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
+        var composer = new ConflictTestComposer();
+        var coordinator = new PreparedArtifactCoordinator(intake, cache, renderer, new ConflictTestInspector(),
+            new ConflictTestInspector(), composer, artifacts, store);
+        var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
+            artifacts: artifacts, runStore: store, preparation: coordinator);
+        sources.ImportAsync([firstPath, secondPath]).GetAwaiter().GetResult();
+        var recipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "r", "conflict",
+            [new RecipeSource("first", firstPath), new RecipeSource("second", secondPath)],
+            new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter"))
+        {
+            Rules = [
+                new RecipeSettingRule("mono", "first.pdf", "pdf", new RecipeSettingsOverride(ColorMode: ColorMode.Monochrome)),
+                new RecipeSettingRule("color", "second.pdf", "pdf", new RecipeSettingsOverride(ColorMode: ColorMode.Color))
+            ]
+        };
+
+        var result = sources.PrepareQueueAsync(new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex,
+            "Letter", Orientation.Auto, ScalingMode.ShrinkToFit), new LayoutOptions(), recipe).GetAwaiter().GetResult();
+
+        Assert.True(!result.Succeeded);
+        Assert.True(result.Run is null && result.Persistence is null);
+        Assert.True(result.Diagnostics.Any(message => message.Contains("device requests resolve differently", StringComparison.Ordinal)));
+        Assert.Equal(0, composer.Calls);
+        Assert.Equal(0, store.GetRecentRuns().Length);
+    }
+    finally
+    {
+        try { Directory.Delete(root, recursive: true); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+}
+
+static byte[] TestOnePagePdf()
+{
+    var objects = new[] { "<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /ProcSet [/PDF] >> /Contents 4 0 R >>",
+        "<< /Length 0 >>\nstream\n\nendstream" };
+    var builder = new StringBuilder("%PDF-1.7\n");
+    var offsets = new List<int> { 0 };
+    for (var index = 0; index < objects.Length; index++)
+    {
+        offsets.Add(Encoding.ASCII.GetByteCount(builder.ToString()));
+        builder.Append(index + 1).Append(" 0 obj\n").Append(objects[index]).Append("\nendobj\n");
+    }
+    var xref = Encoding.ASCII.GetByteCount(builder.ToString());
+    builder.Append("xref\n0 5\n0000000000 65535 f \n");
+    foreach (var offset in offsets.Skip(1)) builder.Append(offset.ToString("D10", System.Globalization.CultureInfo.InvariantCulture)).Append(" 00000 n \n");
+    builder.Append("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n").Append(xref).Append("\n%%EOF\n");
+    return Encoding.ASCII.GetBytes(builder.ToString());
+}
+
 static void CorruptSavedRecipesRemainVisibleAsAnError()
 {
     var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-corrupt-recipe-" + Guid.NewGuid().ToString("N"));
@@ -590,21 +661,44 @@ sealed class FakePreparationSource(IReadOnlyList<QueueItemSnapshot> items) : IQu
 {
     public event Action<string>? PreparedArtifactChanged { add { } remove { } }
     public bool CanPrepare => true;
+    public IReadOnlyList<string> MatchedRuleIds => [];
     public PrintSettings? Settings { get; private set; }
     public PaperBatch.Core.Layout.LayoutOptions? Options { get; private set; }
+    public PaperBatch.Core.Recipes.JobRecipe? Recipe { get; private set; }
     public List<string> InvalidatedIds { get; } = [];
     public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => items;
     public Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings,
-        PaperBatch.Core.Layout.LayoutOptions layoutOptions, CancellationToken cancellationToken = default)
+        PaperBatch.Core.Layout.LayoutOptions layoutOptions, PaperBatch.Core.Recipes.JobRecipe? recipe = null,
+        CancellationToken cancellationToken = default)
     {
         Settings = requestedSettings;
         Options = layoutOptions;
+        Recipe = recipe;
         return Task.FromResult(new PreparedArtifactResult(null, null, ["test capture"], false));
     }
     public void RegisterPreparedRun(string queueItemId, PreparedRun run) { }
     public void InvalidatePreparedRun(string queueItemId) => InvalidatedIds.Add(queueItemId);
     public Task<PreviewSnapshot> GetPreviewAsync(string queueItemId, CancellationToken cancellationToken = default) =>
         Task.FromResult(new PreviewSnapshot(queueItemId, "Preview", 1, 1));
+}
+
+sealed class ConflictTestInspector : IPdfArtifactInspector, IPdfPageMetadataInspector, IStaticPdfContentInspector
+{
+    public Task<int> GetPageCountAsync(Stream pdf, CancellationToken cancellationToken) => Task.FromResult(1);
+    public Task<IReadOnlyList<PageSize>> GetPageSizesAsync(Stream pdf, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PageSize>>([new PageSize(100, 100)]);
+    public Task<bool> HasStaticPageContentAsync(Stream pdf, CancellationToken cancellationToken) => Task.FromResult(true);
+}
+
+sealed class ConflictTestComposer : IPageCompositionAdapter
+{
+    public int Calls { get; private set; }
+    public Task ComposePdfAsync(LayoutCompilation compilation, IEnumerable<PdfCompositionSource> sources,
+        Stream destination, CancellationToken cancellationToken = default)
+    {
+        Calls++;
+        throw new InvalidOperationException("Device conflict should stop before composition.");
+    }
 }
 
 sealed class FakePreviewSource : IFinalPreviewPresentationSource

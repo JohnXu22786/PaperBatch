@@ -100,6 +100,7 @@ internal sealed class ProductionPresentationSources :
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
     private readonly Dictionary<string, string> _queueLocations = new(StringComparer.Ordinal);
+    private IReadOnlyList<string> _matchedRuleIds = [];
     private readonly HashSet<string> _preparableQueueItems = new(StringComparer.Ordinal);
 
     public event Action<string>? PreparedArtifactChanged;
@@ -208,9 +209,10 @@ internal sealed class ProductionPresentationSources :
     private readonly Dictionary<string, List<PreflightFindingSnapshot>> _findings = new(StringComparer.Ordinal);
     public bool CanPrepare => _preparation is not null && _queue.Count > 0 &&
         _queue.All(item => _queueLocations.ContainsKey(item.Id) && _preparableQueueItems.Contains(item.Id));
+    public IReadOnlyList<string> MatchedRuleIds => _matchedRuleIds;
 
     public async Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings, LayoutOptions layoutOptions,
-        CancellationToken cancellationToken = default)
+        PaperBatch.Core.Recipes.JobRecipe? recipe = null, CancellationToken cancellationToken = default)
     {
         if (_preparation is null || _runStore is null || _queue.Count == 0)
             return new(null, null, ["A trusted PDFium runtime and a nonempty local queue are required before preparation."], false);
@@ -219,14 +221,78 @@ internal sealed class ProductionPresentationSources :
         var paths = _queue.Select(item => _queueLocations.TryGetValue(item.Id, out var path)
             ? new SourceInput(path, IntentionalCopy: !seenPaths.Add(Path.GetFullPath(path)))
             : throw new InvalidOperationException("A queue source location is no longer available.")).ToArray();
+        IReadOnlyList<PrintSettings>? perItemPrintSettings = null;
+        IReadOnlyList<LayoutDocumentSettings>? perItemLayoutSettings = null;
+        if (recipe is not null)
+        {
+            var resolved = new List<PaperBatch.Core.Recipes.ResolvedRecipeSettings>(paths.Length);
+            for (var index = 0; index < paths.Length; index++)
+            {
+                var path = paths[index].Path;
+                var type = Path.GetExtension(path).ToLowerInvariant() switch
+                {
+                    ".pdf" => "pdf", ".jpg" or ".jpeg" => "jpeg", ".png" => "png",
+                    _ => null
+                };
+                if (type is null)
+                    return new(null, null, [$"{Path.GetFileName(path)}: recipe rules support only PDF, JPEG, and PNG sources."], false);
+                var recipeSource = recipe.Sources.FirstOrDefault(source =>
+                    string.Equals(Path.GetFullPath(source.Location), Path.GetFullPath(path),
+                        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    ?? new PaperBatch.Core.Recipes.RecipeSource("queue-" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), path);
+                var batchDefaults = new PaperBatch.Core.Recipes.RecipePrintSettings(requestedSettings.Copies,
+                    requestedSettings.ColorMode, requestedSettings.DuplexMode, requestedSettings.Orientation,
+                    requestedSettings.ScalingMode, requestedSettings.Media, requestedSettings.PrinterId, requestedSettings.TrayId);
+                resolved.Add(PaperBatch.Core.Recipes.RecipeSettingsResolver.Resolve(recipe, recipeSource, type, batchDefaults));
+            }
+            _matchedRuleIds = resolved.Where(item => item.MatchingRuleId is not null)
+                .Select(item => item.MatchingRuleId!).Distinct(StringComparer.Ordinal).ToArray();
+            var first = resolved[0];
+            if (resolved.Skip(1).Any(item => item.Values.ColorMode != first.Values.ColorMode ||
+                item.Values.DuplexMode != first.Values.DuplexMode || item.Values.PrinterId != first.Values.PrinterId ||
+                item.Values.TrayId != first.Values.TrayId))
+            {
+                var sources = resolved.Select(item => item.MatchingRuleId is null ? "recipe defaults" : "rule " + item.MatchingRuleId)
+                    .Distinct(StringComparer.Ordinal).ToArray();
+                return new(null, null, [$"Per-file device requests resolve differently ({string.Join(", ", sources)}). The current prepared-run model requires one device profile per compatible segment and this shell cannot validate per-file device settings; no artifact was created."], false);
+            }
+            var sourceSettings = new List<PrintSettings>(resolved.Count);
+            var documentSettings = new List<LayoutDocumentSettings>(resolved.Count);
+            foreach (var item in resolved)
+            {
+                if (item.Values.Media is not ("Letter" or "A4"))
+                    return new(null, null, [$"{item.MatchingRuleId ?? "recipe defaults"}: requested media is not supported by the desktop layout controls; no artifact was created."], false);
+                var size = item.Values.Media == "A4" ? new PageSize(595.28, 841.89) : new PageSize(612, 792);
+                if (item.Values.Orientation == Orientation.Landscape) size = new PageSize(size.HeightPoints, size.WidthPoints);
+                sourceSettings.Add(new PrintSettings(item.Values.Copies, item.Values.ColorMode, item.Values.DuplexMode,
+                    item.Values.Media, item.Values.Orientation, item.Values.ScalingMode, item.Values.PrinterId, item.Values.TrayId));
+                documentSettings.Add(new LayoutDocumentSettings(item.Values.Copies,
+                    item.NUp switch { 2 => NUpMode.Two, 4 => NUpMode.Four, _ => null },
+                    item.Values.ScalingMode == ScalingMode.ActualSize ? FitMode.ActualSize : FitMode.ShrinkToFit,
+                    size, item.PageRange is null ? default : ParseRecipeRange(item.PageRange)));
+            }
+            perItemPrintSettings = sourceSettings;
+            perItemLayoutSettings = documentSettings;
+            requestedSettings = sourceSettings[0];
+        }
+        else _matchedRuleIds = [];
         var result = await _preparation.PrepareAsync(paths, requestedSettings, layoutOptions,
             "desktop-prepare-" + Guid.NewGuid().ToString("N"),
-            new RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true), now, cancellationToken).ConfigureAwait(false);
+            new RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true), now,
+            perItemPrintSettings, perItemLayoutSettings, cancellationToken).ConfigureAwait(false);
         if (result.Run is { } run)
         {
             foreach (var item in _queue) RegisterPreparedRun(item.Id, run);
         }
         return result;
+    }
+
+    private static System.Collections.Immutable.ImmutableArray<PageRange> ParseRecipeRange(string value)
+    {
+        var parts = value.Split('-');
+        var first = int.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture);
+        var last = parts.Length == 1 ? first : int.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture);
+        return [new PageRange(first, last)];
     }
 
     public IReadOnlyList<EffectiveSettingSnapshot> GetEffectiveSettings(string queueItemId) =>
