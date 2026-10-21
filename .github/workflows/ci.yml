@@ -250,6 +250,14 @@ jobs:
             (Get-Content -Path $testLog)
             '```'
           ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          Select-String -Path $testLog -Pattern '^FAIL ' | ForEach-Object {
+            $diagnostic = $_.Line
+            if ($env:GITHUB_WORKSPACE) { $diagnostic = $diagnostic.Replace($env:GITHUB_WORKSPACE, '[WORKSPACE]') }
+            if ($env:RUNNER_TEMP) { $diagnostic = $diagnostic.Replace($env:RUNNER_TEMP, '[RUNNER_TEMP]') }
+            if ($diagnostic.Length -gt 1000) { $diagnostic = $diagnostic.Substring(0, 1000) + ' [truncated]' }
+            $diagnostic = $diagnostic.Replace('%', '%25').Replace(':', '%3A').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Managed test failure::$diagnostic"
+          }
 
       - name: Remove temporary Linux renderer runtimes
         if: always() && runner.os == 'Linux'
