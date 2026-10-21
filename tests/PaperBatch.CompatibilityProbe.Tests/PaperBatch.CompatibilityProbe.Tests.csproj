@@ -10,4 +10,7 @@
     <ProjectReference Include="../../src/PaperBatch.Core/PaperBatch.Core.csproj" />
     <None Include="Fixtures/**/*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/PaperBatch.Cli/PaperBatch.Cli.csproj" />
+  </ItemGroup>
 </Project>
