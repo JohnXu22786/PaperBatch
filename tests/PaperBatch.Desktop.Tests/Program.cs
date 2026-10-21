@@ -1036,7 +1036,7 @@ sealed class PreparedArtifactTestTransport(PreparedArtifactCoordinator preparati
         var now = DateTimeOffset.UtcNow;
         var result = await preparation.PrepareAsync(inputs, settings, layout, request.IdempotencyKey!,
             new RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true), now,
-            perItemSettings, perItemLayout, cancellationToken);
+            perItemSettings, perItemLayout, cancellationToken).ConfigureAwait(false);
         if (!result.Succeeded)
             return IpcJson.CreateErrorResponse(request.CorrelationId, "unavailable", string.Join(" ", result.Diagnostics));
         var responsePayload = JsonSerializer.SerializeToElement(new
