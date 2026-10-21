@@ -188,24 +188,18 @@ static void PrinterInspectionIsReadOnly()
     var pending = new DesktopShellViewModel(delayedSource, new FakeSettingsSource(), new FakePreviewSource(),
         new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
         new WorkspaceStatusSnapshot("PRODUCTION MODE", "test", false));
-    using var refreshStart = new Barrier(3);
     var firstRead = Task.Run(async () =>
     {
-        refreshStart.SignalAndWait();
         await pending.RefreshPrinterCapabilitiesAsync();
     });
-    var concurrentRead = Task.Run(async () =>
-    {
-        refreshStart.SignalAndWait();
-        await pending.RefreshPrinterCapabilitiesAsync();
-    });
-    refreshStart.SignalAndWait();
     Assert.True(SpinWait.SpinUntil(() => delayedSource.ReadCalls == 1, TimeSpan.FromSeconds(5)));
     Assert.True(pending.IsPrinterCapabilityRefreshInProgress);
     Assert.True(!pending.RefreshPrinterCapabilitiesCommand.CanExecute(null));
+    pending.RefreshPrinterCapabilitiesAsync().GetAwaiter().GetResult();
+    var readCallsBeforeCompletion = delayedSource.ReadCalls;
     delayedSource.CompleteRead();
     firstRead.GetAwaiter().GetResult();
-    concurrentRead.GetAwaiter().GetResult();
+    Assert.Equal(1, readCallsBeforeCompletion);
     Assert.Equal(1, delayedSource.ReadCalls);
     Assert.Equal(1, pending.PrinterQueues.Count);
     Assert.True(!pending.IsPrinterCapabilityRefreshInProgress);
