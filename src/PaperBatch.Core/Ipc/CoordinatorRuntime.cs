@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
+using System.Collections.Immutable;
 using PaperBatch.Core.Recipes;
 
 namespace PaperBatch.Core.Ipc;
@@ -103,6 +104,7 @@ public sealed class UnavailableCoordinatorRequestHandler : ICoordinatorRequestHa
 /// <summary>Production coordinator backed by the existing source, artifact, run-store, and Windows print contracts.</summary>
 public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHandler
 {
+    private static readonly TimeSpan WatchStabilityWindow = TimeSpan.FromSeconds(2);
     private readonly PaperBatch.Core.Preparation.PreparedArtifactCoordinator? _preparation;
     private readonly PaperBatch.Core.Persistence.SqliteRunStore _runs;
     private readonly PaperBatch.Core.Printing.WindowsPrintCoordinator? _printing;
@@ -129,17 +131,30 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
         var pdfiumHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_SHA256");
         if (!string.IsNullOrWhiteSpace(pdfiumPath) && !string.IsNullOrWhiteSpace(pdfiumHash))
         {
-            var pdfium = new PaperBatch.Core.Rendering.PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
-            _preparation = new PaperBatch.Core.Preparation.PreparedArtifactCoordinator(
-                new PaperBatch.Core.Intake.SourceIntakeService(cache), cache, renderer, pdfium, pdfium,
-                new PaperBatch.Core.Layout.PdfiumPageCompositionAdapter(pdfiumPath, pdfiumHash), artifacts, _runs);
-            if (OperatingSystem.IsWindows())
+            if (!(OperatingSystem.IsWindows() || OperatingSystem.IsLinux()))
+                _preparationUnavailable = "Preparation requires a supported Windows or Linux PDFium runtime.";
+            else
             {
-                var native = new PaperBatch.Core.Printing.WindowsGdiNativeAdapter();
-                _printing = new PaperBatch.Core.Printing.WindowsPrintCoordinator(_runs,
-                    new PaperBatch.Core.Printing.WindowsGdiPrintBackend(native,
-                        new PaperBatch.Core.Printing.PinnedPdfiumWindowsPrintRasterizer(pdfiumPath, pdfiumHash)),
-                    artifacts: artifacts);
+                try
+                {
+                    var pdfium = new PaperBatch.Core.Rendering.PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
+                    pdfium.ValidateConfiguredRuntime();
+                    _preparation = new PaperBatch.Core.Preparation.PreparedArtifactCoordinator(
+                        new PaperBatch.Core.Intake.SourceIntakeService(cache), cache, renderer, pdfium, pdfium,
+                        new PaperBatch.Core.Layout.PdfiumPageCompositionAdapter(pdfiumPath, pdfiumHash), artifacts, _runs);
+                    if (OperatingSystem.IsWindows())
+                    {
+                        var native = new PaperBatch.Core.Printing.WindowsGdiNativeAdapter();
+                        _printing = new PaperBatch.Core.Printing.WindowsPrintCoordinator(_runs,
+                            new PaperBatch.Core.Printing.WindowsGdiPrintBackend(native,
+                                new PaperBatch.Core.Printing.PinnedPdfiumWindowsPrintRasterizer(pdfiumPath, pdfiumHash)),
+                            artifacts: artifacts);
+                    }
+                }
+                catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or InvalidDataException)
+                {
+                    _preparationUnavailable = "The configured hash-pinned PDFium runtime is unavailable or does not match its digest.";
+                }
             }
         }
         else _preparationUnavailable = "Preparation requires the explicitly configured, hash-pinned PDFium runtime.";
@@ -161,7 +176,8 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
                     submit = _printing is not null,
                     status = true,
                     cancel = _printing is not null,
-                    watch = false,
+                    watch = OperatingSystem.IsWindows() ||
+                        OperatingSystem.IsLinux() && System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64,
                     officeWps = false,
                     physicalOutput = false
                 }),
@@ -171,11 +187,15 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
                 "cli.submit" => await SubmitAsync(request, cancellationToken).ConfigureAwait(false),
                 "cli.status" => await StatusAsync(request, cancellationToken).ConfigureAwait(false),
                 "cli.cancel" => await CancelAsync(request, cancellationToken).ConfigureAwait(false),
-                "cli.watch" => Unavailable(request, "Watch-folder execution requires a configured durable watch rule and review policy."),
+                "cli.watch" => await WatchAsync(request, cancellationToken).ConfigureAwait(false),
                 _ => Unavailable(request, "The requested coordinator operation is unavailable.")
             };
         }
         catch (OperationCanceledException) { throw; }
+        catch (UnauthorizedAccessException)
+        {
+            return PermissionDenied(request, "The coordinator cannot access the requested local file or state.");
+        }
         catch (Exception exception) when (exception is ArgumentException or InvalidDataException or IOException or JsonException or InvalidOperationException or NotSupportedException)
         {
             return Unavailable(request, exception.Message);
@@ -184,7 +204,8 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
 
     private IpcResponseEnvelope DryRun(IpcRequestEnvelope request)
     {
-        var recipe = ReadRecipe(GetArguments(request, 1)[0]);
+        var recipePath = GetArguments(request, 1)[0];
+        var recipe = ReadRecipe(recipePath);
         var inputs = recipe.Sources.Select(source => new PaperBatch.Core.Intake.SourceInput(source.Location)).ToArray();
         var scan = PaperBatch.Core.Intake.SourceEnumerator.Enumerate(inputs);
         var unsupported = recipe.Sources.Any(source => Path.GetExtension(source.Location).ToLowerInvariant() is not (".pdf" or ".jpg" or ".jpeg" or ".png"));
@@ -199,6 +220,60 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
         });
     }
 
+    private async ValueTask<IpcResponseEnvelope> WatchAsync(IpcRequestEnvelope request, CancellationToken cancellationToken)
+    {
+        var root = Path.GetFullPath(GetArguments(request, 1)[0]);
+        var ruleId = "cli-watch-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(root))).ToLowerInvariant()[..24];
+        var scanner = new PaperBatch.Core.Watch.WatchFolderScanner(
+            new PaperBatch.Core.Watch.WatchFolderOptions(root, ruleId, WatchStabilityWindow, IncludeOfficeDocuments: true));
+        var outcomes = new List<WatchOutcome>();
+        var processor = new PaperBatch.Core.Watch.WatchFolderProcessor(scanner,
+            new WatchPreparationAdapter(this, outcomes));
+        var observedAt = DateTimeOffset.UtcNow;
+        _ = await processor.ReconcileAsync(observedAt, cancellationToken).ConfigureAwait(false);
+        await Task.Delay(WatchStabilityWindow, cancellationToken).ConfigureAwait(false);
+        var results = await processor.ReconcileAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        return Success(request, new
+        {
+            status = "scanned",
+            preparationPerformed = outcomes.Any(item => item.state == "prepared_for_review"),
+            submissionPerformed = false,
+            results = outcomes,
+            candidateCount = results.Count
+        });
+    }
+
+    private sealed record WatchOutcome(string relativePath, string state, string? runId = null, string? reason = null);
+
+    private sealed class WatchPreparationAdapter(ProductionCoordinatorRequestHandler owner, List<WatchOutcome> outcomes)
+        : PaperBatch.Core.Watch.IWatchFolderCoordinator
+    {
+        public async ValueTask ProcessAsync(PaperBatch.Core.Watch.WatchFolderCandidate candidate, bool submitAutomatically,
+            CancellationToken cancellationToken = default)
+        {
+            if (submitAutomatically) throw new InvalidOperationException("Watch-folder auto-submit is disabled by the default review policy.");
+            var extension = Path.GetExtension(candidate.FullPath).ToLowerInvariant();
+            if (candidate.Kind == PaperBatch.Core.Watch.WatchFileKind.Office || extension is not (".pdf" or ".jpg" or ".jpeg" or ".png"))
+            {
+                outcomes.Add(new WatchOutcome(candidate.RelativePath, "requires_review", reason: "This source format cannot be prepared by the configured coordinator."));
+                return;
+            }
+            if (owner._preparation is null)
+                throw new NotSupportedException(owner._preparationUnavailable ?? "Watch-folder preparation requires a validated PDFium runtime.");
+            var now = DateTimeOffset.UtcNow;
+            var settings = new PaperBatch.Core.Domain.PrintSettings(1, PaperBatch.Core.Domain.ColorMode.Color,
+                PaperBatch.Core.Domain.DuplexMode.Simplex, "default", PaperBatch.Core.Domain.Orientation.Auto,
+                PaperBatch.Core.Domain.ScalingMode.ShrinkToFit);
+            var prepared = await owner._preparation.PrepareAsync(
+                [new PaperBatch.Core.Intake.SourceInput(candidate.FullPath, ExpectedSha256: candidate.Sha256)], settings,
+                new PaperBatch.Core.Layout.LayoutOptions(), candidate.IdempotencyKey,
+                new PaperBatch.Core.Persistence.RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true), now,
+                cancellationToken).ConfigureAwait(false);
+            if (!prepared.Succeeded) throw new InvalidOperationException(string.Join(" ", prepared.Diagnostics));
+            outcomes.Add(new WatchOutcome(candidate.RelativePath, "prepared_for_review", prepared.Run!.RunId));
+        }
+    }
+
     private async ValueTask<IpcResponseEnvelope> PrepareAsync(IpcRequestEnvelope request, CancellationToken cancellationToken)
     {
         if (_preparation is null) return Unavailable(request, _preparationUnavailable ?? "Preparation is unavailable.");
@@ -207,7 +282,7 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
             recipeDigestElement.ValueKind != JsonValueKind.String ||
             !string.Equals(recipeDigestElement.GetString(), Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(recipeBytes)).ToLowerInvariant(), StringComparison.Ordinal))
             return Unavailable(request, "Recipe content changed after the request was fingerprinted; retry with the current recipe.");
-        var recipe = PaperBatch.Core.Recipes.JobRecipeJson.Parse(recipeBytes);
+        var recipe = ResolveRecipeRelativeSources(PaperBatch.Core.Recipes.JobRecipeJson.Parse(recipeBytes), GetArguments(request, 1)[0]);
         if (recipe.Sources.IsDefaultOrEmpty) return Unavailable(request, "Preparation requires at least one source.");
         var inputs = recipe.Sources.Select(source => new PaperBatch.Core.Intake.SourceInput(source.Location)).ToArray();
         var resolved = new List<PaperBatch.Core.Recipes.ResolvedRecipeSettings>(recipe.Sources.Length);
@@ -292,7 +367,19 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
 
     private static JobRecipe ReadRecipe(string path)
     {
-        return PaperBatch.Core.Recipes.JobRecipeJson.Parse(ReadRecipeBytes(path));
+        return ResolveRecipeRelativeSources(PaperBatch.Core.Recipes.JobRecipeJson.Parse(ReadRecipeBytes(path)), path);
+    }
+
+    private static JobRecipe ResolveRecipeRelativeSources(JobRecipe recipe, string recipePath)
+    {
+        var recipeDirectory = Path.GetDirectoryName(Path.GetFullPath(recipePath))!;
+        return recipe with
+        {
+            Sources = recipe.Sources.Select(source => source with
+            {
+                Location = Path.IsPathRooted(source.Location) ? source.Location : Path.GetFullPath(source.Location, recipeDirectory)
+            }).ToImmutableArray()
+        };
     }
 
     private static byte[] ReadRecipeBytes(string path)
@@ -356,6 +443,8 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
         new(IpcJson.CurrentProtocolVersion, request.CorrelationId, JsonSerializer.SerializeToElement(payload), null);
     private static IpcResponseEnvelope Unavailable(IpcRequestEnvelope request, string message) =>
         IpcJson.CreateErrorResponse(request.CorrelationId, "unavailable", message);
+    private static IpcResponseEnvelope PermissionDenied(IpcRequestEnvelope request, string message) =>
+        IpcJson.CreateErrorResponse(request.CorrelationId, "permission_denied", message);
 }
 
 public sealed class AutoStartingCoordinatorTransport(ILocalCoordinatorTransport? transport = null) : ILocalCoordinatorTransport

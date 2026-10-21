@@ -709,9 +709,27 @@ internal static class CoreTests
         Assert.True(status.Error is null);
         Assert.Equal(false, status.Payload!.Value.GetProperty("prepare").GetBoolean());
         Assert.Equal(false, status.Payload.Value.GetProperty("submit").GetBoolean());
-        var watchRequest = new IpcRequestEnvelope(1, Guid.NewGuid(), "cli.watch", "watch-key", JsonDocument.Parse("{\"arguments\":[\"/tmp/inbox\"]}").RootElement.Clone());
+        var recipeDirectory = Path.Combine(dataRoot, "recipes");
+        Directory.CreateDirectory(recipeDirectory);
+        File.WriteAllBytes(Path.Combine(recipeDirectory, "source.pdf"), [0x25, 0x50, 0x44, 0x46]);
+        var recipePath = Path.Combine(recipeDirectory, "relative-source.json");
+        File.WriteAllText(recipePath, """{"schemaVersion":1,"recipeId":"relative-source","name":"Relative source","sources":[{"sourceId":"source","location":"./source.pdf"}],"settings":{"copies":1,"colorMode":"color","duplexMode":"longEdge","orientation":"auto","scalingMode":"shrinkToFit","media":"default","printerId":null,"trayId":null}}""");
+        var dryRunRequest = new IpcRequestEnvelope(1, Guid.NewGuid(), "cli.dry-run", null,
+            JsonSerializer.SerializeToElement(new { arguments = new[] { recipePath } }));
+        var dryRun = transport.SendAsync(dryRunRequest, stop.Token).AsTask().GetAwaiter().GetResult();
+        Assert.True(dryRun.Error is null);
+        Assert.Equal("enumerated", dryRun.Payload!.Value.GetProperty("status").GetString()!);
+        Assert.Equal(1, dryRun.Payload.Value.GetProperty("sourceCount").GetInt32());
+        var watchRoot = Path.Combine(dataRoot, "watch");
+        Directory.CreateDirectory(watchRoot);
+        File.WriteAllText(Path.Combine(watchRoot, "office.docx"), "review only");
+        var watchRequest = new IpcRequestEnvelope(1, Guid.NewGuid(), "cli.watch", "watch-key",
+            JsonSerializer.SerializeToElement(new { arguments = new[] { watchRoot } }));
         var watch = transport.SendAsync(watchRequest, stop.Token).AsTask().GetAwaiter().GetResult();
-        Assert.Equal("unavailable", watch.Error!.Code);
+        Assert.True(watch.Error is null);
+        Assert.Equal(false, watch.Payload!.Value.GetProperty("submissionPerformed").GetBoolean());
+        Assert.True(watch.Payload.Value.GetProperty("results").GetArrayLength() > 0);
+        Assert.Equal("requires_review", watch.Payload.Value.GetProperty("results")[0].GetProperty("state").GetString()!);
         var cli = new NamedPipeCliCoordinator(transport);
         Assert.Throws<NotSupportedException>(() => cli.ExecuteAsync("status", ["missing-job"], stop.Token).AsTask().GetAwaiter().GetResult());
         var desktopRequest = new IpcRequestEnvelope(1, Guid.NewGuid(), "desktop.prepare", "desktop-prepare-key",
@@ -726,6 +744,30 @@ internal static class CoreTests
         Assert.True(restarted.IsOwner);
         restarted.DisposeAsync().AsTask().GetAwaiter().GetResult();
         Directory.Delete(dataRoot, recursive: true);
+    }
+
+    internal static void CoordinatorCapabilitiesRequireValidatedPdfiumRuntime()
+    {
+        var originalPath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH");
+        var originalHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_SHA256");
+        var dataRoot = Path.Combine(Path.GetTempPath(), "PaperBatch-invalid-pdfium-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Environment.SetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH", Path.Combine(dataRoot, "missing-runtime.so"));
+            Environment.SetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_SHA256", new string('0', 64));
+            var handler = new ProductionCoordinatorRequestHandler(dataRoot);
+            var request = new IpcRequestEnvelope(1, Guid.NewGuid(), "runtime.status", null, JsonDocument.Parse("{}").RootElement.Clone());
+            var response = handler.HandleAsync(request).AsTask().GetAwaiter().GetResult();
+            Assert.Equal(false, response.Payload!.Value.GetProperty("prepare").GetBoolean());
+            Assert.Equal(false, response.Payload.Value.GetProperty("submit").GetBoolean());
+            Assert.Equal(false, response.Payload.Value.GetProperty("cancel").GetBoolean());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH", originalPath);
+            Environment.SetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_SHA256", originalHash);
+            if (Directory.Exists(dataRoot)) Directory.Delete(dataRoot, recursive: true);
+        }
     }
 
     internal static void CoordinatorInstanceLeaseAllowsOnlyOneOwner()
@@ -790,6 +832,29 @@ internal static class CoreTests
         using var callerCancellation = new CancellationTokenSource();
         callerCancellation.Cancel();
         Assert.Throws<OperationCanceledException>(() => transport.SendAsync(request, callerCancellation.Token).AsTask().GetAwaiter().GetResult());
+        stop.Cancel();
+        Assert.Throws<OperationCanceledException>(() => serverTask.GetAwaiter().GetResult());
+        server.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    internal static void NamedPipeTransportEnforcesNegotiatedMessageLimit()
+    {
+        var pipeName = "paperbatch-limit-" + Guid.NewGuid().ToString("N");
+        var dispatched = 0;
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var server = new NamedPipeCoordinatorServer(pipeName, (request, _) =>
+        {
+            Interlocked.Increment(ref dispatched);
+            using var payload = JsonDocument.Parse("{}");
+            return ValueTask.FromResult(new IpcResponseEnvelope(1, request.CorrelationId, payload.RootElement.Clone(), null));
+        });
+        var serverTask = server.RunAsync(stop.Token);
+        Thread.Sleep(50);
+        var transport = new NamedPipeLocalCoordinatorTransport(pipeName, maximumMessageBytes: 1024);
+        using var payload = JsonDocument.Parse(JsonSerializer.Serialize(new { value = new string('x', 2048) }));
+        var request = new IpcRequestEnvelope(1, Guid.NewGuid(), "run.prepare", null, payload.RootElement.Clone());
+        Assert.Throws<InvalidDataException>(() => transport.SendAsync(request, stop.Token).AsTask().GetAwaiter().GetResult());
+        Assert.Equal(0, Volatile.Read(ref dispatched));
         stop.Cancel();
         Assert.Throws<OperationCanceledException>(() => serverTask.GetAwaiter().GetResult());
         server.DisposeAsync().AsTask().GetAwaiter().GetResult();

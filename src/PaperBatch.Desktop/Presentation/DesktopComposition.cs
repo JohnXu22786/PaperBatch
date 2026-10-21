@@ -64,9 +64,20 @@ internal static class DesktopComposition
         var pdfiumHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_SHA256");
         if (!string.IsNullOrWhiteSpace(pdfiumPath) && !string.IsNullOrWhiteSpace(pdfiumHash))
         {
-            var pdfium = new PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
-            previewRenderer = pdfium;
-            preparationAvailable = true;
+            if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
+            {
+                try
+                {
+                    var pdfium = new PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
+                    pdfium.ValidateConfiguredRuntime();
+                    previewRenderer = pdfium;
+                    preparationAvailable = true;
+                }
+                catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException)
+                {
+                    // Keep preparation and final preview disabled until the shared host can use the pinned runtime.
+                }
+            }
         }
 
         var printAvailable = printerBackend is not null && preparationAvailable;
@@ -531,7 +542,8 @@ internal sealed class ProductionPresentationSources :
         string? idempotencyKey, object payload, CancellationToken cancellationToken)
     {
         var request = new IpcRequestEnvelope(IpcJson.CurrentProtocolVersion, Guid.NewGuid(), operation, idempotencyKey,
-            System.Text.Json.JsonSerializer.SerializeToElement(payload));
+            System.Text.Json.JsonSerializer.SerializeToElement(payload,
+                new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase }));
         return await _coordinatorTransport.SendAsync(request, cancellationToken).ConfigureAwait(false);
     }
 

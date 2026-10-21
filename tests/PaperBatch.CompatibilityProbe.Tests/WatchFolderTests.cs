@@ -323,9 +323,11 @@ internal static class WatchFolderTests
         using var recipe = new TemporaryFile();
         var transport = new RecordingTransport();
         var coordinator = new NamedPipeCliCoordinator(transport);
+        var relativePath = Path.GetRelativePath(Environment.CurrentDirectory, recipe.Path);
         File.WriteAllText(recipe.Path, "{\"first\":true}");
-        _ = coordinator.ExecuteAsync("prepare", [recipe.Path]).AsTask().GetAwaiter().GetResult();
-        _ = coordinator.ExecuteAsync("prepare", [recipe.Path]).AsTask().GetAwaiter().GetResult();
+        _ = coordinator.ExecuteAsync("prepare", [relativePath]).AsTask().GetAwaiter().GetResult();
+        _ = coordinator.ExecuteAsync("prepare", [relativePath]).AsTask().GetAwaiter().GetResult();
+        Assert.Equal(Path.GetFullPath(relativePath), transport.Requests[0].Payload.GetProperty("arguments")[0].GetString()!);
         Assert.Equal(transport.Requests[0].IdempotencyKey!, transport.Requests[1].IdempotencyKey!);
         Assert.Equal(transport.Requests[0].Payload.GetProperty("recipeSha256").GetString()!,
             transport.Requests[1].Payload.GetProperty("recipeSha256").GetString()!);

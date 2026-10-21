@@ -64,6 +64,25 @@ internal static class PreparedArtifactCoordinatorTests
             Assert.True(firstBytes.SequenceEqual(File.ReadAllBytes(firstPath)));
             Assert.True(secondBytes.SequenceEqual(File.ReadAllBytes(secondPath)));
 
+            var retry = pipeline.PrepareAsync(
+                [new SourceInput(firstPath), new SourceInput(secondPath), new SourceInput(firstPath, IntentionalCopy: true)],
+                settings,
+                new LayoutOptions(NUp: NUpMode.One, SheetSize: new PageSize(200, 200)),
+                "prepared-e2e-key",
+                new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true),
+                FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
+            Assert.True(retry.Succeeded);
+            Assert.True(retry.Persistence!.Replayed);
+            Assert.Equal(run.RunId, retry.Run!.RunId);
+            var concurrentRetries = Task.WhenAll(Enumerable.Range(0, 2).Select(_ => pipeline.PrepareAsync(
+                [new SourceInput(firstPath), new SourceInput(secondPath), new SourceInput(firstPath, IntentionalCopy: true)],
+                settings,
+                new LayoutOptions(NUp: NUpMode.One, SheetSize: new PageSize(200, 200)),
+                "prepared-e2e-key",
+                new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true),
+                FixedTime.AddMinutes(2)))).GetAwaiter().GetResult();
+            Assert.True(concurrentRetries.All(result => result.Succeeded && result.Persistence!.Replayed && result.Run!.RunId == run.RunId));
+
             var reopenedRun = store.GetPreparedRun(run.RunId)!;
             Assert.Equal(run.FinalArtifact, reopenedRun.FinalArtifact);
             using var finalPdf = artifacts.OpenRead(run.FinalArtifact.ArtifactId);

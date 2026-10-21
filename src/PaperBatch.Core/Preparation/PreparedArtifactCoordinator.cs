@@ -5,6 +5,7 @@ using PaperBatch.Core.Intake;
 using PaperBatch.Core.Layout;
 using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Rendering;
+using PaperBatch.Core.Serialization;
 
 namespace PaperBatch.Core.Preparation;
 
@@ -35,6 +36,7 @@ public sealed class PreparedArtifactCoordinator(
     SqliteRunStore runs)
 {
     private const long MaximumPreparedSourceBytes = 512L * 1024 * 1024;
+    private readonly SemaphoreSlim _prepareGate = new(1, 1);
 
     public Task<PreparedArtifactResult> PrepareAsync(
         IEnumerable<SourceInput> inputs,
@@ -58,6 +60,26 @@ public sealed class PreparedArtifactCoordinator(
         IReadOnlyList<LayoutDocumentSettings>? perItemLayoutSettings,
         CancellationToken cancellationToken = default)
     {
+        await _prepareGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await PrepareCoreAsync(inputs, printSettings, layoutOptions, idempotencyKey, retention,
+                createdAtUtc, perItemPrintSettings, perItemLayoutSettings, cancellationToken).ConfigureAwait(false);
+        }
+        finally { _prepareGate.Release(); }
+    }
+
+    private async Task<PreparedArtifactResult> PrepareCoreAsync(
+        IEnumerable<SourceInput> inputs,
+        PrintSettings printSettings,
+        LayoutOptions layoutOptions,
+        string idempotencyKey,
+        RetentionMetadata retention,
+        DateTimeOffset createdAtUtc,
+        IReadOnlyList<PrintSettings>? perItemPrintSettings,
+        IReadOnlyList<LayoutDocumentSettings>? perItemLayoutSettings,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(inputs);
         ArgumentNullException.ThrowIfNull(printSettings);
         ArgumentNullException.ThrowIfNull(layoutOptions);
@@ -79,6 +101,14 @@ public sealed class PreparedArtifactCoordinator(
                 diagnostics.AddRange(prepared.Items.SelectMany(item => item.Diagnostics).Select(item => item.Message));
                 if (diagnostics.Count == 0) diagnostics.Add("Every selected source must pass intake preflight before preparation.");
                 return new(null, null, diagnostics, IsCancelled: false);
+            }
+            var effectiveRequestKey = ComputeEffectiveRequestKey(idempotencyKey, inputArray, prepared.Items,
+                printSettings, layoutOptions, perItemPrintSettings, perItemLayoutSettings);
+            var existingRun = runs.GetRunByRequestKey(effectiveRequestKey);
+            if (existingRun is not null)
+            {
+                var replayed = new RunCreationResult(existingRun, runs.GetJobs(existingRun.RunId), Replayed: true);
+                return new(PreparedRunJson.Parse(System.Text.Encoding.UTF8.GetBytes(existingRun.PreparedRunJson)), replayed, [], false);
             }
             for (var sourceIndex = 0; sourceIndex < inputArray.Length; sourceIndex++)
             {
@@ -169,7 +199,15 @@ public sealed class PreparedArtifactCoordinator(
             var finalArtifact = new FinalPdfArtifact(finalReceipt.Artifact.ArtifactId,
                 finalReceipt.Artifact.Sha256, finalReceipt.Artifact.LengthBytes, layout.Pages.Length);
             var run = PreparedRun.Create(finalId, createdAtUtc, fingerprint, items, segments, finalArtifact);
-            var persisted = runs.CreateRun(run, idempotencyKey, retention);
+            RunCreationResult persisted;
+            try { persisted = runs.CreateRun(run, effectiveRequestKey, retention); }
+            catch (IdempotencyConflictException)
+            {
+                var replay = runs.GetRunByRequestKey(effectiveRequestKey);
+                if (replay is null) throw;
+                persisted = new RunCreationResult(replay, runs.GetJobs(replay.RunId), Replayed: true);
+                run = PreparedRunJson.Parse(System.Text.Encoding.UTF8.GetBytes(replay.PreparedRunJson));
+            }
             return new(run, persisted, diagnostics, IsCancelled: false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -217,6 +255,33 @@ public sealed class PreparedArtifactCoordinator(
             options.AddSeparatorsBetweenFiles,
             options.SeparatePacketsOnFront,
             options.MaximumOutputPages
+        }));
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static string ComputeEffectiveRequestKey(string idempotencyKey, IReadOnlyList<SourceInput> inputs,
+        IReadOnlyList<SourcePreparationItem> preparedItems, PrintSettings settings, LayoutOptions options,
+        IReadOnlyList<PrintSettings>? perItemPrintSettings, IReadOnlyList<LayoutDocumentSettings>? perItemLayoutSettings)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        void Add(string value) => hash.AppendData(Encoding.UTF8.GetBytes(value + "\n"));
+        Add(idempotencyKey);
+        for (var index = 0; index < inputs.Count; index++)
+        {
+            Add(Path.GetFullPath(inputs[index].Path));
+            Add(inputs[index].IntentionalCopy ? "copy" : "source");
+            Add(preparedItems[index].Snapshot!.Sha256);
+        }
+        Add(System.Text.Json.JsonSerializer.Serialize(settings));
+        Add(System.Text.Json.JsonSerializer.Serialize(perItemPrintSettings));
+        Add(System.Text.Json.JsonSerializer.Serialize(perItemLayoutSettings?.Select(document => document is null ? null :
+            document with { Ranges = document.Ranges.IsDefault ? [] : document.Ranges }).ToArray()));
+        Add(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            options.Copies, options.CopyOrder, options.NUp, options.Duplex, options.SeparateFilesOnFront,
+            options.ReverseOrder, options.Fit, options.SheetSize,
+            Ranges = options.Ranges.IsDefault ? Array.Empty<PageRange>() : options.Ranges.ToArray(),
+            options.AddFrontCover, options.AddSeparatorsBetweenFiles, options.SeparatePacketsOnFront, options.MaximumOutputPages
         }));
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }

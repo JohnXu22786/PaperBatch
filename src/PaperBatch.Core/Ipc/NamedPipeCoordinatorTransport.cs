@@ -17,7 +17,7 @@ public sealed class NamedPipeCoordinatorServer : IAsyncDisposable
     private readonly Func<IpcRequestEnvelope, CancellationToken, ValueTask<IpcResponseEnvelope>> _dispatch;
     private readonly SemaphoreSlim _clients = new(MaximumConcurrentClients, MaximumConcurrentClients);
     private readonly CancellationTokenSource _shutdown = new();
-    private readonly ConcurrentBag<Task> _clientTasks = [];
+    private readonly ConcurrentDictionary<Task, byte> _clientTasks = new();
     private Task? _runTask;
     private int _started;
 
@@ -50,7 +50,7 @@ public sealed class NamedPipeCoordinatorServer : IAsyncDisposable
             try { await runTask.ConfigureAwait(false); }
             catch (OperationCanceledException) { }
         }
-        try { await Task.WhenAll(_clientTasks.ToArray()).ConfigureAwait(false); }
+        try { await Task.WhenAll(_clientTasks.Keys.ToArray()).ConfigureAwait(false); }
         catch (OperationCanceledException) { }
         _shutdown.Dispose();
         _clients.Dispose();
@@ -69,7 +69,10 @@ public sealed class NamedPipeCoordinatorServer : IAsyncDisposable
             try
             {
                 await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
-                _clientTasks.Add(ProcessClientAsync(pipe, cancellationToken));
+                var clientTask = ProcessClientAsync(pipe, cancellationToken);
+                _clientTasks.TryAdd(clientTask, 0);
+                _ = clientTask.ContinueWith(completed => _clientTasks.TryRemove(completed, out var removed), CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
             catch
             {
@@ -84,6 +87,7 @@ public sealed class NamedPipeCoordinatorServer : IAsyncDisposable
     {
         await using (pipe.ConfigureAwait(false))
         {
+            var maximumMessageBytes = IpcJson.MaximumMessageBytes;
             try
             {
                 while (pipe.IsConnected && !cancellationToken.IsCancellationRequested)
@@ -92,13 +96,17 @@ public sealed class NamedPipeCoordinatorServer : IAsyncDisposable
                     using (var frameDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
                     {
                         frameDeadline.CancelAfter(_clientFrameTimeout);
-                        try { requestBytes = await PipeFrames.ReadAsync(pipe, IpcJson.MaximumMessageBytes, frameDeadline.Token).ConfigureAwait(false); }
+                        try { requestBytes = await PipeFrames.ReadAsync(pipe, maximumMessageBytes, frameDeadline.Token).ConfigureAwait(false); }
                         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { break; }
                     }
                     var request = IpcJson.ParseRequest(requestBytes);
                     IpcResponseEnvelope response;
                     if (request.Operation == "runtime.capabilities")
                     {
+                        if (!request.Payload.TryGetProperty("maximumMessageBytes", out var clientMaximumElement) ||
+                            !clientMaximumElement.TryGetInt32(out var clientMaximum) || clientMaximum <= 0)
+                            throw new InvalidDataException("IPC client message limit is invalid.");
+                        maximumMessageBytes = Math.Min(clientMaximum, IpcJson.MaximumMessageBytes);
                         using var payload = JsonDocument.Parse("{\"protocolVersions\":[1],\"maximumMessageBytes\":262144}");
                         response = new IpcResponseEnvelope(IpcJson.CurrentProtocolVersion, request.CorrelationId, payload.RootElement.Clone(), null);
                     }
@@ -108,7 +116,7 @@ public sealed class NamedPipeCoordinatorServer : IAsyncDisposable
                         if (response.CorrelationId != request.CorrelationId)
                             response = IpcJson.CreateErrorResponse(request.CorrelationId, "correlation-mismatch", "Coordinator returned a mismatched correlation ID.");
                     }
-                    await PipeFrames.WriteAsync(pipe, IpcJson.SerializeResponse(response), cancellationToken).ConfigureAwait(false);
+                    await PipeFrames.WriteAsync(pipe, IpcJson.SerializeResponse(response), cancellationToken, maximumMessageBytes).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -175,7 +183,7 @@ public sealed class NamedPipeLocalCoordinatorTransport : ILocalCoordinatorTransp
             maximumMessageBytes = _maximumMessageBytes
         }));
         var handshake = new IpcRequestEnvelope(IpcJson.CurrentProtocolVersion, handshakeId, "runtime.capabilities", null, handshakePayload.RootElement.Clone());
-        await PipeFrames.WriteAsync(pipe, IpcJson.SerializeRequest(handshake), timeout.Token).ConfigureAwait(false);
+        await PipeFrames.WriteAsync(pipe, IpcJson.SerializeRequest(handshake), timeout.Token, _maximumMessageBytes).ConfigureAwait(false);
         var handshakeResponse = IpcJson.ParseResponse(await PipeFrames.ReadAsync(pipe, _maximumMessageBytes, timeout.Token).ConfigureAwait(false));
         if (handshakeResponse.CorrelationId != handshakeId || handshakeResponse.Error is not null)
             throw new InvalidDataException("Coordinator capability negotiation failed.");
@@ -185,7 +193,7 @@ public sealed class NamedPipeLocalCoordinatorTransport : ILocalCoordinatorTransp
         if (request.ProtocolVersion != negotiated.ProtocolVersion)
             throw new NotSupportedException("Request protocol version does not match the negotiated coordinator version.");
 
-        await PipeFrames.WriteAsync(pipe, IpcJson.SerializeRequest(request), timeout.Token).ConfigureAwait(false);
+        await PipeFrames.WriteAsync(pipe, IpcJson.SerializeRequest(request), timeout.Token, negotiated.MaximumMessageBytes).ConfigureAwait(false);
         var response = IpcJson.ParseResponse(await PipeFrames.ReadAsync(pipe, negotiated.MaximumMessageBytes, timeout.Token).ConfigureAwait(false));
         if (response.CorrelationId != request.CorrelationId)
             throw new InvalidDataException("Coordinator response correlation ID does not match the request.");
@@ -208,9 +216,9 @@ internal static class PipeFrames
 {
     private const int HeaderLength = sizeof(int);
 
-    public static async ValueTask WriteAsync(Stream stream, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
+    public static async ValueTask WriteAsync(Stream stream, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken, int maximumBytes = IpcJson.MaximumMessageBytes)
     {
-        if (payload.Length is <= 0 || payload.Length > IpcJson.MaximumMessageBytes)
+        if (payload.Length is <= 0 || payload.Length > maximumBytes || payload.Length > IpcJson.MaximumMessageBytes)
             throw new InvalidDataException("IPC frame length is outside the allowed bounds.");
         var header = new byte[HeaderLength];
         BinaryPrimitives.WriteInt32LittleEndian(header, payload.Length);

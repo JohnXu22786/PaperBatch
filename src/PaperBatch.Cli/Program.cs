@@ -28,16 +28,20 @@ public sealed class NamedPipeCliCoordinator : ICliCoordinator
 
     public async ValueTask<string> ExecuteAsync(string operation, IReadOnlyList<string> arguments, CancellationToken cancellationToken = default)
     {
-        string? recipeSha256 = operation == "prepare" && arguments.Count == 1 ? ComputeRecipeDigest(arguments[0]) : null;
+        var requestArguments = arguments.ToArray();
+        if (operation is "prepare" or "dry-run" or "watch" && requestArguments.Length == 1)
+            requestArguments[0] = Path.GetFullPath(requestArguments[0]);
+        string? recipeSha256 = operation == "prepare" && requestArguments.Length == 1 ? ComputeRecipeDigest(requestArguments[0]) : null;
         var payload = JsonSerializer.SerializeToElement(recipeSha256 is null
-            ? (object)new { arguments }
-            : new { arguments, recipeSha256 });
-        var idempotencyKey = CoordinatorRequestKeys.Create(operation, arguments, recipeSha256);
+            ? (object)new { arguments = requestArguments }
+            : new { arguments = requestArguments, recipeSha256 });
+        var idempotencyKey = CoordinatorRequestKeys.Create(operation, requestArguments, recipeSha256);
         var request = new IpcRequestEnvelope(IpcJson.CurrentProtocolVersion, Guid.NewGuid(), "cli." + operation, idempotencyKey, payload);
         var response = await _transport.SendAsync(request, cancellationToken).ConfigureAwait(false);
         if (response.Error is { } error)
         {
             if (error.Code == "unavailable") throw new NotSupportedException(error.Message);
+            if (error.Code == "permission_denied") throw new UnauthorizedAccessException(error.Message);
             throw new IOException($"Coordinator request failed ({error.Code}): {error.Message}");
         }
         return response.Payload!.Value.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.String

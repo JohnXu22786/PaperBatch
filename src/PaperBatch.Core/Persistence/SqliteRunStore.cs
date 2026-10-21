@@ -205,6 +205,18 @@ public sealed class SqliteRunStore
         return ReadRun(connection, null, runId);
     }
 
+    public StoredRun? GetRunByRequestKey(string requestKey)
+    {
+        EnsureInitialized();
+        ValidateIdempotencyKey(requestKey);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT run_id FROM runs WHERE request_key = $requestKey;";
+        command.Parameters.AddWithValue("$requestKey", requestKey);
+        var runId = Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+        return runId is null ? null : ReadRun(connection, null, runId);
+    }
+
     /// <summary>Returns a bounded newest-first view of retained run metadata; it does not imply that a run printed.</summary>
     public ImmutableArray<StoredRun> GetRecentRuns(int limit = MaximumHistoryRows)
     {
