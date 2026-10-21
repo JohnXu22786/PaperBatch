@@ -70,12 +70,12 @@ internal static class PreparedArtifactCoordinatorTests
             var finalPages = inspector.GetPageSizesAsync(finalPdf, CancellationToken.None).GetAwaiter().GetResult();
             Assert.Equal(run.FinalArtifact.PageCount, finalPages.Count);
 
-            var unsupported = pipeline.PrepareAsync([new SourceInput(firstPath)], settings,
-                new LayoutOptions(Copies: 2), "unsupported-layout-key",
+            var copied = pipeline.PrepareAsync([new SourceInput(firstPath)], settings,
+                new LayoutOptions(Copies: 2), "copied-layout-key",
                 new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true), FixedTime.AddMinutes(1))
                 .GetAwaiter().GetResult();
-            Assert.True(!unsupported.Succeeded);
-            Assert.True(unsupported.Diagnostics.Any(message => message.Contains("layout copies", StringComparison.Ordinal)));
+            Assert.True(copied.Succeeded, string.Join("; ", copied.Diagnostics));
+            Assert.Equal(2, copied.Run!.FinalArtifact!.PageCount);
 
             using var cancelledToken = new CancellationTokenSource();
             cancelledToken.Cancel();

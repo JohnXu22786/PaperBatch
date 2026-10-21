@@ -63,9 +63,6 @@ public sealed class PreparedArtifactCoordinator(
                 if (diagnostics.Count == 0) diagnostics.Add("Every selected source must pass intake preflight before preparation.");
                 return new(null, null, diagnostics, IsCancelled: false);
             }
-            if (layoutOptions.Copies != 1)
-                return new(null, null, ["Set layout copies to one; print copies are carried by the selected driver settings."], IsCancelled: false);
-
             var items = new List<PreparedItem>(prepared.Items.Length);
             var layoutDocuments = new List<LayoutDocument>(prepared.Items.Length);
             var compositionSources = new List<PdfCompositionSource>(prepared.Items.Length);

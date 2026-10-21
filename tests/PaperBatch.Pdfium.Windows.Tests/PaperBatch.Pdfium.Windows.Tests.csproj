@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/PaperBatch.CompatibilityProbe/PeImageParser.cs" Link="PeImageParser.cs" />
+    <ProjectReference Include="../../src/PaperBatch.Core/PaperBatch.Core.csproj" />
   </ItemGroup>
 </Project>

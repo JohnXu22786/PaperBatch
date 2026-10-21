@@ -138,7 +138,7 @@ internal static class CoreTests
         Assert.Equal(recipe.Name, restoredRecipe.Name);
         Assert.Equal(recipe.Sources[0], restoredRecipe.Sources[0]);
         Assert.Equal(recipe.Settings, restoredRecipe.Settings);
-        Assert.Throws<UnsupportedSchemaVersionException>(() => reopened.SaveRecipe(recipe with { SchemaVersion = 2 }));
+        Assert.Throws<UnsupportedSchemaVersionException>(() => reopened.SaveRecipe(recipe with { SchemaVersion = 3 }));
         var oversized = recipe with { RecipeId = "large", Name = "Large", Sources =
             Enumerable.Range(0, 500).Select(index => new RecipeSource($"source-{index}", "/" + new string('a', 2047))).ToImmutableArray() };
         Assert.Throws<InvalidDataException>(() => reopened.SaveRecipe(oversized));
@@ -590,11 +590,11 @@ internal static class CoreTests
 
     internal static void RecipeParserRejectsInvalidVersionsAndUnknownFields()
     {
-        var futureVersion = Encoding.UTF8.GetBytes(ValidRecipeJson().Replace("\"schemaVersion\": 1", "\"schemaVersion\": 2", StringComparison.Ordinal));
+        var futureVersion = Encoding.UTF8.GetBytes(ValidRecipeJson().Replace("\"schemaVersion\": 2", "\"schemaVersion\": 3", StringComparison.Ordinal));
         Assert.Throws<UnsupportedSchemaVersionException>(() => JobRecipeJson.Parse(futureVersion));
         Assert.Throws<UnsupportedSchemaVersionException>(() => JobRecipeJson.Parse(Encoding.UTF8.GetBytes("{\"recipeId\":\"no-version\"}")));
         Assert.Throws<JsonException>(() => JobRecipeJson.Parse(Encoding.UTF8.GetBytes(ValidRecipeJson().Replace("\"name\": \"Office packet\"", "\"name\": \"Office packet\", \"script\": \"run\"", StringComparison.Ordinal))));
-        Assert.Throws<JsonException>(() => JobRecipeJson.Parse(Encoding.UTF8.GetBytes(ValidRecipeJson().Replace("\"schemaVersion\": 1,", "\"schemaVersion\": 1, \"schemaVersion\": 1,", StringComparison.Ordinal))));
+        Assert.Throws<JsonException>(() => JobRecipeJson.Parse(Encoding.UTF8.GetBytes(ValidRecipeJson().Replace("\"schemaVersion\": 2,", "\"schemaVersion\": 2, \"schemaVersion\": 2,", StringComparison.Ordinal))));
         Assert.Throws<JsonException>(() => JobRecipeJson.Parse(Encoding.UTF8.GetBytes("{ invalid }")));
         Assert.Throws<InvalidDataException>(() => JobRecipeJson.Parse(new byte[JobRecipeJson.MaximumRecipeBytes + 1]));
         foreach (var requiredSetting in new[] { "colorMode", "duplexMode", "orientation", "scalingMode" })
@@ -613,14 +613,46 @@ internal static class CoreTests
 
     internal static void RecipeSerializationMatchesGoldenFixture()
     {
-        var json = JobRecipeJson.Serialize(CreateRecipe());
+        var json = JobRecipeJson.Serialize(CreateRecipe() with { SchemaVersion = 1 });
         var golden = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "recipe-v1.json")).Trim();
 
         Assert.Equal(golden, json);
         var parsed = JobRecipeJson.Parse(Encoding.UTF8.GetBytes(json));
         Assert.Equal("office-packet", parsed.RecipeId);
         Assert.Equal(2, parsed.Sources.Length);
-        Assert.Equal(JobRecipeJson.CurrentSchemaVersion, parsed.SchemaVersion);
+        Assert.Equal(1, parsed.SchemaVersion);
+    }
+
+    internal static void RecipeRulesUseFirstMatchThenPerFileOverrideAndRoundTrip()
+    {
+        var source = new RecipeSource("source-1", "/docs/annual.pdf")
+        {
+            Override = new RecipeSettingsOverride(Copies: 4, PageRange: "2-3")
+        };
+        var recipe = CreateRecipe() with
+        {
+            SchemaVersion = JobRecipeJson.CurrentSchemaVersion,
+            Sources = [source],
+            Rules = [
+                new RecipeSettingRule("first", "*.pdf", "pdf", new RecipeSettingsOverride(Copies: 2, NUp: 2)),
+                new RecipeSettingRule("second", "annual.*", null, new RecipeSettingsOverride(Copies: 9))
+            ]
+        };
+        var json = JobRecipeJson.Serialize(recipe);
+        var parsed = JobRecipeJson.Parse(Encoding.UTF8.GetBytes(json));
+        var resolved = RecipeSettingsResolver.Resolve(parsed, parsed.Sources[0], "pdf", parsed.Settings);
+        Assert.Equal("first", resolved.MatchingRuleId!);
+        Assert.Equal(4, resolved.Values.Copies);
+        Assert.Equal(2, resolved.NUp!.Value);
+        Assert.Equal("2-3", resolved.PageRange!);
+        Assert.Equal("file override", resolved.Provenance["copies"]);
+        Assert.Equal("rule first", resolved.Provenance["nUp"]);
+        Assert.True(RecipeSettingsResolver.IsMatch("Annual.PDF", "*.pdf"));
+        Assert.False(RecipeSettingsResolver.IsMatch("dir/Annual.PDF", "*.pdf"));
+        Assert.Throws<JsonException>(() => JobRecipeJson.Serialize(recipe with
+        {
+            Rules = [new RecipeSettingRule("bad", "../*.pdf", null, new RecipeSettingsOverride(Copies: 2))]
+        }));
     }
 
     internal static void IpcEnvelopesPreserveCorrelationAndNegotiateCapabilities()

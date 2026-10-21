@@ -192,9 +192,43 @@
                       CornerRadius="15" Padding="18" Margin="0,0,8,0">
                 <StackPanel Spacing="11">
                   <StackPanel Spacing="2">
-                    <TextBlock Text="EFFECTIVE SETTINGS" Classes="eyebrow" />
+                    <TextBlock Text="{Binding PreparationSettingsHeading}" Classes="eyebrow" />
                     <TextBlock Text="{Binding SettingsHeading}" FontSize="18" FontWeight="SemiBold" Foreground="#172033" />
                   </StackPanel>
+                  <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="5">
+                    <StackPanel Grid.Row="0" Grid.Column="0" Spacing="3">
+                      <TextBlock Text="{Binding CopiesLabel}" FontSize="10" />
+                      <NumericUpDown Minimum="1" Maximum="999" Value="{Binding RequestedCopies}" AutomationProperties.Name="{Binding CopiesLabel}" />
+                    </StackPanel>
+                    <StackPanel Grid.Row="0" Grid.Column="1" Spacing="3">
+                      <TextBlock Text="{Binding OrientationLabel}" FontSize="10" />
+                      <ComboBox ItemsSource="{Binding OrientationOptions}" SelectedIndex="{Binding OrientationIndex}" AutomationProperties.Name="{Binding OrientationLabel}" />
+                    </StackPanel>
+                    <StackPanel Grid.Row="1" Grid.Column="0" Spacing="3">
+                      <TextBlock Text="{Binding ScalingLabel}" FontSize="10" />
+                      <ComboBox ItemsSource="{Binding ScalingOptions}" SelectedIndex="{Binding ScalingIndex}" AutomationProperties.Name="{Binding ScalingLabel}" />
+                    </StackPanel>
+                    <StackPanel Grid.Row="1" Grid.Column="1" Spacing="3">
+                      <TextBlock Text="{Binding NUpLabel}" FontSize="10" />
+                      <ComboBox ItemsSource="{Binding NUpOptions}" SelectedIndex="{Binding RequestedNUpIndex}" AutomationProperties.Name="{Binding NUpLabel}" />
+                    </StackPanel>
+                    <StackPanel Grid.Row="2" Grid.Column="0" Spacing="3">
+                      <TextBlock Text="{Binding MediaLabel}" FontSize="10" />
+                      <ComboBox ItemsSource="{Binding MediaOptions}" SelectedIndex="{Binding MediaIndex}" AutomationProperties.Name="{Binding MediaLabel}" />
+                    </StackPanel>
+                    <StackPanel Grid.Row="2" Grid.Column="1" Spacing="3">
+                      <TextBlock Text="{Binding DuplexLabel}" FontSize="10" />
+                      <ComboBox ItemsSource="{Binding DuplexOptions}" SelectedIndex="{Binding DuplexIndex}" AutomationProperties.Name="{Binding DuplexLabel}" />
+                    </StackPanel>
+                    <StackPanel Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2" Spacing="3">
+                      <TextBlock Text="{Binding PageRangeLabel}" FontSize="10" />
+                      <TextBox Text="{Binding PageRange}" AutomationProperties.Name="{Binding PageRangeLabel}" />
+                    </StackPanel>
+                    <Button Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2" Content="{Binding PrepareLabel}" Click="PrepareQueueClick"
+                            IsEnabled="{Binding CanPrepareQueue}" AutomationProperties.Name="{Binding PrepareLabel}" />
+                    <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2" Text="{Binding PreparationSettingsNote}"
+                               FontSize="10" Foreground="#64748B" TextWrapping="Wrap" />
+                  </Grid>
                   <ItemsControl ItemsSource="{Binding EffectiveSettings}">
                     <ItemsControl.ItemTemplate>
                       <DataTemplate x:DataType="presentation:EffectiveSettingSnapshot">

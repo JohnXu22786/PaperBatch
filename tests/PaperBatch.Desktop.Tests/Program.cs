@@ -7,6 +7,7 @@ using PaperBatch.Core.Intake;
 using PaperBatch.Core.Domain;
 using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Rendering;
+using PaperBatch.Core.Preparation;
 using PaperBatch.Core.Recipes;
 using PaperBatch.Desktop.Presentation;
 
@@ -22,6 +23,7 @@ var tests = new (string Name, Action Run)[]
     ("headless shell identifies demo data and has no print action", HeadlessShellIsExplicitlyDemoOnly),
     ("production presentation exposes unavailable production capabilities without demo rows", ProductionPresentationIsExplicitlyUnavailable),
     ("production preview raster comes from the persisted prepared artifact", ProductionPreviewReadsPreparedArtifact),
+    ("preparation controls forward requested layout settings and invalidate previews", PreparationControlsForwardRequestedSettingsAndInvalidate),
     ("corrupt saved recipes leave production shell available with an error state", CorruptSavedRecipesRemainVisibleAsAnError),
     ("recipe lifecycle strictly imports, renames, exports without overwrite, and deletes", RecipeLifecycleIsExplicitAndBounded),
     ("corrupt saved history leaves production shell available with an error state", CorruptSavedHistoryRemainsVisibleAsAnError),
@@ -283,7 +285,7 @@ static void ProductionPresentationIsExplicitlyUnavailable()
     {
         window.Show();
         Assert.Equal("QUEUE EMPTY", viewModel.QueueStateLabel);
-        Assert.Contains("Source files are captured", window.FindControl<TextBlock>("QueueDescription")!.Text);
+        Assert.Contains("Sources are captured", window.FindControl<TextBlock>("QueueDescription")!.Text);
         Assert.Equal("FINAL PREVIEW UNAVAILABLE", window.FindControl<TextBlock>("PreviewHeading")!.Text);
         Assert.Equal("No prepared artifact preview is available.", window.FindControl<TextBlock>("PreviewDescription")!.Text);
         viewModel.NavigateCommand.Execute("History");
@@ -358,6 +360,28 @@ static void ProductionPreviewReadsPreparedArtifact()
     {
         if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
+}
+
+static void PreparationControlsForwardRequestedSettingsAndInvalidate()
+{
+    var source = new FakePreparationSource([new QueueItemSnapshot("a", "A.pdf", "ready", "Ready")]);
+    var viewModel = new DesktopShellViewModel(source, new FakeSettingsSource(), source,
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource());
+    viewModel.RequestedCopies = 3;
+    viewModel.RequestedNUpIndex = 2;
+    viewModel.OrientationIndex = 2;
+    viewModel.ScalingIndex = 1;
+    viewModel.DuplexIndex = 1;
+    viewModel.PageRange = "2-4";
+    viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
+    Assert.Equal(3, source.Settings!.Copies);
+    Assert.Equal(3, source.Options!.Copies);
+    Assert.Equal(PaperBatch.Core.Layout.NUpMode.Four, source.Options.NUp);
+    Assert.True(source.Options.SheetSize!.WidthPoints > source.Options.SheetSize.HeightPoints);
+    Assert.Equal(PaperBatch.Core.Layout.FitMode.ActualSize, source.Options.Fit);
+    Assert.True(source.Options.Duplex);
+    Assert.Equal(new PaperBatch.Core.Layout.PageRange(2, 4), source.Options.Ranges.Single());
+    Assert.True(source.InvalidatedIds.Contains("a"));
 }
 
 static void CorruptSavedRecipesRemainVisibleAsAnError()
@@ -556,6 +580,28 @@ sealed class FakePreparedPreviewSource : IFinalPreviewPresentationSource, IPrepa
     public event Action<string>? PreparedArtifactChanged { add { } remove { } }
     public List<string> InvalidatedIds { get; } = [];
     public void RegisterPreparedRun(string queueItemId, PaperBatch.Core.Domain.PreparedRun run) { }
+    public void InvalidatePreparedRun(string queueItemId) => InvalidatedIds.Add(queueItemId);
+    public Task<PreviewSnapshot> GetPreviewAsync(string queueItemId, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new PreviewSnapshot(queueItemId, "Preview", 1, 1));
+}
+
+sealed class FakePreparationSource(IReadOnlyList<QueueItemSnapshot> items) : IQueuePresentationSource,
+    IQueuePreparationPresentationSource, IFinalPreviewPresentationSource, IPreparedArtifactPresentationSource
+{
+    public event Action<string>? PreparedArtifactChanged { add { } remove { } }
+    public bool CanPrepare => true;
+    public PrintSettings? Settings { get; private set; }
+    public PaperBatch.Core.Layout.LayoutOptions? Options { get; private set; }
+    public List<string> InvalidatedIds { get; } = [];
+    public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => items;
+    public Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings,
+        PaperBatch.Core.Layout.LayoutOptions layoutOptions, CancellationToken cancellationToken = default)
+    {
+        Settings = requestedSettings;
+        Options = layoutOptions;
+        return Task.FromResult(new PreparedArtifactResult(null, null, ["test capture"], false));
+    }
+    public void RegisterPreparedRun(string queueItemId, PreparedRun run) { }
     public void InvalidatePreparedRun(string queueItemId) => InvalidatedIds.Add(queueItemId);
     public Task<PreviewSnapshot> GetPreviewAsync(string queueItemId, CancellationToken cancellationToken = default) =>
         Task.FromResult(new PreviewSnapshot(queueItemId, "Preview", 1, 1));

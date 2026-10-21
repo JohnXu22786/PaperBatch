@@ -7,7 +7,9 @@ using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using PaperBatch.Core.Domain;
 using PaperBatch.Core.Intake;
+using PaperBatch.Core.Layout;
 using PaperBatch.Core.Persistence;
+using PaperBatch.Core.Preparation;
 using PaperBatch.Core.Recipes;
 using PaperBatch.Core.Rendering;
 using PaperBatch.Core.Serialization;
@@ -51,23 +53,28 @@ internal static class DesktopComposition
             new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifactStore)),
             new BuiltInImageRendererAdapter(cache, artifactStore)
         ]);
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
         IPdfArtifactPreviewRenderer? previewRenderer = null;
+        PreparedArtifactCoordinator? preparation = null;
         var pdfiumPath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH");
         var pdfiumHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_SHA256");
         if (!string.IsNullOrWhiteSpace(pdfiumPath) && !string.IsNullOrWhiteSpace(pdfiumHash))
-            previewRenderer = new PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
-        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
-        store.Initialize();
+        {
+            var pdfium = new PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
+            previewRenderer = pdfium;
+            preparation = new PreparedArtifactCoordinator(intake, cache, renderer, pdfium, pdfium,
+                new PdfiumPageCompositionAdapter(pdfiumPath, pdfiumHash), artifactStore, store);
+        }
 
-        // Renderer artifacts are available. The desktop composition does not invent print settings
-        // or claim that uninspected interactive PDF content is safe for composition.
-        _ = intake;
-        _ = renderer;
+        // Unsupported formats have no renderer, and there is no print submission backend.
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
-            artifacts: artifactStore, previewRenderer: previewRenderer, runStore: store);
+            artifacts: artifactStore, previewRenderer: previewRenderer, runStore: store, preparation: preparation);
         return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE",
-                "PDF pass-through and supported JPEG/PNG artifact rendering are available. Final preview needs a registered prepared run and explicitly configured PDFium runtime; LibreOffice conversion and production print submission remain unavailable.", false));
+                preparation is null
+                    ? "PDF pass-through and supported JPEG/PNG artifact rendering are available. Preparation and final preview require an explicitly configured PDFium runtime; LibreOffice conversion and production print submission remain unavailable."
+                    : "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Printer capabilities, Office conversion and production print submission remain unavailable.", false));
     }
 }
 
@@ -79,7 +86,8 @@ internal sealed class ProductionPresentationSources :
     IPreparedArtifactPresentationSource,
     IPreflightPresentationSource,
     IHistoryPresentationSource,
-    IRecipeManagementPresentationSource
+    IRecipeManagementPresentationSource,
+    IQueuePreparationPresentationSource
 {
     private readonly SourceIntakeService? _intake;
     private readonly RendererCoordinator _renderer;
@@ -88,9 +96,11 @@ internal sealed class ProductionPresentationSources :
     private readonly RenderArtifactStore? _artifacts;
     private readonly IPdfArtifactPreviewRenderer? _previewRenderer;
     private readonly SqliteRunStore? _runStore;
+    private readonly PreparedArtifactCoordinator? _preparation;
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
     private readonly Dictionary<string, string> _queueLocations = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _preparableQueueItems = new(StringComparer.Ordinal);
 
     public event Action<string>? PreparedArtifactChanged;
     public bool IsRecipeStoreAvailable => _runStore is not null && TemplateReadError is null;
@@ -98,7 +108,7 @@ internal sealed class ProductionPresentationSources :
     public ProductionPresentationSources(SourceIntakeService? intake = null, RendererCoordinator? renderer = null,
         SourceSnapshotCache? cache = null, bool rendererAvailable = false,
         RenderArtifactStore? artifacts = null, IPdfArtifactPreviewRenderer? previewRenderer = null,
-        SqliteRunStore? runStore = null)
+        SqliteRunStore? runStore = null, PreparedArtifactCoordinator? preparation = null)
     {
         _intake = intake;
         _renderer = renderer ?? new RendererCoordinator(Array.Empty<IRendererAdapter>());
@@ -107,6 +117,7 @@ internal sealed class ProductionPresentationSources :
         _artifacts = artifacts;
         _previewRenderer = previewRenderer;
         _runStore = runStore;
+        _preparation = preparation;
     }
 
     public bool IsAvailable => _intake is not null;
@@ -127,22 +138,25 @@ internal sealed class ProductionPresentationSources :
     {
         _queue.RemoveAll(item => string.Equals(item.Id, queueItemId, StringComparison.Ordinal));
         _queueLocations.Remove(queueItemId);
+        _preparableQueueItems.Remove(queueItemId);
     }
 
     public async Task<IReadOnlyList<QueueItemSnapshot>> ImportAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default)
     {
         if (_intake is null) throw new InvalidOperationException("Source intake is not configured.");
-        var inputs = paths.Select(path => new SourceInput(path)).ToArray();
+        var seenPaths = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        var inputs = paths.Select(path => new SourceInput(path, IntentionalCopy: !seenPaths.Add(Path.GetFullPath(path)))).ToArray();
         var prepared = await _intake.PrepareAsync(inputs, cancellationToken: cancellationToken).ConfigureAwait(false);
         try
         {
+            foreach (var existing in _queue) InvalidatePreparedRun(existing.Id);
             foreach (var source in prepared.Items)
             {
                 var id = source.Snapshot?.SnapshotId ?? Guid.NewGuid().ToString("N");
                 var title = Path.GetFileName(source.SourcePath);
                 var findings = source.Diagnostics.Select(diagnostic => new PreflightFindingSnapshot(
                     diagnostic.Code.ToString(), diagnostic.Severity.ToString(), diagnostic.Message)).ToList();
-                var status = source.IsReady ? "Preflight ready · prepared run unavailable" : "Needs attention";
+                var status = source.IsReady ? "Preflight ready · checking renderer" : "Needs attention";
                 var details = source.Snapshot is { } snapshot
                     ? $"{source.Format} · {snapshot.LengthBytes:N0} bytes · SHA-256 {snapshot.Sha256[..12]}…"
                     : source.Format?.ToString() ?? "Source was not captured";
@@ -150,6 +164,15 @@ internal sealed class ProductionPresentationSources :
                 {
                     var result = await Task.Run(() => _renderer.RenderAsync(new RenderRequest(readySnapshot.SnapshotId, format,
                         RendererExecutionContext.BackgroundWorker), TimeSpan.FromMinutes(2), cancellationToken), cancellationToken).ConfigureAwait(false);
+                    if (result.Status == RenderStatus.Succeeded && result.Artifact is not null)
+                    {
+                        status = "Ready to prepare · " + format;
+                        _preparableQueueItems.Add(id);
+                    }
+                    else
+                    {
+                        status = result.Status == RenderStatus.Unsupported ? "Unsupported format" : "Renderer needs attention";
+                    }
                     findings.Add(new PreflightFindingSnapshot("Renderer", result.Status.ToString(),
                         result.Message ?? (result.Artifact is { PageCount: 0 }
                             ? $"PDF artifact {result.Artifact.ArtifactId} persisted; page count is not reported."
@@ -183,9 +206,34 @@ internal sealed class ProductionPresentationSources :
     }
 
     private readonly Dictionary<string, List<PreflightFindingSnapshot>> _findings = new(StringComparer.Ordinal);
+    public bool CanPrepare => _preparation is not null && _queue.Count > 0 &&
+        _queue.All(item => _queueLocations.ContainsKey(item.Id) && _preparableQueueItems.Contains(item.Id));
+
+    public async Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings, LayoutOptions layoutOptions,
+        CancellationToken cancellationToken = default)
+    {
+        if (_preparation is null || _runStore is null || _queue.Count == 0)
+            return new(null, null, ["A trusted PDFium runtime and a nonempty local queue are required before preparation."], false);
+        var now = DateTimeOffset.UtcNow;
+        var seenPaths = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        var paths = _queue.Select(item => _queueLocations.TryGetValue(item.Id, out var path)
+            ? new SourceInput(path, IntentionalCopy: !seenPaths.Add(Path.GetFullPath(path)))
+            : throw new InvalidOperationException("A queue source location is no longer available.")).ToArray();
+        var result = await _preparation.PrepareAsync(paths, requestedSettings, layoutOptions,
+            "desktop-prepare-" + Guid.NewGuid().ToString("N"),
+            new RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true), now, cancellationToken).ConfigureAwait(false);
+        if (result.Run is { } run)
+        {
+            foreach (var item in _queue) RegisterPreparedRun(item.Id, run);
+        }
+        return result;
+    }
+
     public IReadOnlyList<EffectiveSettingSnapshot> GetEffectiveSettings(string queueItemId) =>
         [new("Renderer", _rendererAvailable ? "Partial" : "Unavailable", _rendererAvailable
-            ? "Background PDF pass-through and JPEG/PNG artifact rendering are configured; other formats and prepared-run orchestration are unavailable."
+            ? (_preparation is null
+                ? "Background PDF pass-through and JPEG/PNG artifact rendering are configured; preparation needs the explicitly pinned PDFium runtime."
+                : "Pinned PDFium preparation is configured for supported PDF/JPEG/PNG formats; Office and other unregistered formats remain unsupported.")
             : "No renderer is configured; no setting is treated as effective."),
          new("Printer", "Not selected", "The UI does not choose a default printer or silently substitute one.")];
     public void RegisterPreparedRun(string queueItemId, PreparedRun run)
@@ -318,7 +366,7 @@ internal sealed class ProductionPresentationSources :
             new RecipePrintSettings(defaults.Copies, defaults.ColorMode, defaults.DuplexMode, defaults.Orientation,
                 defaults.ScalingMode, defaults.Media));
         JobRecipeJson.Serialize(recipe);
-        return new JobRecipeSnapshot(recipe.SchemaVersion, recipe.RecipeId, recipe.Name, recipe.Sources, recipe.Settings);
+        return new JobRecipeSnapshot(recipe.SchemaVersion, recipe.RecipeId, recipe.Name, recipe.Sources, recipe.Settings, recipe.Rules);
     }
 
     public void SaveRecipe(JobRecipeSnapshot snapshot)
@@ -328,7 +376,8 @@ internal sealed class ProductionPresentationSources :
         if (existing.Any(item => !string.Equals(item.Recipe.RecipeId, snapshot.RecipeId, StringComparison.Ordinal) &&
             string.Equals(item.Recipe.Name, snapshot.Name, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("A recipe with this name already exists.");
-        _runStore.SaveRecipe(new JobRecipe(snapshot.SchemaVersion, snapshot.RecipeId, snapshot.Name, snapshot.Sources, snapshot.Settings));
+        _runStore.SaveRecipe(new JobRecipe(snapshot.SchemaVersion, snapshot.RecipeId, snapshot.Name, snapshot.Sources, snapshot.Settings)
+            { Rules = snapshot.Rules });
         _ = GetTemplates();
     }
 
@@ -336,7 +385,7 @@ internal sealed class ProductionPresentationSources :
     {
         var recipe = _runStore?.GetRecipes().SingleOrDefault(item => item.Recipe.RecipeId == recipeId)?.Recipe ??
             throw new InvalidOperationException("The selected recipe is no longer available.");
-        return new JobRecipeSnapshot(recipe.SchemaVersion, recipe.RecipeId, recipe.Name, recipe.Sources, recipe.Settings);
+        return new JobRecipeSnapshot(recipe.SchemaVersion, recipe.RecipeId, recipe.Name, recipe.Sources, recipe.Settings, recipe.Rules);
     }
 
     public bool DeleteRecipe(string recipeId) => _runStore?.DeleteRecipe(recipeId) ??

@@ -184,6 +184,7 @@ var tests = new List<(string Name, Action Run)>
     ("unknown outcome can still record user-confirmed paper output", CoreTests.UnknownOutcomeCanStillRecordUserConfirmedPaperOutput),
     ("recipe parser rejects invalid versions and unknown fields", CoreTests.RecipeParserRejectsInvalidVersionsAndUnknownFields),
     ("recipe serialization matches its golden fixture", CoreTests.RecipeSerializationMatchesGoldenFixture),
+    ("recipe setting rules use first match then per-file override", CoreTests.RecipeRulesUseFirstMatchThenPerFileOverrideAndRoundTrip),
     ("IPC envelopes preserve correlation and negotiate capabilities", CoreTests.IpcEnvelopesPreserveCorrelationAndNegotiateCapabilities),
     ("IPC rejects malformed and oversized messages", CoreTests.IpcRejectsMalformedAndOversizedMessages),
     ("source enumeration preserves explicit order and natural folder order", SourceIntakeTests.EnumerationPreservesOrderAndNaturalFolderOrdering),
