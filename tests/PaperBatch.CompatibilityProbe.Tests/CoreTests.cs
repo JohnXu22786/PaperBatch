@@ -655,6 +655,171 @@ internal static class CoreTests
         }));
     }
 
+    internal static void AutoStartingTransportLaunchesAndExitsCoordinatorProcess()
+    {
+        var dataRoot = Path.Combine(Path.GetTempPath(), "PaperBatch-process-host-" + Guid.NewGuid().ToString("N"));
+        var previousEnabled = Environment.GetEnvironmentVariable("PAPERBATCH_TEST_COORDINATOR_HOST");
+        var previousRoot = Environment.GetEnvironmentVariable("PAPERBATCH_TEST_COORDINATOR_ROOT");
+        Environment.SetEnvironmentVariable("PAPERBATCH_TEST_COORDINATOR_HOST", "1");
+        Environment.SetEnvironmentVariable("PAPERBATCH_TEST_COORDINATOR_ROOT", dataRoot);
+        try
+        {
+            var transport = new AutoStartingCoordinatorTransport(new NamedPipeLocalCoordinatorTransport(
+                NamedPipeLocalCoordinatorTransport.CreateCurrentUserPipeName(), connectTimeout: TimeSpan.FromMilliseconds(200)));
+            var request = new IpcRequestEnvelope(1, Guid.NewGuid(), "runtime.status", null, JsonDocument.Parse("{}").RootElement.Clone());
+            var response = transport.SendAsync(request, CancellationToken.None).AsTask().GetAwaiter().GetResult();
+            Assert.True(response.Error is null);
+            Assert.Equal(true, response.Payload!.Value.GetProperty("dryRun").GetBoolean());
+            var unavailable = new NamedPipeLocalCoordinatorTransport(NamedPipeLocalCoordinatorTransport.CreateCurrentUserPipeName(),
+                connectTimeout: TimeSpan.FromMilliseconds(150));
+            var exited = false;
+            for (var attempt = 0; attempt < 40 && !exited; attempt++)
+            {
+                Thread.Sleep(100);
+                try { _ = unavailable.SendAsync(request).AsTask().GetAwaiter().GetResult(); }
+                catch (Exception exception) when (exception is NotSupportedException or IOException) { exited = true; }
+            }
+            Assert.True(exited);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PAPERBATCH_TEST_COORDINATOR_HOST", previousEnabled);
+            Environment.SetEnvironmentVariable("PAPERBATCH_TEST_COORDINATOR_ROOT", previousRoot);
+            if (Directory.Exists(dataRoot)) Directory.Delete(dataRoot, recursive: true);
+        }
+    }
+
+    internal static void CoordinatorHostServesProductionStatusAndUnavailableOperations()
+    {
+        var appName = "PaperBatch-integration-" + Guid.NewGuid().ToString("N");
+        var dataRoot = Path.Combine(Path.GetTempPath(), appName);
+        Directory.CreateDirectory(dataRoot);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var handler = new ProductionCoordinatorRequestHandler(dataRoot);
+        var host = new CoordinatorRuntimeHost(appName, handler);
+        Assert.True(host.IsOwner);
+        var duplicate = new CoordinatorRuntimeHost(appName, new UnavailableCoordinatorRequestHandler());
+        Assert.True(!duplicate.IsOwner);
+        duplicate.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        var run = host.RunAsync(stop.Token);
+        Thread.Sleep(50);
+        var transport = new NamedPipeLocalCoordinatorTransport(NamedPipeLocalCoordinatorTransport.CreateCurrentUserPipeName(appName));
+        var statusRequest = new IpcRequestEnvelope(1, Guid.NewGuid(), "runtime.status", null, JsonDocument.Parse("{}").RootElement.Clone());
+        var status = transport.SendAsync(statusRequest, stop.Token).AsTask().GetAwaiter().GetResult();
+        Assert.True(status.Error is null);
+        Assert.Equal(false, status.Payload!.Value.GetProperty("prepare").GetBoolean());
+        Assert.Equal(false, status.Payload.Value.GetProperty("submit").GetBoolean());
+        var watchRequest = new IpcRequestEnvelope(1, Guid.NewGuid(), "cli.watch", "watch-key", JsonDocument.Parse("{\"arguments\":[\"/tmp/inbox\"]}").RootElement.Clone());
+        var watch = transport.SendAsync(watchRequest, stop.Token).AsTask().GetAwaiter().GetResult();
+        Assert.Equal("unavailable", watch.Error!.Code);
+        var cli = new NamedPipeCliCoordinator(transport);
+        Assert.Throws<NotSupportedException>(() => cli.ExecuteAsync("status", ["missing-job"], stop.Token).AsTask().GetAwaiter().GetResult());
+        var desktopRequest = new IpcRequestEnvelope(1, Guid.NewGuid(), "desktop.prepare", "desktop-prepare-key",
+            JsonDocument.Parse("{\"inputs\":[],\"requestedSettings\":{},\"layoutOptions\":{}}").RootElement.Clone());
+        var desktopResponse = transport.SendAsync(desktopRequest, stop.Token).AsTask().GetAwaiter().GetResult();
+        Assert.Equal("unavailable", desktopResponse.Error!.Code);
+        Assert.Contains("PDFium", desktopResponse.Error.Message);
+        stop.Cancel();
+        Assert.Throws<OperationCanceledException>(() => run.GetAwaiter().GetResult());
+        host.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        var restarted = new CoordinatorRuntimeHost(appName, new UnavailableCoordinatorRequestHandler());
+        Assert.True(restarted.IsOwner);
+        restarted.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        Directory.Delete(dataRoot, recursive: true);
+    }
+
+    internal static void CoordinatorInstanceLeaseAllowsOnlyOneOwner()
+    {
+        var application = "PaperBatch-test-" + Guid.NewGuid().ToString("N");
+        using (var first = CoordinatorInstanceLease.TryAcquire(application) ?? throw new InvalidOperationException("First lease was not acquired."))
+        {
+            Assert.True(CoordinatorInstanceLease.TryAcquire(application) is null);
+        }
+        using var afterExit = CoordinatorInstanceLease.TryAcquire(application);
+        Assert.True(afterExit is not null);
+    }
+
+    internal static void NamedPipeTransportNegotiatesAndPreservesRequestIdentity()
+    {
+        var pipeName = "paperbatch-test-" + Guid.NewGuid().ToString("N");
+        var seen = new System.Collections.Concurrent.ConcurrentBag<(Guid CorrelationId, string? IdempotencyKey)>();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var server = new NamedPipeCoordinatorServer(pipeName, (request, _) =>
+        {
+            seen.Add((request.CorrelationId, request.IdempotencyKey));
+            using var payload = JsonDocument.Parse("{\"accepted\":true}");
+            return ValueTask.FromResult(new IpcResponseEnvelope(1, request.CorrelationId, payload.RootElement.Clone(), null));
+        });
+        var serverTask = server.RunAsync(stop.Token);
+        Thread.Sleep(50);
+        var transport = new NamedPipeLocalCoordinatorTransport(pipeName);
+        using var requestPayload = JsonDocument.Parse("{}");
+        var requests = Enumerable.Range(0, 4).Select(index =>
+        {
+            var key = index < 2 ? "same-retry-key" : "request-" + index;
+            return transport.SendAsync(new IpcRequestEnvelope(1, Guid.NewGuid(), "run.prepare", key, requestPayload.RootElement.Clone()), stop.Token).AsTask();
+        }).ToArray();
+        Task.WhenAll(requests).GetAwaiter().GetResult();
+        Assert.Equal(4, seen.Count);
+        Assert.Equal(2, seen.Count(item => item.IdempotencyKey == "same-retry-key"));
+        foreach (var response in requests.Select(task => task.Result))
+        {
+            Assert.True(response.Error is null);
+            Assert.Equal(true, response.Payload!.Value.GetProperty("accepted").GetBoolean());
+        }
+        stop.Cancel();
+        Assert.Throws<OperationCanceledException>(() => serverTask.GetAwaiter().GetResult());
+        server.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    internal static void NamedPipeRequestDeadlineReturnsTimeoutAndPreservesCancellation()
+    {
+        var pipeName = "paperbatch-timeout-" + Guid.NewGuid().ToString("N");
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var server = new NamedPipeCoordinatorServer(pipeName, async (_, token) =>
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            throw new InvalidOperationException("Unreachable");
+        });
+        var serverTask = server.RunAsync(stop.Token);
+        Thread.Sleep(50);
+        var transport = new NamedPipeLocalCoordinatorTransport(pipeName, requestTimeout: TimeSpan.FromMilliseconds(150));
+        using var payload = JsonDocument.Parse("{}");
+        var request = new IpcRequestEnvelope(1, Guid.NewGuid(), "run.prepare", "timeout-key", payload.RootElement.Clone());
+        Assert.Throws<TimeoutException>(() => transport.SendAsync(request).AsTask().GetAwaiter().GetResult());
+        using var callerCancellation = new CancellationTokenSource();
+        callerCancellation.Cancel();
+        Assert.Throws<OperationCanceledException>(() => transport.SendAsync(request, callerCancellation.Token).AsTask().GetAwaiter().GetResult());
+        stop.Cancel();
+        Assert.Throws<OperationCanceledException>(() => serverTask.GetAwaiter().GetResult());
+        server.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    internal static void NamedPipeServerClosesClientsThatWithholdFrameHeaders()
+    {
+        var pipeName = "paperbatch-stalled-" + Guid.NewGuid().ToString("N");
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var server = new NamedPipeCoordinatorServer(pipeName, (request, _) =>
+        {
+            using var payload = JsonDocument.Parse("{\"accepted\":true}");
+            return ValueTask.FromResult(new IpcResponseEnvelope(1, request.CorrelationId, payload.RootElement.Clone(), null));
+        }, clientFrameTimeout: TimeSpan.FromMilliseconds(100));
+        var serverTask = server.RunAsync(stop.Token);
+        using var stalled = new System.IO.Pipes.NamedPipeClientStream(".", pipeName, System.IO.Pipes.PipeDirection.InOut,
+            System.IO.Pipes.PipeOptions.Asynchronous);
+        stalled.Connect(1000);
+        Thread.Sleep(250);
+        using var requestPayload = JsonDocument.Parse("{}");
+        var response = new NamedPipeLocalCoordinatorTransport(pipeName).SendAsync(
+            new IpcRequestEnvelope(1, Guid.NewGuid(), "run.status", null, requestPayload.RootElement.Clone()), stop.Token)
+            .AsTask().GetAwaiter().GetResult();
+        Assert.True(response.Error is null);
+        Assert.Equal(true, response.Payload!.Value.GetProperty("accepted").GetBoolean());
+        stop.Cancel();
+        Assert.Throws<OperationCanceledException>(() => serverTask.GetAwaiter().GetResult());
+        server.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
     internal static void IpcEnvelopesPreserveCorrelationAndNegotiateCapabilities()
     {
         using var payloadDocument = JsonDocument.Parse("{\"runId\":\"run-1\"}");

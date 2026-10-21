@@ -1,3 +1,4 @@
+using PaperBatch.Core.Ipc;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Formats.Asn1;
@@ -6,6 +7,18 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.Win32.SafeHandles;
 using PaperBatch.CompatibilityProbe;
+
+if (CoordinatorProcessLauncher.IsHostMode(args))
+{
+    using var shutdown = new CancellationTokenSource();
+    if (Environment.GetEnvironmentVariable("PAPERBATCH_TEST_COORDINATOR_HOST") == "1") shutdown.CancelAfter(TimeSpan.FromSeconds(1));
+    await using var host = new CoordinatorRuntimeHost("PaperBatch", new ProductionCoordinatorRequestHandler(
+        Environment.GetEnvironmentVariable("PAPERBATCH_TEST_COORDINATOR_ROOT")));
+    if (!host.IsOwner) return 0;
+    try { await host.RunAsync(shutdown.Token); }
+    catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { }
+    return 0;
+}
 
 if (args.Length >= 2 && args[0] == "--renderer-worker-child")
 {
@@ -129,6 +142,8 @@ var tests = new List<(string Name, Action Run)>
     ("concurrent watch scans serialize observation updates", WatchFolderTests.ConcurrentScansSerializeObservationUpdates),
     ("bare recipe command returns usage error", WatchFolderTests.BareRecipeCommandReturnsUsageError),
     ("default diagnostics omit sensitive fields", WatchFolderTests.DiagnosticsRedactSensitiveFields),
+    ("CLI coordinator retries retain idempotency keys", WatchFolderTests.CliCoordinatorUsesStableIdempotencyKeys),
+    ("CLI prepare idempotency keys track recipe content", WatchFolderTests.CliPrepareIdempotencyTracksRecipeContent),
     ("CLI reports coordinator commands as unavailable without claiming execution", WatchFolderTests.CliDoesNotPretendToSubmit),
     ("CLI validates recipe compatibility using the core parser", WatchFolderTests.CliValidatesRecipes),
     ("CLI reports redacted permission errors for recipe import and export", WatchFolderTests.CliReportsPermissionDeniedForRecipeImportAndExport),
@@ -198,6 +213,12 @@ var tests = new List<(string Name, Action Run)>
     ("recipe parser rejects invalid versions and unknown fields", CoreTests.RecipeParserRejectsInvalidVersionsAndUnknownFields),
     ("recipe serialization matches its golden fixture", CoreTests.RecipeSerializationMatchesGoldenFixture),
     ("recipe setting rules use first match then per-file override", CoreTests.RecipeRulesUseFirstMatchThenPerFileOverrideAndRoundTrip),
+    ("auto-starting transport launches and observes host exit", CoreTests.AutoStartingTransportLaunchesAndExitsCoordinatorProcess),
+    ("coordinator host serves production capabilities and exits cleanly", CoreTests.CoordinatorHostServesProductionStatusAndUnavailableOperations),
+    ("coordinator instance lease prevents duplicate owners", CoreTests.CoordinatorInstanceLeaseAllowsOnlyOneOwner),
+    ("named pipe transport negotiates capabilities and preserves request identity", CoreTests.NamedPipeTransportNegotiatesAndPreservesRequestIdentity),
+    ("named pipe request deadlines report timeout and preserve cancellation", CoreTests.NamedPipeRequestDeadlineReturnsTimeoutAndPreservesCancellation),
+    ("named pipe server releases slots for stalled frame clients", CoreTests.NamedPipeServerClosesClientsThatWithholdFrameHeaders),
     ("IPC envelopes preserve correlation and negotiate capabilities", CoreTests.IpcEnvelopesPreserveCorrelationAndNegotiateCapabilities),
     ("IPC rejects malformed and oversized messages", CoreTests.IpcRejectsMalformedAndOversizedMessages),
     ("source enumeration preserves explicit order and natural folder order", SourceIntakeTests.EnumerationPreservesOrderAndNaturalFolderOrdering),

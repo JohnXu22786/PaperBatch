@@ -3,12 +3,72 @@ using System.Security.Cryptography;
 using System.Text;
 using PaperBatch.Core.Recipes;
 using PaperBatch.Core.Watch;
+using PaperBatch.Core.Ipc;
 
+if (CoordinatorProcessLauncher.IsHostMode(args))
+{
+    await using var host = new CoordinatorRuntimeHost("PaperBatch", new ProductionCoordinatorRequestHandler());
+    if (!host.IsOwner) return 0;
+    await host.RunAsync();
+    return 0;
+}
 return await PaperBatchCli.ExecuteAsync(args, Console.Out, Console.Error);
 
 public interface ICliCoordinator
 {
     ValueTask<string> ExecuteAsync(string operation, IReadOnlyList<string> arguments, CancellationToken cancellationToken = default);
+    ValueTask<string> GetCapabilitiesAsync(CancellationToken cancellationToken = default);
+}
+
+public sealed class NamedPipeCliCoordinator : ICliCoordinator
+{
+    private readonly ILocalCoordinatorTransport _transport;
+    public NamedPipeCliCoordinator(ILocalCoordinatorTransport? transport = null) =>
+        _transport = transport ?? new AutoStartingCoordinatorTransport();
+
+    public async ValueTask<string> ExecuteAsync(string operation, IReadOnlyList<string> arguments, CancellationToken cancellationToken = default)
+    {
+        string? recipeSha256 = operation == "prepare" && arguments.Count == 1 ? ComputeRecipeDigest(arguments[0]) : null;
+        var payload = JsonSerializer.SerializeToElement(recipeSha256 is null
+            ? (object)new { arguments }
+            : new { arguments, recipeSha256 });
+        var idempotencyKey = CoordinatorRequestKeys.Create(operation, arguments, recipeSha256);
+        var request = new IpcRequestEnvelope(IpcJson.CurrentProtocolVersion, Guid.NewGuid(), "cli." + operation, idempotencyKey, payload);
+        var response = await _transport.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        if (response.Error is { } error)
+        {
+            if (error.Code == "unavailable") throw new NotSupportedException(error.Message);
+            throw new IOException($"Coordinator request failed ({error.Code}): {error.Message}");
+        }
+        return response.Payload!.Value.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.String
+            ? result.GetString()!
+            : response.Payload.Value.GetRawText();
+    }
+
+    private static string ComputeRecipeDigest(string path)
+    {
+        using var stream = new FileStream(Path.GetFullPath(path), FileMode.Open, FileAccess.Read, FileShare.Read,
+            16 * 1024, FileOptions.SequentialScan);
+        var maximumBytes = JobRecipeJson.MaximumRecipeBytes;
+        if (stream.Length > maximumBytes) throw new InvalidDataException("Recipe exceeds the size limit.");
+        using var buffer = new MemoryStream();
+        var chunk = new byte[Math.Min(16 * 1024, maximumBytes + 1)];
+        int read;
+        while ((read = stream.Read(chunk, 0, chunk.Length)) > 0)
+        {
+            if (buffer.Length + read > maximumBytes) throw new InvalidDataException("Recipe exceeds the size limit.");
+            buffer.Write(chunk, 0, read);
+        }
+        return Convert.ToHexString(SHA256.HashData(buffer.GetBuffer().AsSpan(0, checked((int)buffer.Length)))).ToLowerInvariant();
+    }
+
+    public async ValueTask<string> GetCapabilitiesAsync(CancellationToken cancellationToken = default)
+    {
+        var response = await _transport.SendAsync(new IpcRequestEnvelope(IpcJson.CurrentProtocolVersion, Guid.NewGuid(),
+            "runtime.status", null, JsonSerializer.SerializeToElement(new { })), cancellationToken).ConfigureAwait(false);
+        if (response.Error is { } error) throw new IOException($"Coordinator capability query failed ({error.Code}): {error.Message}");
+        return response.Payload!.Value.GetRawText();
+    }
 }
 
 public sealed class PaperBatchCli
@@ -32,7 +92,7 @@ public sealed class PaperBatchCli
 
     public static async Task<int> ExecuteAsync(string[] args, TextWriter output, TextWriter error, ICliCoordinator? coordinator = null, PaperBatchCli? cli = null)
     {
-        cli ??= new PaperBatchCli(coordinator);
+        cli ??= new PaperBatchCli(coordinator ?? new NamedPipeCliCoordinator());
         try
         {
             var result = await cli.ExecuteAsync(args);
@@ -49,7 +109,7 @@ public sealed class PaperBatchCli
             await error.WriteLineAsync(JsonSerializer.Serialize(new { error = "permission_denied", message = "The requested file operation is not permitted." }));
             return 2;
         }
-        catch (Exception exception) when (exception is ArgumentException or IOException or JsonException or InvalidDataException)
+        catch (Exception exception) when (exception is ArgumentException or IOException or JsonException or InvalidDataException or InvalidOperationException or TimeoutException)
         {
             await error.WriteLineAsync(exception.Message);
             return 2;
@@ -61,7 +121,12 @@ public sealed class PaperBatchCli
         ArgumentNullException.ThrowIfNull(args);
         if (args.Count == 0 || args[0] is "help" or "--help" or "-h") return Usage;
         var command = args[0];
-        if (command == "doctor") return "PaperBatch CLI core is available. No local coordinator transport is configured; dry-run/prepare/submit/status/cancel/watch are unavailable.";
+        if (command == "doctor")
+        {
+            if (_coordinator is null) throw new NotSupportedException("No local coordinator transport is configured.");
+            var capabilities = JsonDocument.Parse(await _coordinator.GetCapabilitiesAsync(cancellationToken));
+            return JsonSerializer.Serialize(new { cli = "available", coordinator = "connected", capabilities = capabilities.RootElement.Clone() });
+        }
         if (command == "diagnostics")
         {
             if (args.Count > 2 || (args.Count == 2 && args[1] != "--include-sensitive"))
