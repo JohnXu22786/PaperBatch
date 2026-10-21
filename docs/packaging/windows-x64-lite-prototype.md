@@ -12,8 +12,9 @@ application files, the AGPL-3.0-only license, dependency license inventories,
 .NET runtime third-party notices, package limitations, and
 `package-manifest.json`. The manifest identifies the source revision and both
 locked dependency files,
-and records SHA-256 and size for every file in the package directory except
-the manifest itself. The archive hash is printed after creation. CI builds
+and records SHA-256 and size for each payload file before the ZIP is created.
+The ZIP and manifest are excluded from that file list; the archive has a
+separate `.zip.sha256` sidecar, which CI verifies against the ZIP bytes. CI builds
 this package on a hosted Windows runner, verifies every manifest digest, and
 keeps the unsigned development artifact for 14 days. Builds are from locked
 NuGet dependencies with deterministic .NET compilation settings; the ZIP
