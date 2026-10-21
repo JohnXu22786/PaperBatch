@@ -498,7 +498,7 @@ static void RecipeDuplexRequestChangesCompiledLayout()
         sources.ImportAsync([firstPath, firstPath]).GetAwaiter().GetResult();
         var recipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "r", "duplex",
             [new RecipeSource("first", firstPath) { Override = new RecipeSettingsOverride(DuplexMode: DuplexMode.LongEdge) },
-             new RecipeSource("second", firstPath) { Override = new RecipeSettingsOverride(Copies: 2) }],
+             new RecipeSource("second", firstPath) { Override = new RecipeSettingsOverride(Copies: 2, NUp: 1) }],
             new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter"))
         {
             Rules = [new RecipeSettingRule("duplex-rule", "*.pdf", "pdf", new RecipeSettingsOverride(DuplexMode: DuplexMode.LongEdge))]
@@ -508,7 +508,7 @@ static void RecipeDuplexRequestChangesCompiledLayout()
         {
             sources.PrepareQueueAsync(
                 new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit),
-                new LayoutOptions(), recipe).GetAwaiter().GetResult();
+                new LayoutOptions(NUp: NUpMode.Four), recipe).GetAwaiter().GetResult();
             throw new InvalidOperationException("The recording composer should stop after capturing the layout.");
         }
         catch (LayoutCapturedException) { }
@@ -518,8 +518,11 @@ static void RecipeDuplexRequestChangesCompiledLayout()
         Assert.Equal(0, store.GetRecentRuns().Length);
         Assert.True(sources.ResolutionSummaries[0].Contains("duplex mode/双面模式=LongEdge (file override/单文件覆盖)", StringComparison.Ordinal));
         Assert.True(sources.ResolutionSummaries[1].Contains("copies/份数=2 (file override/单文件覆盖)", StringComparison.Ordinal));
+        Assert.True(sources.ResolutionSummaries[1].Contains("pages per sheet/每张页数=1 (file override/单文件覆盖)", StringComparison.Ordinal));
         Assert.True(sources.ResolutionSummaries[1].Contains("duplex mode/双面模式=LongEdge (rule/规则 duplex-rule)", StringComparison.Ordinal));
         Assert.True(sources.ResolutionSummaries[0].Contains("orientation/方向=Auto (batch/recipe defaults/批次或配方默认值)", StringComparison.Ordinal));
+        Assert.Equal(50d, composer.CompiledPlacements[0].Bounds!.WidthPoints);
+        Assert.True(composer.CompiledPlacements.Skip(1).All(placement => placement.Bounds!.WidthPoints == 100d));
         var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
         Assert.True(viewModel.PreparationSettingsNote.Contains("not validated", StringComparison.OrdinalIgnoreCase));
@@ -803,11 +806,14 @@ sealed class LayoutCaptureComposer : IPageCompositionAdapter
 {
     public int CompiledPageCount { get; private set; }
     public IReadOnlyList<PageSide> CompiledSides { get; private set; } = [];
+    public IReadOnlyList<(string ItemId, PageRectangle? Bounds)> CompiledPlacements { get; private set; } = [];
     public Task ComposePdfAsync(LayoutCompilation compilation, IEnumerable<PdfCompositionSource> sources,
         Stream destination, CancellationToken cancellationToken = default)
     {
         CompiledPageCount = compilation.Pages.Length;
         CompiledSides = compilation.Pages.Select(page => page.Side).ToArray();
+        CompiledPlacements = compilation.Pages.SelectMany(page => page.Placements)
+            .Select(placement => (placement.ItemId, placement.TargetBounds)).ToArray();
         throw new LayoutCapturedException();
     }
 }

@@ -288,7 +288,7 @@ internal sealed class ProductionPresentationSources :
                 sourceSettings.Add(new PrintSettings(item.Values.Copies, item.Values.ColorMode, item.Values.DuplexMode,
                     item.Values.Media, item.Values.Orientation, item.Values.ScalingMode, item.Values.PrinterId, item.Values.TrayId));
                 documentSettings.Add(new LayoutDocumentSettings(item.Values.Copies,
-                    item.NUp switch { 2 => NUpMode.Two, 4 => NUpMode.Four, _ => null },
+                    item.NUp switch { 1 => NUpMode.One, 2 => NUpMode.Two, 4 => NUpMode.Four, _ => null },
                     item.Values.ScalingMode == ScalingMode.ActualSize ? FitMode.ActualSize : FitMode.ShrinkToFit,
                     size, item.PageRange is null ? default : ParseRecipeRange(item.PageRange)));
             }
