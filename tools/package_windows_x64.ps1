@@ -29,7 +29,10 @@ if ($LASTEXITCODE -ne 0) { throw "dotnet restore failed with exit code $LASTEXIT
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
 
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $outputPath 'LICENSE')
-Copy-Item -LiteralPath (Join-Path $repoRoot 'docs/dependencies/desktop-ui.md') -Destination (Join-Path $outputPath 'THIRD-PARTY-NOTICES.md')
+Copy-Item -LiteralPath (Join-Path $repoRoot 'docs/dependencies/desktop-ui.md') -Destination (Join-Path $outputPath 'THIRD-PARTY-UI-NOTICES.md')
+Copy-Item -LiteralPath (Join-Path $repoRoot 'docs/dependencies/core-runtime.md') -Destination (Join-Path $outputPath 'THIRD-PARTY-CORE-NOTICES.md')
+if (-not $env:DOTNET_ROOT) { throw 'DOTNET_ROOT is required to locate the SDK third-party notices.' }
+Copy-Item -LiteralPath (Join-Path $env:DOTNET_ROOT 'ThirdPartyNotices.txt') -Destination (Join-Path $outputPath 'DOTNET-THIRD-PARTY-NOTICES.txt')
 @'
 PaperBatch Windows x64 lite packaging prototype
 
@@ -43,7 +46,8 @@ has no production print backend.
 
 The application and source are licensed under AGPL-3.0-only; see LICENSE.
 Third-party dependency versions and license evidence are in
-THIRD-PARTY-NOTICES.md. Package provenance and per-file SHA-256 values are in
+THIRD-PARTY-UI-NOTICES.md, THIRD-PARTY-CORE-NOTICES.md, and
+DOTNET-THIRD-PARTY-NOTICES.txt. Package provenance and per-file SHA-256 values are in
 package-manifest.json. This unsigned development artifact is not a release.
 '@ | Set-Content -LiteralPath (Join-Path $outputPath 'README-package.txt') -Encoding utf8
 
@@ -55,8 +59,15 @@ $files = Get-ChildItem -LiteralPath $outputPath -File -Recurse |
         sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     }
 }
-$lockPath = Join-Path $repoRoot 'src/PaperBatch.Desktop/packages.lock.json'
-$lockHash = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$lockFiles = @(
+    'src/PaperBatch.Desktop/packages.lock.json',
+    'src/PaperBatch.Core/packages.lock.json'
+) | ForEach-Object {
+    [ordered]@{
+        path = $_
+        sha256 = (Get-FileHash -LiteralPath (Join-Path $repoRoot $_) -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+}
 $revision = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $revision) { throw 'Could not determine source revision.' }
 $manifest = [ordered]@{
@@ -67,8 +78,7 @@ $manifest = [ordered]@{
     configuration = $Configuration
     selfContained = $true
     runtimeIdentifier = 'win-x64'
-    desktopLockFile = 'src/PaperBatch.Desktop/packages.lock.json'
-    desktopLockFileSha256 = $lockHash
+    dependencyLockFiles = @($lockFiles)
     license = 'AGPL-3.0-only'
     signed = $false
     excludedRuntimes = @('LibreOffice', 'Microsoft Office', 'WPS Office', 'PDFium', 'printer drivers', 'fonts')
