@@ -109,6 +109,21 @@ var tests = new List<(string Name, Action Run)>
     ("explicit PDFium paths distinguish absent from unreadable", PdfiumPathStatusDistinguishesMissingFromUnreadable),
     ("unrelated soffice candidate cannot satisfy LibreOffice evidence", UnrelatedSofficeCandidateCannotSatisfyLibreOfficeEvidence),
     ("print simulation is deterministic and labeled", PrintSimulationIsDeterministic),
+    ("Windows hosted-runner job submission is explicitly unavailable when no safe queue is approved", WindowsPrintSubmissionWithoutApprovedQueueIsUnavailable),
+    ("watch scan ignores temporary files and links", WatchFolderTests.ScanIgnoresTemporaryFilesAndLinks),
+    ("watch readiness requires two stable observations", WatchFolderTests.ReadinessRequiresTwoMatchingObservations),
+    ("watch idempotency keys survive restarts and change by generation", WatchFolderTests.IdempotencyKeyIsStableAcrossRestartsAndChangesOnGeneration),
+    ("watch debouncer coalesces events and requires later scan", WatchFolderTests.DebouncerCoalescesHints),
+    ("watch processor only auto-submits supported trusted document types", WatchFolderTests.ProcessorRequiresReviewForOffice),
+    ("watch rejects a parent directory symlink swap", WatchFolderTests.ParentDirectoryLinkSwapFailsClosed),
+    ("watch rejects a replaced root directory", WatchFolderTests.ReplacedWatchRootFailsClosed),
+    ("Linux watch rejects FIFO source candidates", WatchFolderTests.LinuxWatchRejectsFifoCandidates),
+    ("concurrent watch scans serialize observation updates", WatchFolderTests.ConcurrentScansSerializeObservationUpdates),
+    ("bare recipe command returns usage error", WatchFolderTests.BareRecipeCommandReturnsUsageError),
+    ("default diagnostics omit sensitive fields", WatchFolderTests.DiagnosticsRedactSensitiveFields),
+    ("CLI reports coordinator commands as unavailable without claiming execution", WatchFolderTests.CliDoesNotPretendToSubmit),
+    ("CLI validates recipe compatibility using the core parser", WatchFolderTests.CliValidatesRecipes),
+    ("CLI reports redacted permission errors for recipe import and export", WatchFolderTests.CliReportsPermissionDeniedForRecipeImportAndExport),
     ("prepared-run invariants reject invalid hashes and copy collections", CoreTests.PreparedRunInvariantsRejectInvalidHashesAndCopyCollections),
     ("prepared-run validates renderer media type syntax", CoreTests.PreparedRunValidatesRendererMediaTypeSyntax),
     ("layout rejects empty inputs and invalid ranges", LayoutTests.EmptyAndInvalidRangesAreDiagnostics),
@@ -376,7 +391,7 @@ static void MissingNativePlatformEvidenceIsUnavailable()
     }
     else
     {
-        Assert.Equal(EvidenceStatus.NotRun, printing.GdiJobId.Status);
+        Assert.Equal(EvidenceStatus.Unavailable, printing.GdiJobId.Status);
         Assert.Equal(EvidenceStatus.NotRun, printing.PhysicalDeviceOutput.Status);
     }
 }
@@ -1861,6 +1876,27 @@ static void PrintSimulationIsDeterministic()
     Assert.Equal(EvidenceStatus.Verified, first.JobIdEvidence.Status);
     Assert.Equal("SIM-0001", first.Steps[0].JobId);
     Assert.True(first.Steps.SequenceEqual(second.Steps));
+}
+
+static void WindowsPrintSubmissionWithoutApprovedQueueIsUnavailable()
+{
+    var evidence = WindowsPrintProbe.NoSafeQueueSubmissionEvidence();
+
+    Assert.Equal(EvidenceStatus.Unavailable, evidence.Status);
+    Assert.Equal(EvidenceSource.Native, evidence.Source);
+    Assert.Contains("No test page was submitted", evidence.Limitation ?? string.Empty);
+    Assert.Contains("GDI job-ID behavior", G1GateEvaluator.Evaluate(new G1Evidence(
+        ProbeEvidence.Verified(EvidenceSource.Native, "fixture", "verified"),
+        ProbeEvidence.Verified(EvidenceSource.Native, "fixture", "verified"),
+        ProbeEvidence.Verified(EvidenceSource.Native, "fixture", "verified"),
+        ProbeEvidence.Verified(EvidenceSource.Native, "fixture", "verified"),
+        ProbeEvidence.Verified(EvidenceSource.Native, "fixture", "verified"),
+        ProbeEvidence.Verified(EvidenceSource.Native, "fixture", "verified"),
+        ProbeEvidence.Verified(EvidenceSource.Native, "fixture", "verified"),
+        ProbeEvidence.Verified(EvidenceSource.Native, "fixture", "verified"),
+        ProbeEvidence.Verified(EvidenceSource.Native, "fixture", "verified"),
+        evidence,
+        ProbeEvidence.Unavailable(EvidenceSource.Native, "physical-device output confirmation", "No physical device was used."))).MissingRequirements);
 }
 
 static byte[] CreatePeImage(params string[] exports)
