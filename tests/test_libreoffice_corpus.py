@@ -127,6 +127,7 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertEqual(report["counts"]["compatibilityEvidenceCount"], 0)
         self.assertEqual(report["evidenceGates"], {"G1": "open", "G3": "open", "G4": "open", "U8NativeDeviceCleanPc": "open"})
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "corpus conversion requires the Linux seccomp sandbox")
     def test_batch_continues_after_one_file_failure_with_separate_profiles(self):
         with tempfile.TemporaryDirectory() as directory:
             corpus = Path(directory) / "corpus"
@@ -175,6 +176,7 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertEqual(len(set(temporary_directories)), 2)
         self.assertTrue(all(path.name == "intermediate" for path in temporary_directories))
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "corpus conversion requires the Linux seccomp sandbox")
     def test_exhausted_batch_budget_does_not_launch_version_probe(self):
         with tempfile.TemporaryDirectory() as directory:
             corpus = Path(directory) / "corpus"
@@ -203,6 +205,11 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         invoke.assert_not_called()
         self.assertEqual(exit_code, 1)
         self.assertEqual(report["results"][0]["status"], "failed")
+
+    def test_runner_fails_closed_with_explicit_unsupported_platform_error(self):
+        with mock.patch.object(run_libreoffice_corpus.sys, "platform", "win32"):
+            with self.assertRaisesRegex(ValueError, "requires Linux for its no-network process sandbox"):
+                run_libreoffice_corpus.run_corpus("unused", "a" * 64, 60, 900, Path("."))
 
     def test_manifest_provenance_is_recorded_without_pdf_byte_stability_claim(self):
         with tempfile.TemporaryDirectory() as directory:
