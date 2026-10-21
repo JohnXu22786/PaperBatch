@@ -364,7 +364,7 @@ static void CorruptSavedRecipesRemainVisibleAsAnError()
         store.Initialize();
         store.SaveRecipe(new JobRecipe(1, "recipe-corrupt", "Saved packet", [new RecipeSource("source-1", "/tmp/a.pdf")],
             new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter")));
-        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(root, "runs.db")}"))
+        using (var connection = CreateUnpooledSqliteConnection(Path.Combine(root, "runs.db")))
         {
             connection.Open();
             using var command = connection.CreateCommand();
@@ -381,7 +381,7 @@ static void CorruptSavedRecipesRemainVisibleAsAnError()
         store.DeleteRecipe("recipe-corrupt");
         store.SaveRecipe(new JobRecipe(1, "recipe-bad-time", "Bad timestamp", [new RecipeSource("source-2", "/tmp/b.pdf")],
             new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter")));
-        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(root, "runs.db")}"))
+        using (var connection = CreateUnpooledSqliteConnection(Path.Combine(root, "runs.db")))
         {
             connection.Open();
             using var command = connection.CreateCommand();
@@ -417,7 +417,7 @@ static void CorruptSavedHistoryRemainsVisibleAsAnError()
         store.CreateRun(run, "request-corrupt", new RetentionMetadata(now.AddDays(30), true));
         store.SaveRecipe(new JobRecipe(1, "recipe-survives", "Valid recipe", [new RecipeSource("source", "/tmp/a.pdf")],
             new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter")));
-        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(root, "runs.db")}"))
+        using (var connection = CreateUnpooledSqliteConnection(Path.Combine(root, "runs.db")))
         {
             connection.Open();
             using var command = connection.CreateCommand();
@@ -462,6 +462,13 @@ static void PresentationAssemblyReferencesCoreWithoutNativeImports()
         .ToArray();
     Assert.Empty(nativeImports);
 }
+
+static Microsoft.Data.Sqlite.SqliteConnection CreateUnpooledSqliteConnection(string databasePath) =>
+    new(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+    {
+        DataSource = databasePath,
+        Pooling = false
+    }.ToString());
 
 static DesktopShellViewModel CreateViewModel(
     IQueuePresentationSource queueSource,
