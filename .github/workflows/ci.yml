@@ -143,11 +143,15 @@ jobs:
             "$lo_debs"/libobasis26.2-ooofonts_*.deb \
             "$lo_debs"/libobasis26.2-images_*.deb \
             "$lo_debs"/libobasis26.2-writer_*.deb \
+            "$lo_debs"/libobasis26.2-calc_*.deb \
+            "$lo_debs"/libobasis26.2-impress_*.deb \
             "$lo_debs"/libobasis26.2-base_*.deb \
             "$lo_debs"/libobasis26.2-en-us_*.deb \
             "$lo_debs"/libreoffice26.2_*.deb \
             "$lo_debs"/libreoffice26.2-ure_*.deb \
             "$lo_debs"/libreoffice26.2-writer_*.deb \
+            "$lo_debs"/libreoffice26.2-calc_*.deb \
+            "$lo_debs"/libreoffice26.2-impress_*.deb \
             "$lo_debs"/libreoffice26.2-base_*.deb \
             "$lo_debs"/libreoffice26.2-en-us_*.deb
           # GitHub's hosted runner exposes /opt as world-writable; keep the

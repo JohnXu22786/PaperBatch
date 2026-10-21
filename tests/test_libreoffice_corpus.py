@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import platform
 import shutil
 import zipfile
@@ -23,6 +24,57 @@ CORPUS_DIR = REPOSITORY_ROOT / "tests" / "fixtures" / "synthetic_documents"
 
 
 class LibreOfficeCorpusTests(unittest.TestCase):
+    @unittest.skipUnless(
+        sys.platform.startswith("linux")
+        and os.environ.get("PAPERBATCH_REQUIRE_LIBREOFFICE_TEST") == "1"
+        and os.environ.get("PAPERBATCH_LO_ENGINE_PATH")
+        and os.environ.get("PAPERBATCH_LO_ENGINE_SHA256"),
+        "requires the pinned Linux LibreOffice CI runtime",
+    )
+    def test_pinned_libreoffice_accepts_generated_xlsx_and_pptx(self):
+        manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
+        records = [
+            record for record in manifest["fixtures"]
+            if record["id"] in {"xlsx_variant_000", "pptx_variant_000"}
+        ]
+        self.assertEqual({record["format"] for record in records}, {"xlsx", "pptx"})
+
+        with tempfile.TemporaryDirectory() as directory:
+            corpus = Path(directory)
+            isolated_records = []
+            for record in records:
+                relative_path = Path(record["path"])
+                destination = corpus / relative_path.name
+                shutil.copyfile(CORPUS_DIR / relative_path, destination)
+                isolated = dict(record)
+                isolated["path"] = destination.name
+                isolated_records.append(isolated)
+            (corpus / "manifest.json").write_text(
+                json.dumps({
+                    "synthetic": True,
+                    "evidence_class": "synthetic",
+                    "simulation_only": True,
+                    "fixtures": isolated_records,
+                }),
+                encoding="utf-8",
+            )
+
+            report, exit_code = run_libreoffice_corpus.run_corpus(
+                os.environ["PAPERBATCH_LO_ENGINE_PATH"],
+                os.environ["PAPERBATCH_LO_ENGINE_SHA256"],
+                timeout_seconds=60,
+                budget_seconds=180,
+                corpus_dir=corpus,
+            )
+
+        self.assertEqual(exit_code, 0, report["results"])
+        self.assertEqual(report["counts"]["selectedForLibreOffice"], 2)
+        self.assertEqual(report["counts"]["successfulLibreOfficeConversions"], 2)
+        self.assertEqual({result["inputId"].split("_", 1)[0] for result in report["results"]}, {"xlsx", "pptx"})
+        self.assertTrue(all(result["status"] == "converted" for result in report["results"]))
+        self.assertEqual(report["counts"]["humanReviewedFidelity"], 0)
+        self.assertEqual(report["counts"]["compatibilityEvidenceCount"], 0)
+
     def test_selection_is_manifest_bound_and_skips_inert_or_out_of_scope_records(self):
         manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
 
