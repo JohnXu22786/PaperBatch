@@ -654,7 +654,22 @@ def deny_child_network() -> None:
         SockFilter(0x45, 0, 1, 0x40000000),
         SockFilter(0x06, 0, 0, 0x00050000 | errno.EPERM),
     ]
-    blocked_syscalls = (41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 288, 425, 426, 427)
+    instructions.extend((
+        # LibreOffice uses local Unix sockets for its own IPC. Only permit
+        # creating those; Internet and other socket families remain blocked.
+        SockFilter(0x15, 0, 3, 41),  # socket: skip domain check if not matched
+        SockFilter(0x20, 0, 0, 16),   # seccomp_data.args[0] (domain)
+        SockFilter(0x15, 1, 0, 1),    # AF_UNIX may proceed
+        SockFilter(0x06, 0, 0, 0x00050000 | errno.EPERM),
+        SockFilter(0x15, 0, 3, 53),  # socketpair: same family restriction
+        SockFilter(0x20, 0, 0, 16),
+        SockFilter(0x15, 1, 0, 1),
+        SockFilter(0x06, 0, 0, 0x00050000 | errno.EPERM),
+    ))
+    # Socket lifecycle calls remain available for those local sockets. The
+    # subprocess is launched with close_fds and only the pinned engine/runtime
+    # descriptors passed through, so no pre-existing network socket is exposed.
+    blocked_syscalls = (425, 426, 427)
     for syscall_number in blocked_syscalls:
         instructions.append(SockFilter(0x15, 0, 1, syscall_number))
         instructions.append(SockFilter(0x06, 0, 0, 0x00050000 | errno.EPERM))

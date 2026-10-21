@@ -161,6 +161,8 @@ def result_record(
     command: dict[str, Any] | None, reason: str | None = None,
     page_inspection_status: str = "structural-parser", structure_valid: bool = False,
 ) -> dict[str, Any]:
+    if not reason and status == "failed":
+        reason = _conversion_failure_reason(command, output_bytes, structure_valid)
     return {
         "inputId": fixture["id"],
         "inputPath": fixture["path"],
@@ -178,6 +180,33 @@ def result_record(
         "stderr": _bounded_log(command.get("stderr", "")) if command else "",
         "reason": reason,
     }
+
+
+def _conversion_failure_reason(
+    command: dict[str, Any] | None, output_bytes: int | None, structure_valid: bool,
+) -> str:
+    if command is None:
+        return "LibreOffice was not launched; no output PDF was produced."
+    if command.get("timedOut"):
+        process = f"LibreOffice exceeded its per-file timeout after {command.get('durationSeconds')} seconds"
+    else:
+        exit_code = command.get("exitCode")
+        if isinstance(exit_code, int) and exit_code < 0:
+            try:
+                signal_name = probe.signal.Signals(-exit_code).name
+            except ValueError:
+                signal_name = f"signal {-exit_code}"
+            process = f"LibreOffice terminated by {signal_name}"
+        elif exit_code is None:
+            process = "LibreOffice did not report an exit status"
+        else:
+            process = f"LibreOffice exited with code {exit_code} after {command.get('durationSeconds')} seconds"
+    output = "no output PDF was produced" if output_bytes is None else f"output PDF was {output_bytes} bytes"
+    if output_bytes is not None and not structure_valid:
+        output += " but failed PDF structure validation"
+    empty_logs = [name for name in ("stdout", "stderr") if not command.get(name)]
+    details = f"; {', '.join(empty_logs)} empty" if empty_logs else ""
+    return f"{process}; {output}{details}."
 
 
 def _bounded_log(value: str) -> str:
@@ -341,7 +370,7 @@ def run_corpus(engine_binary: str, expected_engine_sha256: str, timeout_seconds:
                         page_count, pdfium_status = _pdfium_page_count(pdf)
                     success = (not command.get("timedOut") and command.get("exitCode") == 0
                                and command.get("identityVerified") and structure_valid and header and output_hash)
-                    reason = None if success else ("LibreOffice conversion failed, timed out, changed identity, or produced an invalid/bounded PDF.")
+                    reason = None if success else _conversion_failure_reason(command, size, structure_valid)
                     results.append(result_record(fixture, status="converted" if success else "failed",
                         input_sha256=input_sha256, output_bytes=size, output_sha256=output_hash,
                         page_count=page_count, command=command, reason=reason, page_inspection_status=pdfium_status,

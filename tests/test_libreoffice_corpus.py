@@ -56,6 +56,25 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("Operation not permitted", result.stderr)
 
+    @unittest.skipUnless(sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}, "requires Linux x86_64 seccomp")
+    def test_child_process_can_use_local_ipc_but_not_network_sockets(self):
+        code = (
+            "import errno, socket, sys\n"
+            "local=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); local.close()\n"
+            "pair=socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM); [s.close() for s in pair]\n"
+            "try:\n    socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+            "except OSError as error:\n    sys.exit(0 if error.errno == errno.EPERM else 2)\n"
+            "sys.exit(1)\n"
+        )
+        result = run_libreoffice_corpus.probe.run_bounded_process(
+            [sys.executable, "-c", code],
+            timeout_seconds=5,
+            max_log_chars=512,
+            preexec_fn=run_libreoffice_corpus.probe.deny_child_network,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
     @unittest.skipUnless(sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}, "requires Linux x86_64 seccomp")
     def test_child_process_cannot_use_x32_network_syscall_numbers(self):
@@ -228,6 +247,22 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertEqual(result["outputPdfSha256"], "b" * 64)
         self.assertEqual(result["pageInspection"]["pageCount"], 1)
         self.assertNotIn("expectedOutputSha256", result)
+
+    def test_failed_conversion_report_explains_empty_process_diagnostics(self):
+        fixture = {"id": "docx_variant_000", "path": "variants/docx_000.docx", "sha256": "a" * 64, "size_bytes": 123}
+        result = run_libreoffice_corpus.result_record(
+            fixture,
+            status="failed",
+            input_sha256="a" * 64,
+            output_bytes=None,
+            output_sha256=None,
+            page_count=None,
+            command={"exitCode": 1, "timedOut": False, "durationSeconds": 0.36, "stdout": "", "stderr": ""},
+        )
+
+        self.assertIn("exited with code 1", result["reason"])
+        self.assertIn("no output PDF was produced", result["reason"])
+        self.assertIn("stdout, stderr empty", result["reason"])
 
 
 if __name__ == "__main__":
