@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import zipfile
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -143,6 +144,105 @@ def _pptx_slide(text: str) -> bytes:
         + "</a:t></a:r><a:endParaRPr lang=\"en-US\"/></a:p></p:txBody></p:sp>"
         "</p:spTree></p:cSld></p:sld>"
     )
+
+
+def _repackage(package_bytes: bytes, replacements: dict[str, bytes]) -> bytes:
+    from io import BytesIO
+
+    with zipfile.ZipFile(BytesIO(package_bytes)) as source:
+        parts = [(name, replacements.get(name, source.read(name))) for name in source.namelist()]
+    return _zip_package(parts)
+
+
+def _build_multilingual_docx() -> bytes:
+    parts = dict(_docx_parts())
+    multilingual = "English | Ελληνικά | 日本語 | العربية | हिन्दी | עברית | 한국어 | Español"
+    document = _xml(
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+        f'<w:p><w:r><w:rPr><w:rFonts w:ascii="Liberation Sans"/></w:rPr><w:t>{multilingual}</w:t></w:r></w:p>'
+        '<w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>'
+        '<w:sdt><w:sdtPr><w:checkBox/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Form marker</w:t></w:r></w:p></w:sdtContent></w:sdt>'
+        '<w:sectPr/></w:body></w:document>'
+    )
+    parts["word/document.xml"] = document
+    return _zip_package(list(parts.items()))
+
+
+def _build_annotated_docx() -> bytes:
+    parts = dict(_docx_parts())
+    content_types = parts["[Content_Types].xml"].decode("utf-8").replace(
+        "</Types>",
+        '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>'
+        '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/></Types>',
+    )
+    # Document-level relationships are required for comment and footnote parts.
+    doc_rels = _xml(
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>'
+        '<Relationship Id="rIdFootnotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>'
+        '</Relationships>'
+    )
+    document = _xml(
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>'
+        '<w:commentRangeStart w:id="0"/><w:r><w:t>Annotated synthetic text</w:t></w:r><w:commentRangeEnd w:id="0"/>'
+        '<w:r><w:commentReference w:id="0"/></w:r><w:r><w:footnoteReference w:id="1"/></w:r>'
+        '</w:p><w:sectPr/></w:body></w:document>'
+    )
+    parts["[Content_Types].xml"] = content_types.encode("utf-8")
+    parts["word/document.xml"] = document
+    parts["word/_rels/document.xml.rels"] = doc_rels
+    parts["word/comments.xml"] = _xml(
+        '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="0" w:author="Synthetic"><w:p><w:r><w:t>Authored test comment</w:t></w:r></w:p></w:comment></w:comments>'
+    )
+    parts["word/footnotes.xml"] = _xml(
+        '<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
+        '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
+        '<w:footnote w:id="1"><w:p><w:r><w:t>Authored footnote</w:t></w:r></w:p></w:footnote></w:footnotes>'
+    )
+    return _zip_package(list(parts.items()))
+
+
+def _build_mixed_page_xlsx() -> bytes:
+    package = _build_xlsx()
+    from io import BytesIO
+
+    replacements: dict[str, bytes] = {}
+    with zipfile.ZipFile(BytesIO(package)) as source:
+        for name, paper_size in (("xl/worksheets/sheet1.xml", "1"), ("xl/worksheets/sheet2.xml", "9")):
+            xml = source.read(name).decode("utf-8").replace("</worksheet>", f'<pageSetup paperSize="{paper_size}"/></worksheet>')
+            replacements[name] = xml.encode("utf-8")
+    return _repackage(package, replacements)
+
+
+def _build_multilingual_pptx() -> bytes:
+    package = _build_pptx()
+    multilingual = "English | Ελληνικά | 日本語 | العربية | हिन्दी | עברית | 한국어 | Español"
+    slide = _pptx_slide(multilingual)
+    from io import BytesIO
+
+    with zipfile.ZipFile(BytesIO(package)) as source:
+        theme = source.read("ppt/theme/theme1.xml").replace(
+            b'<a:majorFont><a:latin typeface="Liberation Sans"/>',
+            b'<a:majorFont><a:latin typeface="Noto Sans"/>',
+        )
+    return _repackage(package, {"ppt/slides/slide1.xml": slide, "ppt/theme/theme1.xml": theme})
+
+
+def _build_external_relationship_package() -> bytes:
+    parts = dict(_docx_parts())
+    parts["word/document.xml"] = _xml(
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p>'
+        '<w:hyperlink r:id="rIdExternal"><w:r><w:t>External target marker</w:t></w:r></w:hyperlink></w:p>'
+        '<w:sectPr/></w:body></w:document>'
+    )
+    parts["word/_rels/document.xml.rels"] = _xml(
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rIdExternal" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" '
+        'Target="https://example.invalid/fixture" TargetMode="External"/></Relationships>'
+    )
+    return _zip_package(list(parts.items()))
 
 
 def _pptx_empty_shape_tree() -> str:
@@ -299,6 +399,84 @@ def _build_pdf() -> bytes:
     return bytes(output)
 
 
+def _build_pdf_annotations_forms() -> bytes:
+    stream = b"BT /F1 12 Tf 72 720 Td (PaperBatch synthetic annotation and form sample) Tj ET\n"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] /NeedAppearances true >> >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R /Annots [4 0 R 5 0 R] >>",
+        b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (synthetic_field) /Rect [72 680 240 704] /P 3 0 R /F 4 /DA (/F1 12 Tf 0 g) >>",
+        b"<< /Type /Annot /Subtype /Text /Contents (Synthetic note) /Rect [260 680 280 700] /P 3 0 R /F 4 >>",
+        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"endstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    ]
+    output = bytearray(b"%PDF-1.4\n%PaperBatch synthetic annotation/form fixture\x00\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for object_number, body in enumerate(objects, start=1):
+        offsets.append(len(output))
+        output.extend(f"{object_number} 0 obj\n".encode("ascii"))
+        output.extend(body)
+        output.extend(b"\nendobj\n")
+    xref_offset = len(output)
+    output.extend(f"xref\n0 {len(offsets)}\n".encode("ascii"))
+    output.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    output.extend(
+        f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+    )
+    return bytes(output)
+
+
+def _expanded_specs() -> list[tuple[str, str, str, str, dict[str, Any], bytes]]:
+    return [
+        ("docx_multilingual_fields_forms", "synthetic_multilingual_fields_forms.docx", "docx",
+         "Synthetic multilingual text with field, form-control, and mixed-font references.",
+         {"languages": ["en", "el", "ja", "ar", "hi", "he", "ko", "es"], "fields": 1, "form_controls": 1},
+         _build_multilingual_docx()),
+        ("docx_annotations", "synthetic_annotations.docx", "docx",
+         "Synthetic comment range and footnote markers authored as package markup.",
+         {"comment_ranges": 1, "footnotes": 1}, _build_annotated_docx()),
+        ("xlsx_mixed_page_sizes", "synthetic_mixed_page_sizes.xlsx", "xlsx",
+         "Synthetic spreadsheet print settings with two page-size declarations and a print area.",
+         {"print_areas": 1, "page_setup_variants": 2}, _build_mixed_page_xlsx()),
+        ("pptx_multilingual_fonts", "synthetic_multilingual_fonts.pptx", "pptx",
+         "Synthetic multilingual slide text with generic font family names.",
+         {"languages": ["en", "ja", "ar", "es"], "font_families": ["Liberation Sans", "Noto Sans"]},
+         _build_multilingual_pptx()),
+        ("pdf_annotations_forms", "synthetic_annotations_forms.pdf", "pdf",
+         "Hand-authored synthetic PDF object structure with a text annotation and AcroForm widget; not renderer output.",
+         {"annotations": 1, "form_fields": 1, "renderer_output": False}, _build_pdf_annotations_forms()),
+        ("encrypted_package_simulation", "synthetic_encrypted_package.bin", "simulation",
+         "Opaque synthetic bytes mark an encrypted-container scenario; no encryption or password is implemented.",
+         {"encrypted": True, "real_encryption": False}, b"PAPERBATCH-SYNTHETIC-ENCRYPTED-SCENARIO\x00"),
+        ("legacy_ole_signature_simulation", "synthetic_legacy_ole.bin", "simulation",
+         "Synthetic legacy-format signature only; not a valid Office binary document.",
+         {"legacy_signature": True, "valid_ole_document": False}, bytes.fromhex("D0CF11E0A1B11AE1") + b"PaperBatch synthetic only"),
+        ("fault_zip_path_traversal", "fault_path_traversal.zip", "zip",
+         "Synthetic hostile archive member path; fixture is inspected as metadata and never extracted.",
+         {"unsafe_member": "../outside.txt", "expected_rejection": True}, _zip_package([("../outside.txt", b"synthetic") ])),
+        ("fault_oversized_member", "fault_oversized_member.zip", "zip",
+         "Bounded synthetic archive with a 1 MiB stored member for size-limit rejection tests.",
+         {"member_size_bytes": 1048576, "expected_rejection": True}, _zip_package([("payload.bin", b"X" * 1048576)])),
+        ("opc_external_hyperlink_no_network", "opc_external_hyperlink_no_network.zip", "zip",
+         "Synthetic OPC external hyperlink relationship for inert parsing; no network request is made.",
+         {"external_target": "https://example.invalid/fixture", "relationship_valid_in_opc": True, "network_fetch_expected": False},
+         _build_external_relationship_package()),
+        ("fault_duplicate_member", "fault_duplicate_member.zip", "zip",
+         "Synthetic archive with duplicate names to exercise package ambiguity rejection.",
+         {"duplicate_names": ["part.xml"], "expected_rejection": True}, _duplicate_name_package()),
+    ]
+
+
+def _duplicate_name_package() -> bytes:
+    # Duplicate names are the deliberate fault condition, so suppress zipfile's
+    # construction-time warning while preserving the malformed archive bytes.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Duplicate name:.*", category=UserWarning)
+        return _zip_package([("part.xml", b"one"), ("part.xml", b"two")])
+
+
 def _fixture_specs() -> list[tuple[str, str, str, str, dict[str, Any], bytes]]:
     docx = _build_docx()
     return [
@@ -352,7 +530,7 @@ def _fixture_specs() -> list[tuple[str, str, str, str, dict[str, Any], bytes]]:
             {"zip_package": False, "failure_reason": "truncated_without_central_directory"},
             docx[:96],
         ),
-    ]
+    ] + _expanded_specs()
 
 
 def generate_corpus(output_dir: Path) -> dict[str, Any]:
@@ -369,14 +547,47 @@ def generate_corpus(output_dir: Path) -> dict[str, Any]:
                 "format": file_format,
                 "scenario": scenario,
                 "expected": expected,
+                "evidence_class": "synthetic",
+                "simulation_only": True,
+                "coverage_tags": [fixture_id.split("_", 1)[0], *fixture_id.split("_")[1:]],
+                "expected_outcome": {
+                    "status": "unsupported" if fixture_id in {"encrypted_package_simulation", "legacy_ole_signature_simulation"}
+                    else "rejected" if fixture_id in {
+                        "docx_truncated_package", "fault_zip_path_traversal", "fault_oversized_member",
+                        "fault_duplicate_member",
+                    }
+                    else "synthetic_only" if fixture_id in {
+                        "docx_multilingual_fields_forms", "docx_annotations", "xlsx_mixed_page_sizes",
+                        "pptx_multilingual_fonts", "pdf_annotations_forms", "opc_external_hyperlink_no_network",
+                    } else "accepted",
+                    "reason": "Simulation marker only; no supported encrypted or legacy document is present." if fixture_id in {
+                        "encrypted_package_simulation", "legacy_ole_signature_simulation",
+                    } else "Valid external relationship metadata is inspected without requesting its target." if fixture_id == "opc_external_hyperlink_no_network"
+                    else "Malformed or hazardous package is expected to be rejected safely." if fixture_id in {
+                        "docx_truncated_package", "fault_zip_path_traversal", "fault_oversized_member",
+                        "fault_duplicate_member",
+                    } else "Synthetic fixture only; real engine and device behavior is unmeasured.",
+                },
                 "sha256": sha256(data),
                 "size_bytes": len(data),
             }
         )
     manifest: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "synthetic": True,
+        "evidence_class": "synthetic",
+        "simulation_only": True,
         "provenance": "Generated by tools/generate_document_corpus.py; no renderer or external documents were used.",
+        "counts": {"synthetic_fixtures": len(entries), "parameter_variants_counted_as_compatibility": 0},
+        "coverage_target": {"minimum": 150, "maximum": 300},
+        "evidence_gaps": {
+            "engine_generated": "absent",
+            "human_reviewed": "absent",
+            "oem_driver": "absent",
+            "physical_output": "absent",
+            "office_wps": "absent",
+            "real_engine_compatibility": "absent",
+        },
         "fixtures": entries,
     }
     manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
