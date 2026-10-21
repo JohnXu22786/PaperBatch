@@ -70,18 +70,47 @@ internal static class PreparedArtifactCoordinatorTests
             var finalPages = inspector.GetPageSizesAsync(finalPdf, CancellationToken.None).GetAwaiter().GetResult();
             Assert.Equal(run.FinalArtifact.PageCount, finalPages.Count);
 
-            var unsupported = pipeline.PrepareAsync([new SourceInput(firstPath)], settings,
-                new LayoutOptions(Copies: 2), "unsupported-layout-key",
+            var copied = pipeline.PrepareAsync([new SourceInput(firstPath)], settings,
+                new LayoutOptions(Copies: 2), "copied-layout-key",
                 new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true), FixedTime.AddMinutes(1))
                 .GetAwaiter().GetResult();
-            Assert.True(!unsupported.Succeeded);
-            Assert.True(unsupported.Diagnostics.Any(message => message.Contains("layout copies", StringComparison.Ordinal)));
+            Assert.True(copied.Succeeded, string.Join("; ", copied.Diagnostics));
+            Assert.Equal(2, copied.Run!.FinalArtifact!.PageCount);
+            Assert.Equal(1, copied.Run.Items[0].PrintSettings.Copies);
+            Assert.Equal(1, copied.Run.Segments[0].PrintSettings.Copies);
+
+            var perDocument = pipeline.PrepareAsync(
+                [new SourceInput(firstPath), new SourceInput(secondPath)], settings,
+                new LayoutOptions(NUp: NUpMode.One), "per-document-layout-key",
+                new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true), FixedTime.AddMinutes(2),
+                [settings with { Copies = 2 }, settings with { Copies = 1 }],
+                [new LayoutDocumentSettings(Copies: 2), new LayoutDocumentSettings(Copies: 1)])
+                .GetAwaiter().GetResult();
+            Assert.True(perDocument.Succeeded, string.Join("; ", perDocument.Diagnostics));
+            Assert.Equal(4, perDocument.Run!.FinalArtifact!.PageCount);
+            Assert.Equal(2, perDocument.Run.Segments.Length);
+            Assert.Equal(1, perDocument.Run.Items[0].PrintSettings.Copies);
+            Assert.Equal(1, perDocument.Run.Items[1].PrintSettings.Copies);
+            Assert.True(perDocument.Run.FinalArtifact.Sha256 != reopenedRun.FinalArtifact!.Sha256);
+            Assert.True(perDocument.Run.Segments[0].ItemIds.SequenceEqual([perDocument.Run.Items[0].ItemId]));
+            Assert.True(perDocument.Run.Segments[1].ItemIds.SequenceEqual([perDocument.Run.Items[1].ItemId]));
+
+            var changedLaterProfile = pipeline.PrepareAsync(
+                [new SourceInput(firstPath), new SourceInput(secondPath)], settings,
+                new LayoutOptions(NUp: NUpMode.One), "per-document-orientation-key",
+                new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true), FixedTime.AddMinutes(2),
+                [settings, settings with { Orientation = Orientation.Portrait }],
+                [new LayoutDocumentSettings(Copies: 2), new LayoutDocumentSettings(Copies: 1)])
+                .GetAwaiter().GetResult();
+            Assert.True(changedLaterProfile.Succeeded, string.Join("; ", changedLaterProfile.Diagnostics));
+            Assert.True(perDocument.Run.SnapshotFingerprint != changedLaterProfile.Run!.SnapshotFingerprint,
+                "A later file's requested orientation is part of the prepared-run identity.");
 
             using var cancelledToken = new CancellationTokenSource();
             cancelledToken.Cancel();
             var cancelled = pipeline.PrepareAsync([new SourceInput(firstPath)], settings, new LayoutOptions(),
                 "cancelled-layout-key", new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true),
-                FixedTime.AddMinutes(2), cancelledToken.Token).GetAwaiter().GetResult();
+                FixedTime.AddMinutes(3), cancelledToken.Token).GetAwaiter().GetResult();
             Assert.True(cancelled.IsCancelled);
             Assert.True(cancelled.Run is null);
         }

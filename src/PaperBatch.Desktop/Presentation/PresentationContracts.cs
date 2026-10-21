@@ -1,5 +1,7 @@
 using Avalonia.Media.Imaging;
 using PaperBatch.Core.Domain;
+using PaperBatch.Core.Layout;
+using PaperBatch.Core.Preparation;
 
 namespace PaperBatch.Desktop.Presentation;
 
@@ -59,6 +61,14 @@ internal interface IPreparedArtifactPresentationSource
     void InvalidatePreparedRun(string queueItemId);
 }
 
+internal interface IQueuePreparationPresentationSource
+{
+    bool CanPrepare { get; }
+    IReadOnlyList<string> ResolutionSummaries { get; }
+    Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings, LayoutOptions layoutOptions,
+        PaperBatch.Core.Recipes.JobRecipe? recipe = null, CancellationToken cancellationToken = default);
+}
+
 internal interface IPreflightPresentationSource
 {
     IReadOnlyList<PreflightFindingSnapshot> GetFindings(string queueItemId);
@@ -90,7 +100,8 @@ internal interface IRecipeManagementPresentationSource : ITemplatePresentationSo
 
 internal sealed record JobRecipeSnapshot(int SchemaVersion, string RecipeId, string Name,
     System.Collections.Immutable.ImmutableArray<PaperBatch.Core.Recipes.RecipeSource> Sources,
-    PaperBatch.Core.Recipes.RecipePrintSettings Settings);
+    PaperBatch.Core.Recipes.RecipePrintSettings Settings,
+    System.Collections.Immutable.ImmutableArray<PaperBatch.Core.Recipes.RecipeSettingRule> Rules = default);
 
 internal sealed record RecipeDefaultsSnapshot(int Copies, PaperBatch.Core.Domain.ColorMode ColorMode,
     PaperBatch.Core.Domain.DuplexMode DuplexMode, PaperBatch.Core.Domain.Orientation Orientation,

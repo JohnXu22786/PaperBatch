@@ -7,7 +7,9 @@ using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using PaperBatch.Core.Domain;
 using PaperBatch.Core.Intake;
+using PaperBatch.Core.Layout;
 using PaperBatch.Core.Persistence;
+using PaperBatch.Core.Preparation;
 using PaperBatch.Core.Recipes;
 using PaperBatch.Core.Rendering;
 using PaperBatch.Core.Serialization;
@@ -51,23 +53,28 @@ internal static class DesktopComposition
             new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifactStore)),
             new BuiltInImageRendererAdapter(cache, artifactStore)
         ]);
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
         IPdfArtifactPreviewRenderer? previewRenderer = null;
+        PreparedArtifactCoordinator? preparation = null;
         var pdfiumPath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH");
         var pdfiumHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_SHA256");
         if (!string.IsNullOrWhiteSpace(pdfiumPath) && !string.IsNullOrWhiteSpace(pdfiumHash))
-            previewRenderer = new PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
-        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
-        store.Initialize();
+        {
+            var pdfium = new PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
+            previewRenderer = pdfium;
+            preparation = new PreparedArtifactCoordinator(intake, cache, renderer, pdfium, pdfium,
+                new PdfiumPageCompositionAdapter(pdfiumPath, pdfiumHash), artifactStore, store);
+        }
 
-        // Renderer artifacts are available. The desktop composition does not invent print settings
-        // or claim that uninspected interactive PDF content is safe for composition.
-        _ = intake;
-        _ = renderer;
+        // Unsupported formats have no renderer, and there is no print submission backend.
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
-            artifacts: artifactStore, previewRenderer: previewRenderer, runStore: store);
+            artifacts: artifactStore, previewRenderer: previewRenderer, runStore: store, preparation: preparation);
         return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE",
-                "PDF pass-through and supported JPEG/PNG artifact rendering are available. Final preview needs a registered prepared run and explicitly configured PDFium runtime; LibreOffice conversion and production print submission remain unavailable.", false));
+                preparation is null
+                    ? "PDF pass-through and supported JPEG/PNG artifact rendering are available. Preparation and final preview require an explicitly configured PDFium runtime; LibreOffice conversion and production print submission remain unavailable."
+                    : "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Printer capabilities, Office conversion and production print submission remain unavailable.", false));
     }
 }
 
@@ -79,7 +86,8 @@ internal sealed class ProductionPresentationSources :
     IPreparedArtifactPresentationSource,
     IPreflightPresentationSource,
     IHistoryPresentationSource,
-    IRecipeManagementPresentationSource
+    IRecipeManagementPresentationSource,
+    IQueuePreparationPresentationSource
 {
     private readonly SourceIntakeService? _intake;
     private readonly RendererCoordinator _renderer;
@@ -88,9 +96,13 @@ internal sealed class ProductionPresentationSources :
     private readonly RenderArtifactStore? _artifacts;
     private readonly IPdfArtifactPreviewRenderer? _previewRenderer;
     private readonly SqliteRunStore? _runStore;
+    private readonly PreparedArtifactCoordinator? _preparation;
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
     private readonly Dictionary<string, string> _queueLocations = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _queueSourceHashes = new(StringComparer.Ordinal);
+    private IReadOnlyList<string> _resolutionSummaries = [];
+    private readonly HashSet<string> _preparableQueueItems = new(StringComparer.Ordinal);
 
     public event Action<string>? PreparedArtifactChanged;
     public bool IsRecipeStoreAvailable => _runStore is not null && TemplateReadError is null;
@@ -98,7 +110,7 @@ internal sealed class ProductionPresentationSources :
     public ProductionPresentationSources(SourceIntakeService? intake = null, RendererCoordinator? renderer = null,
         SourceSnapshotCache? cache = null, bool rendererAvailable = false,
         RenderArtifactStore? artifacts = null, IPdfArtifactPreviewRenderer? previewRenderer = null,
-        SqliteRunStore? runStore = null)
+        SqliteRunStore? runStore = null, PreparedArtifactCoordinator? preparation = null)
     {
         _intake = intake;
         _renderer = renderer ?? new RendererCoordinator(Array.Empty<IRendererAdapter>());
@@ -107,6 +119,7 @@ internal sealed class ProductionPresentationSources :
         _artifacts = artifacts;
         _previewRenderer = previewRenderer;
         _runStore = runStore;
+        _preparation = preparation;
     }
 
     public bool IsAvailable => _intake is not null;
@@ -127,22 +140,34 @@ internal sealed class ProductionPresentationSources :
     {
         _queue.RemoveAll(item => string.Equals(item.Id, queueItemId, StringComparison.Ordinal));
         _queueLocations.Remove(queueItemId);
+        _queueSourceHashes.Remove(queueItemId);
+        _preparableQueueItems.Remove(queueItemId);
     }
 
     public async Task<IReadOnlyList<QueueItemSnapshot>> ImportAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default)
     {
         if (_intake is null) throw new InvalidOperationException("Source intake is not configured.");
-        var inputs = paths.Select(path => new SourceInput(path)).ToArray();
+        var seenPaths = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        var inputs = paths.Select(path => new SourceInput(path, IntentionalCopy: IsRepeatedPath(path))).ToArray();
         var prepared = await _intake.PrepareAsync(inputs, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var queueItemIdBySnapshot = new Dictionary<string, string>(StringComparer.Ordinal);
         try
         {
+            foreach (var existing in _queue) InvalidatePreparedRun(existing.Id);
             foreach (var source in prepared.Items)
             {
-                var id = source.Snapshot?.SnapshotId ?? Guid.NewGuid().ToString("N");
+                // Queue identity belongs to the row. A source snapshot can be shared or
+                // replaced independently and must never alias two intentional copies.
+                var id = Guid.NewGuid().ToString("N");
+                if (source.Snapshot is { } capturedSnapshot)
+                {
+                    queueItemIdBySnapshot[capturedSnapshot.SnapshotId] = id;
+                    _queueSourceHashes[id] = capturedSnapshot.Sha256;
+                }
                 var title = Path.GetFileName(source.SourcePath);
                 var findings = source.Diagnostics.Select(diagnostic => new PreflightFindingSnapshot(
                     diagnostic.Code.ToString(), diagnostic.Severity.ToString(), diagnostic.Message)).ToList();
-                var status = source.IsReady ? "Preflight ready · prepared run unavailable" : "Needs attention";
+                var status = source.IsReady ? "Preflight ready · checking renderer" : "Needs attention";
                 var details = source.Snapshot is { } snapshot
                     ? $"{source.Format} · {snapshot.LengthBytes:N0} bytes · SHA-256 {snapshot.Sha256[..12]}…"
                     : source.Format?.ToString() ?? "Source was not captured";
@@ -150,6 +175,15 @@ internal sealed class ProductionPresentationSources :
                 {
                     var result = await Task.Run(() => _renderer.RenderAsync(new RenderRequest(readySnapshot.SnapshotId, format,
                         RendererExecutionContext.BackgroundWorker), TimeSpan.FromMinutes(2), cancellationToken), cancellationToken).ConfigureAwait(false);
+                    if (result.Status == RenderStatus.Succeeded && result.Artifact is not null)
+                    {
+                        status = "Ready to prepare · " + format;
+                        _preparableQueueItems.Add(id);
+                    }
+                    else
+                    {
+                        status = result.Status == RenderStatus.Unsupported ? "Unsupported format" : "Renderer needs attention";
+                    }
                     findings.Add(new PreflightFindingSnapshot("Renderer", result.Status.ToString(),
                         result.Message ?? (result.Artifact is { PageCount: 0 }
                             ? $"PDF artifact {result.Artifact.ArtifactId} persisted; page count is not reported."
@@ -174,18 +208,164 @@ internal sealed class ProductionPresentationSources :
                     try { _cache.Release(snapshotId); }
                     catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or System.Security.SecurityException)
                     {
-                        if (_findings.TryGetValue(snapshotId, out var findings))
+                        if (queueItemIdBySnapshot.TryGetValue(snapshotId, out var queueItemId) && _findings.TryGetValue(queueItemId, out var findings))
                             findings.Add(new("Source cache", "Cleanup failed", "The temporary source snapshot could not be released."));
                     }
                 }
             }
         }
+
+        bool IsRepeatedPath(string path)
+        {
+            try { return !seenPaths.Add(Path.GetFullPath(path)); }
+            catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException or System.Security.SecurityException)
+            {
+                // Let source intake report an isolated per-entry path diagnostic.
+                return false;
+            }
+        }
     }
 
     private readonly Dictionary<string, List<PreflightFindingSnapshot>> _findings = new(StringComparer.Ordinal);
+    public bool CanPrepare => _preparation is not null && _queue.Count > 0 &&
+        _queue.All(item => _queueLocations.ContainsKey(item.Id) && _queueSourceHashes.ContainsKey(item.Id) &&
+            _preparableQueueItems.Contains(item.Id));
+    public IReadOnlyList<string> ResolutionSummaries => _resolutionSummaries;
+
+    public async Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings, LayoutOptions layoutOptions,
+        PaperBatch.Core.Recipes.JobRecipe? recipe = null, CancellationToken cancellationToken = default)
+    {
+        if (_preparation is null || _runStore is null || _queue.Count == 0)
+            return new(null, null, ["A trusted PDFium runtime and a nonempty local queue are required before preparation."], false);
+        var now = DateTimeOffset.UtcNow;
+        var seenPaths = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        var paths = _queue.Select(item => _queueLocations.TryGetValue(item.Id, out var path) &&
+            _queueSourceHashes.TryGetValue(item.Id, out var expectedSha256)
+                ? new SourceInput(path, IntentionalCopy: !seenPaths.Add(Path.GetFullPath(path)), ExpectedSha256: expectedSha256)
+                : throw new InvalidOperationException("A queue source snapshot is no longer available. Reimport the source before preparing.")).ToArray();
+        IReadOnlyList<PrintSettings>? perItemPrintSettings = null;
+        IReadOnlyList<LayoutDocumentSettings>? perItemLayoutSettings = null;
+        if (recipe is not null)
+        {
+            var resolved = new List<PaperBatch.Core.Recipes.ResolvedRecipeSettings>(paths.Length);
+            var recipeSourcesByPath = new Dictionary<string, Queue<PaperBatch.Core.Recipes.RecipeSource>>(
+                OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            foreach (var source in recipe.Sources)
+            {
+                var sourcePath = Path.GetFullPath(source.Location);
+                if (!recipeSourcesByPath.TryGetValue(sourcePath, out var occurrences))
+                    recipeSourcesByPath[sourcePath] = occurrences = new Queue<PaperBatch.Core.Recipes.RecipeSource>();
+                occurrences.Enqueue(source);
+            }
+            for (var index = 0; index < paths.Length; index++)
+            {
+                var path = paths[index].Path;
+                var type = Path.GetExtension(path).ToLowerInvariant() switch
+                {
+                    ".pdf" => "pdf", ".jpg" or ".jpeg" => "jpeg", ".png" => "png",
+                    _ => null
+                };
+                if (type is null)
+                    return new(null, null, [$"{Path.GetFileName(path)}: recipe rules support only PDF, JPEG, and PNG sources."], false);
+                var normalizedPath = Path.GetFullPath(path);
+                var recipeSource = recipeSourcesByPath.TryGetValue(normalizedPath, out var occurrences) && occurrences.Count > 0
+                    ? occurrences.Dequeue()
+                    : new PaperBatch.Core.Recipes.RecipeSource("queue-" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), path);
+                var batchDefaults = new PaperBatch.Core.Recipes.RecipePrintSettings(requestedSettings.Copies,
+                    requestedSettings.ColorMode, requestedSettings.DuplexMode, requestedSettings.Orientation,
+                    requestedSettings.ScalingMode, requestedSettings.Media, requestedSettings.PrinterId, requestedSettings.TrayId);
+                resolved.Add(PaperBatch.Core.Recipes.RecipeSettingsResolver.Resolve(recipe, recipeSource, type, batchDefaults));
+            }
+            _resolutionSummaries = resolved.Select((item, index) => FormatResolutionSummary(
+                Path.GetFileName(paths[index].Path), item)).ToArray();
+            var first = resolved[0];
+            if (resolved.Skip(1).Any(item => item.Values.ColorMode != first.Values.ColorMode ||
+                item.Values.DuplexMode != first.Values.DuplexMode || item.Values.PrinterId != first.Values.PrinterId ||
+                item.Values.TrayId != first.Values.TrayId))
+            {
+                var sources = resolved.Select(item => item.MatchingRuleId is null ? "recipe defaults" : "rule " + item.MatchingRuleId)
+                    .Distinct(StringComparer.Ordinal).ToArray();
+                return new(null, null, [$"Per-file device requests resolve differently ({string.Join(", ", sources)}). The current prepared-run model requires one device profile per compatible segment and this shell cannot validate per-file device settings; no artifact was created."], false);
+            }
+            // The layout compiler needs to know whether sheets are duplex so it can
+            // keep file boundaries on the correct physical face. This remains a
+            // requested layout value; it is not validation of printer capability.
+            layoutOptions = layoutOptions with { Duplex = first.Values.DuplexMode != DuplexMode.Simplex };
+            if (resolved.Any(item => item.Values.Orientation == Orientation.Auto))
+                layoutOptions = layoutOptions with { SheetSize = null };
+            var sourceSettings = new List<PrintSettings>(resolved.Count);
+            var documentSettings = new List<LayoutDocumentSettings>(resolved.Count);
+            foreach (var item in resolved)
+            {
+                if (item.Values.Media is not ("Letter" or "A4"))
+                    return new(null, null, [$"{item.MatchingRuleId ?? "recipe defaults"}: requested media is not supported by the desktop layout controls; no artifact was created."], false);
+                PageSize? size = item.Values.Orientation == Orientation.Auto ? null :
+                    item.Values.Media == "A4" ? new PageSize(595.28, 841.89) : new PageSize(612, 792);
+                if (item.Values.Orientation == Orientation.Landscape && size is not null)
+                    size = new PageSize(size.HeightPoints, size.WidthPoints);
+                sourceSettings.Add(new PrintSettings(item.Values.Copies, item.Values.ColorMode, item.Values.DuplexMode,
+                    item.Values.Media, item.Values.Orientation, item.Values.ScalingMode, item.Values.PrinterId, item.Values.TrayId));
+                documentSettings.Add(new LayoutDocumentSettings(item.Values.Copies,
+                    item.NUp switch { 1 => NUpMode.One, 2 => NUpMode.Two, 4 => NUpMode.Four, _ => null },
+                    item.Values.ScalingMode == ScalingMode.ActualSize ? FitMode.ActualSize : FitMode.ShrinkToFit,
+                    size, item.PageRange is null ? default : ParseRecipeRange(item.PageRange)));
+            }
+            perItemPrintSettings = sourceSettings;
+            perItemLayoutSettings = documentSettings;
+            requestedSettings = sourceSettings[0];
+        }
+        else _resolutionSummaries = [];
+        var result = await _preparation.PrepareAsync(paths, requestedSettings, layoutOptions,
+            "desktop-prepare-" + Guid.NewGuid().ToString("N"),
+            new RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true), now,
+            perItemPrintSettings, perItemLayoutSettings, cancellationToken).ConfigureAwait(false);
+        if (result.Run is { } run)
+        {
+            foreach (var item in _queue) RegisterPreparedRun(item.Id, run);
+        }
+        return result;
+    }
+
+    private static string FormatResolutionSummary(string fileName, PaperBatch.Core.Recipes.ResolvedRecipeSettings resolved)
+    {
+        string Origin(string field, string fallback = "batch/recipe defaults")
+        {
+            var source = resolved.Provenance.GetValueOrDefault(field, fallback);
+            if (source == "file override") return "file override/单文件覆盖";
+            if (source.StartsWith("rule ", StringComparison.Ordinal)) return "rule/规则 " + source[5..];
+            return "batch/recipe defaults/批次或配方默认值";
+        }
+        string Entry(string field, string label, string value, string fallback = "batch/recipe defaults") =>
+            $"{label}={value} ({Origin(field, fallback)})";
+        var ruleOrDefault = resolved.MatchingRuleId is null
+            ? "no matching rule/无匹配规则"
+            : "first matching rule/首个匹配规则 " + resolved.MatchingRuleId;
+        var noValue = "not selected/未选择";
+        return $"{fileName}: {ruleOrDefault}; requested/请求值 {Entry("copies", "copies/份数", resolved.Values.Copies.ToString(System.Globalization.CultureInfo.InvariantCulture))}; " +
+            $"{Entry("colorMode", "color mode/色彩模式", resolved.Values.ColorMode.ToString())}; " +
+            $"{Entry("duplexMode", "duplex mode/双面模式", resolved.Values.DuplexMode.ToString())}; " +
+            $"{Entry("orientation", "orientation/方向", resolved.Values.Orientation.ToString())}; " +
+            $"{Entry("scalingMode", "scaling/缩放", resolved.Values.ScalingMode.ToString())}; " +
+            $"{Entry("media", "media/纸张", resolved.Values.Media)}; " +
+            $"{Entry("printerId", "printer/打印机", resolved.Values.PrinterId ?? noValue)}; " +
+            $"{Entry("trayId", "tray/纸盒", resolved.Values.TrayId ?? noValue)}; " +
+            $"{Entry("nUp", "pages per sheet/每张页数", resolved.NUp?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "batch control/批次控件", "batch layout controls")}; " +
+            $"{Entry("pageRange", "page range/页码范围", resolved.PageRange ?? "all pages/全部页面", "batch page-range control")}.";
+    }
+
+    private static System.Collections.Immutable.ImmutableArray<PageRange> ParseRecipeRange(string value)
+    {
+        var parts = value.Split('-');
+        var first = int.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture);
+        var last = parts.Length == 1 ? first : int.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture);
+        return [new PageRange(first, last)];
+    }
+
     public IReadOnlyList<EffectiveSettingSnapshot> GetEffectiveSettings(string queueItemId) =>
         [new("Renderer", _rendererAvailable ? "Partial" : "Unavailable", _rendererAvailable
-            ? "Background PDF pass-through and JPEG/PNG artifact rendering are configured; other formats and prepared-run orchestration are unavailable."
+            ? (_preparation is null
+                ? "Background PDF pass-through and JPEG/PNG artifact rendering are configured; preparation needs the explicitly pinned PDFium runtime."
+                : "Pinned PDFium preparation is configured for supported PDF/JPEG/PNG formats; Office and other unregistered formats remain unsupported.")
             : "No renderer is configured; no setting is treated as effective."),
          new("Printer", "Not selected", "The UI does not choose a default printer or silently substitute one.")];
     public void RegisterPreparedRun(string queueItemId, PreparedRun run)
@@ -318,7 +498,7 @@ internal sealed class ProductionPresentationSources :
             new RecipePrintSettings(defaults.Copies, defaults.ColorMode, defaults.DuplexMode, defaults.Orientation,
                 defaults.ScalingMode, defaults.Media));
         JobRecipeJson.Serialize(recipe);
-        return new JobRecipeSnapshot(recipe.SchemaVersion, recipe.RecipeId, recipe.Name, recipe.Sources, recipe.Settings);
+        return new JobRecipeSnapshot(recipe.SchemaVersion, recipe.RecipeId, recipe.Name, recipe.Sources, recipe.Settings, recipe.Rules);
     }
 
     public void SaveRecipe(JobRecipeSnapshot snapshot)
@@ -328,7 +508,8 @@ internal sealed class ProductionPresentationSources :
         if (existing.Any(item => !string.Equals(item.Recipe.RecipeId, snapshot.RecipeId, StringComparison.Ordinal) &&
             string.Equals(item.Recipe.Name, snapshot.Name, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("A recipe with this name already exists.");
-        _runStore.SaveRecipe(new JobRecipe(snapshot.SchemaVersion, snapshot.RecipeId, snapshot.Name, snapshot.Sources, snapshot.Settings));
+        _runStore.SaveRecipe(new JobRecipe(snapshot.SchemaVersion, snapshot.RecipeId, snapshot.Name, snapshot.Sources, snapshot.Settings)
+            { Rules = snapshot.Rules });
         _ = GetTemplates();
     }
 
@@ -336,7 +517,7 @@ internal sealed class ProductionPresentationSources :
     {
         var recipe = _runStore?.GetRecipes().SingleOrDefault(item => item.Recipe.RecipeId == recipeId)?.Recipe ??
             throw new InvalidOperationException("The selected recipe is no longer available.");
-        return new JobRecipeSnapshot(recipe.SchemaVersion, recipe.RecipeId, recipe.Name, recipe.Sources, recipe.Settings);
+        return new JobRecipeSnapshot(recipe.SchemaVersion, recipe.RecipeId, recipe.Name, recipe.Sources, recipe.Settings, recipe.Rules);
     }
 
     public bool DeleteRecipe(string recipeId) => _runStore?.DeleteRecipe(recipeId) ??

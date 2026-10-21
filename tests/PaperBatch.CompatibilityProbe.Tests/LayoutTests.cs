@@ -7,6 +7,12 @@ internal static class LayoutTests
     {
         Assert.Equal("NoDocuments", LayoutCompiler.Compile([], new()).Diagnostics[0].Code);
         Assert.Equal("InvalidRange", LayoutCompiler.Compile([Doc("a", 2)], new(Ranges: [new(0, 1)])).Diagnostics[0].Code);
+        var perDocumentRange = LayoutCompiler.Compile([
+            new LayoutDocument("first", [new PageSize(612, 792)], "Letter", settings: new LayoutDocumentSettings(Ranges: [new(1, 1)]), sourceName: "first.pdf"),
+            new LayoutDocument("second", [new PageSize(612, 792), new PageSize(612, 792)], "Letter", settings: new LayoutDocumentSettings(Ranges: [new(1, 3)]), sourceName: "second.pdf")
+        ], new());
+        Assert.Equal("InvalidRange", perDocumentRange.Diagnostics[0].Code);
+        Assert.Contains("Page range 1-3 for second.pdf is invalid; valid pages are 1-2.", perDocumentRange.Diagnostics[0].Message);
         Assert.Equal("InvalidRange", LayoutCompiler.Compile([Doc("a", 2)], new(Ranges: new PageRange[] { null! }.ToImmutableArray())).Diagnostics[0].Code);
         Assert.Equal("InvalidPageSize", LayoutCompiler.Compile([new LayoutDocument("a", new PageSize[] { null! }, "Letter")], new()).Diagnostics[0].Code);
         Assert.Equal("InvalidDocument", LayoutCompiler.Compile([new LayoutDocument("empty", Array.Empty<PageSize>(), "Letter")], new()).Diagnostics[0].Code);
@@ -30,7 +36,7 @@ internal static class LayoutTests
     internal static void FourUpUsesFourDistinctCellRectangles()
     {
         var result = LayoutCompiler.Compile([Doc("a", 4)], new(NUp: NUpMode.Four, SheetSize: new(612, 792)));
-        Assert.True(result.Succeeded);
+        Assert.True(result.Succeeded, string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));
         Assert.Equal(1, result.Pages.Length);
         Assert.Equal(4, result.Pages[0].Placements.Length);
         Assert.True(result.Pages[0].Placements.Select(p => (p.TargetBounds!.XPoints, p.TargetBounds.YPoints)).Distinct().Count() == 4);
@@ -94,6 +100,39 @@ internal static class LayoutTests
         Assert.Equal(2, result.Pages[3].Placements[0].CopyNumber);
         Assert.True(result.Pages.Select(x => x.SegmentKey).SequenceEqual(["0:2:A40:0:612:792", "0:2:A40:0:612:792", "1:6:Letter0:0:612:792", "2:2:A40:0:612:792", "2:2:A40:0:612:792", "3:6:Letter0:0:612:792"]));
         Assert.True(result.Pages[0].SegmentKey != result.Pages[3].SegmentKey);
+    }
+
+    internal static void PerDocumentCopyRangeNUpAndFitSettingsAffectCompiledPages()
+    {
+        var docs = new[]
+        {
+            new LayoutDocument("a", [new PageSize(612, 792), new PageSize(612, 792)], "Letter",
+                settings: new LayoutDocumentSettings(Copies: 2, NUp: NUpMode.Two, Fit: FitMode.ActualSize,
+                    SheetSize: new PageSize(700, 900), Ranges: [new PageRange(1, 2)])),
+            new LayoutDocument("b", [new PageSize(612, 792), new PageSize(612, 792)], "Letter",
+                settings: new LayoutDocumentSettings(Copies: 1, Ranges: [new PageRange(2, 2)]))
+        };
+        var result = LayoutCompiler.Compile(docs, new(Copies: 1, NUp: NUpMode.One));
+        Assert.True(result.Succeeded, string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        Assert.Equal(3, result.Pages.Length);
+        var pagesA = result.Pages.Where(page => page.Placements[0].ItemId == "a").ToArray();
+        Assert.True(pagesA.All(page => page.OutputSize == new PageSize(700, 900)));
+        Assert.True(pagesA.All(page => page.Placements.Length == 2));
+        Assert.True(pagesA.SelectMany(page => page.Placements).Select(page => page.SourcePageNumber).SequenceEqual([1, 2, 1, 2]));
+        Assert.True(pagesA.Select(page => page.Placements[0].CopyNumber).SequenceEqual([1, 2]));
+        Assert.True(pagesA.SelectMany(page => page.Placements).All(page => page.Scale == 1d));
+        Assert.Equal(1, result.Pages.Count(page => page.Placements[0].ItemId == "b"));
+        Assert.Equal(2, result.Pages.Single(page => page.Placements[0].ItemId == "b").Placements[0].SourcePageNumber);
+    }
+
+    internal static void AutoOrientationPreservesSourcePageDimensions()
+    {
+        var landscape = new PageSize(792, 612);
+        var portrait = new PageSize(612, 792);
+        var result = LayoutCompiler.Compile([new LayoutDocument("mixed", [landscape, portrait], "Letter")], new());
+        Assert.True(result.Succeeded, string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        Assert.True(result.Pages.Select(page => page.OutputSize).SequenceEqual<PageSize?>([landscape, portrait]));
+        Assert.True(result.Pages.SelectMany(page => page.Placements).All(placement => placement.Scale == 1d));
     }
 
     internal static void OutputLimitAndCopiesAreExplicit()

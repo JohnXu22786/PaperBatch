@@ -266,7 +266,7 @@ internal static class WatchFolderTests
         Assert.Contains("office-packet", File.ReadAllText(exported.Path));
         Assert.Equal(source, File.ReadAllText(validPath));
         using var temporary = new TemporaryFile();
-        File.WriteAllText(temporary.Path, "{\"schemaVersion\":2}");
+        File.WriteAllText(temporary.Path, "{\"schemaVersion\":3}");
         Assert.Throws<PaperBatch.Core.Recipes.UnsupportedSchemaVersionException>(() => cli.ExecuteAsync(["recipe", "import", temporary.Path]).AsTask().GetAwaiter().GetResult());
         File.WriteAllBytes(temporary.Path, new byte[PaperBatch.Core.Recipes.JobRecipeJson.MaximumRecipeBytes + 1]);
         Assert.Throws<InvalidDataException>(() => cli.ExecuteAsync(["recipe", "validate", temporary.Path]).AsTask().GetAwaiter().GetResult());

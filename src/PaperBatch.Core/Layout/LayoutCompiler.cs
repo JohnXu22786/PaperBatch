@@ -19,10 +19,15 @@ public sealed record PageSize(double WidthPoints, double HeightPoints)
     }
 }
 
-public sealed record LayoutDocument(string ItemId, ImmutableArray<PageSize> Pages, string Media, string? PrinterId = null, string? TrayId = null)
+public sealed record LayoutDocumentSettings(int? Copies = null, NUpMode? NUp = null, FitMode? Fit = null,
+    PageSize? SheetSize = null, ImmutableArray<PageRange> Ranges = default);
+
+public sealed record LayoutDocument(string ItemId, ImmutableArray<PageSize> Pages, string Media, string? PrinterId = null,
+    string? TrayId = null, LayoutDocumentSettings? Settings = null, string? SourceName = null)
 {
-    public LayoutDocument(string itemId, IEnumerable<PageSize> pages, string media, string? printerId = null, string? trayId = null)
-        : this(itemId, pages?.ToImmutableArray() ?? throw new ArgumentNullException(nameof(pages)), media, printerId, trayId) { }
+    public LayoutDocument(string itemId, IEnumerable<PageSize> pages, string media, string? printerId = null,
+        string? trayId = null, LayoutDocumentSettings? settings = null, string? sourceName = null)
+        : this(itemId, pages?.ToImmutableArray() ?? throw new ArgumentNullException(nameof(pages)), media, printerId, trayId, settings, sourceName) { }
 }
 
 public sealed record PageRange(int FirstPage, int LastPage);
@@ -107,37 +112,52 @@ public static class LayoutCompiler
                 try { page.Validate(nameof(documents)); }
                 catch (ArgumentOutOfRangeException) { return Failed("InvalidPageSize", "A source page has invalid dimensions."); }
             }
+            if (doc.Settings is { } documentSettings)
+            {
+                if (documentSettings.SheetSize is { } sheetSize)
+                {
+                    try { sheetSize.Validate(nameof(documents)); }
+                    catch (ArgumentOutOfRangeException) { return Failed("InvalidSheetSize", "A document sheet size is invalid."); }
+                }
+                if (documentSettings.Copies is < 1 or > MaxCopies ||
+                    documentSettings.NUp is { } nupValue && !Enum.IsDefined(nupValue) ||
+                    documentSettings.Fit is { } fitValue && !Enum.IsDefined(fitValue))
+                    return Failed("InvalidSetting", "A per-document layout setting is invalid.");
+            }
         }
 
         var selected = new List<(int Doc, int Page)>();
         for (var d = 0; d < docs.Length; d++)
         {
-            var ranges = options.Ranges.IsDefaultOrEmpty ? [new PageRange(1, docs[d].Pages.Length)] : options.Ranges;
+            var documentRanges = docs[d].Settings?.Ranges ?? default;
+            var ranges = !documentRanges.IsDefaultOrEmpty ? documentRanges : options.Ranges.IsDefaultOrEmpty ? [new PageRange(1, docs[d].Pages.Length)] : options.Ranges;
             foreach (var range in ranges)
             {
-                if (range is null) return Failed("InvalidRange", "A selected page range is outside its document.");
+                var sourceName = docs[d].SourceName ?? docs[d].ItemId;
+                if (range is null)
+                    return Failed("InvalidRange", $"The selected page range for {sourceName} is invalid; valid pages are 1-{docs[d].Pages.Length}.");
                 if (range.FirstPage < 1 || range.LastPage < range.FirstPage || range.LastPage > docs[d].Pages.Length)
-                    return Failed("InvalidRange", "A selected page range is outside its document.");
+                    return Failed("InvalidRange", $"Page range {range.FirstPage}-{range.LastPage} for {sourceName} is invalid; valid pages are 1-{docs[d].Pages.Length}.");
                 for (var p = range.FirstPage - 1; p < range.LastPage; p++) selected.Add((d, p));
             }
         }
         if (selected.Count == 0) return Failed("NoSelectedPages", "The page selection is empty.");
         if (options.ReverseOrder) selected.Reverse();
 
-        var capacity = (int)options.NUp;
         var selectedGroups = selected.GroupBy(x => x.Doc).ToArray();
         var selectedByDoc = selectedGroups.ToDictionary(group => group.Key, group => group.Select(x => x.Page).ToArray());
         IEnumerable<(int Doc, int Copy)> EnumerateUnits()
         {
             if (options.CopyOrder == CopyOrder.CollatedPackets)
             {
-                for (var copy = 1; copy <= options.Copies; copy++)
+                var maximumCopies = selectedGroups.Max(group => docs[group.Key].Settings?.Copies ?? options.Copies);
+                for (var copy = 1; copy <= maximumCopies; copy++)
                     foreach (var group in selectedGroups)
-                        yield return (group.Key, copy);
+                        if (copy <= (docs[group.Key].Settings?.Copies ?? options.Copies)) yield return (group.Key, copy);
             }
             else
                 foreach (var group in selectedGroups)
-                    for (var copy = 1; copy <= options.Copies; copy++)
+                    for (var copy = 1; copy <= (docs[group.Key].Settings?.Copies ?? options.Copies); copy++)
                         yield return (group.Key, copy);
         }
         long estimatedFaces = 0;
@@ -167,6 +187,7 @@ public static class LayoutCompiler
                 CountEstimatedFace();
                 estimateNeedFront = true;
             }
+            var capacity = (int)(docs[unit.Doc].Settings?.NUp ?? options.NUp);
             var sourceFaces = (selectedByDoc[unit.Doc].Length + capacity - 1L) / capacity;
             estimatedFaces += sourceFaces;
             if (options.Duplex && sourceFaces % 2 == 1) estimateNeedFront = !estimateNeedFront;
@@ -226,30 +247,32 @@ public static class LayoutCompiler
             {
                 if (options.SeparatePacketsOnFront && options.Duplex && lastCopy != 0 && !needFront)
                 {
-                    var blankSize = pages.Count > 0 ? pages[pages.Count - 1].OutputSize : options.SheetSize ?? docs[unit.Doc].Pages[selectedByDoc[unit.Doc][0]];
+                    var blankSize = pages.Count > 0 ? pages[pages.Count - 1].OutputSize : DocumentSheetSize(docs[unit.Doc], options) ?? docs[unit.Doc].Pages[selectedByDoc[unit.Doc][0]];
                     TryAddPhysicalPage(new PhysicalPage(pages.Count + 1, sheet++, PageSide.Back, previousKey ?? "blank", [], blankSize));
                     needFront = true;
                 }
             }
             if (options.AddFrontCover && (startsPacket || unitIndex == 0))
             {
-                var coverSize = options.SheetSize ?? docs[unit.Doc].Pages[selectedByDoc[unit.Doc][0]];
+                var coverSize = DocumentSheetSize(docs[unit.Doc], options) ?? docs[unit.Doc].Pages[selectedByDoc[unit.Doc][0]];
                 Append(SegmentKey(docs[unit.Doc], coverSize), [new PagePlacement("$cover", 0, unit.Copy, 0, coverSize, coverSize, 1, Kind: LayoutPageKind.Cover)], coverSize);
             }
             var samePacketAsPrevious = options.CopyOrder == CopyOrder.PerDocument || unit.Copy == lastCopy;
             if (options.AddSeparatorsBetweenFiles && lastDoc >= 0 && unit.Doc != lastDoc && samePacketAsPrevious)
             {
-                var separatorSize = options.SheetSize ?? docs[unit.Doc].Pages[selectedByDoc[unit.Doc][0]];
+                var separatorSize = DocumentSheetSize(docs[unit.Doc], options) ?? docs[unit.Doc].Pages[selectedByDoc[unit.Doc][0]];
                 Append(SegmentKey(docs[unit.Doc], separatorSize), [new PagePlacement("$separator", 0, unit.Copy, 0, separatorSize, separatorSize, 1, Kind: LayoutPageKind.Separator)], separatorSize);
             }
             lastDoc = unit.Doc;
             lastCopy = unit.Copy;
             unitIndex++;
             var sourcePages = selectedByDoc[unit.Doc];
+            var capacity = (int)(docs[unit.Doc].Settings?.NUp ?? options.NUp);
+            var fit = docs[unit.Doc].Settings?.Fit ?? options.Fit;
             for (var offset = 0; offset < sourcePages.Length; offset += capacity)
             {
                 var group = sourcePages.Skip(offset).Take(capacity).ToArray();
-                var sheetSize = options.SheetSize ?? docs[unit.Doc].Pages[group[0]];
+                var sheetSize = DocumentSheetSize(docs[unit.Doc], options) ?? docs[unit.Doc].Pages[group[0]];
                 var key = SegmentKey(docs[unit.Doc], sheetSize);
                 var columns = capacity == 1 ? 1 : 2;
                 var rows = capacity / columns;
@@ -260,8 +283,8 @@ public static class LayoutCompiler
                     var directScale = Math.Min(cell.WidthPoints / source.WidthPoints, cell.HeightPoints / source.HeightPoints);
                     var rotatedScale = Math.Min(cell.WidthPoints / source.HeightPoints, cell.HeightPoints / source.WidthPoints);
                     var rotated = rotatedScale > directScale;
-                    var scale = options.Fit == FitMode.ActualSize ? 1d : Math.Max(directScale, rotatedScale);
-                    if (options.Fit == FitMode.ShrinkToFit) scale = Math.Min(1d, scale);
+                    var scale = fit == FitMode.ActualSize ? 1d : Math.Max(directScale, rotatedScale);
+                    if (fit == FitMode.ShrinkToFit) scale = Math.Min(1d, scale);
                     var bounds = new PageRectangle(slot % columns * cell.WidthPoints, slot / columns * cell.HeightPoints, cell.WidthPoints, cell.HeightPoints);
                     return new PagePlacement(docs[unit.Doc].ItemId, x + 1, unit.Copy, slot, source, cell, scale, rotated, TargetBounds: bounds);
                 }).ToImmutableArray();
@@ -274,6 +297,9 @@ public static class LayoutCompiler
     }
 
     private static LayoutCompilation Failed(string code, string message) => new([], [new LayoutDiagnostic(code, message)], 0);
+
+    private static PageSize? DocumentSheetSize(LayoutDocument document, LayoutOptions options) =>
+        document.Settings?.SheetSize ?? options.SheetSize;
 
     private static string SegmentKey(LayoutDocument document, PageSize sheetSize)
     {

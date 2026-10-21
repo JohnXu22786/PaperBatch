@@ -2,12 +2,13 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using PaperBatch.Core.Intake;
 using PaperBatch.Core.Layout;
+using PaperBatch.Core.Preparation;
 
 namespace PaperBatch.Core.Rendering;
 
 /// <summary>Reopens generated PDFs with one explicitly pinned PDFium runtime to verify page count.</summary>
 public sealed class PdfiumArtifactInspector
-    : IPdfArtifactInspector, IPdfPageMetadataInspector, IPdfArtifactPreviewRenderer
+    : IPdfArtifactInspector, IPdfPageMetadataInspector, IPdfArtifactPreviewRenderer, IStaticPdfContentInspector
 {
     private const int MaximumPdfBytes = 512 * 1024 * 1024;
     private const string RuntimeOwnerMarkerName = ".paperbatch-pdfium-runtime-v1";
@@ -23,6 +24,85 @@ public sealed class PdfiumArtifactInspector
             throw new ArgumentException("An explicit PDFium SHA-256 pin is required.", nameof(expectedSha256));
         _runtimePath = Path.GetFullPath(explicitRuntimePath);
         _runtimeSha256 = expectedSha256.ToLowerInvariant();
+    }
+
+    /// <summary>Conservatively accepts only PDFs with no AcroForm/XFA form data or page annotations.</summary>
+    public async Task<bool> HasStaticPageContentAsync(Stream pdf, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(pdf);
+        if (!pdf.CanRead) throw new ArgumentException("The PDF stream must be readable.", nameof(pdf));
+        using var bytes = new MemoryStream();
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var read = await pdf.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+            if (read == 0) break;
+            if (bytes.Length + read > MaximumPdfBytes) throw new InvalidDataException("The PDF exceeds the inspection size limit.");
+            await bytes.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+        }
+        var content = bytes.ToArray();
+        if (content.Length < 5 || content.AsSpan(0, Math.Min(content.Length, 1024)).IndexOf("%PDF-"u8) < 0)
+            throw new InvalidDataException("The source artifact is not a PDF.");
+
+        lock (RuntimeGate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var runtimeDirectory = CreatePrivateRuntimeDirectory();
+            IntPtr library = IntPtr.Zero;
+            try
+            {
+                library = NativeLibrary.Load(StagePinnedRuntime(runtimeDirectory));
+                var init = Export<NoArguments>(library, "FPDF_InitLibrary");
+                var destroy = Export<NoArguments>(library, "FPDF_DestroyLibrary");
+                var load = Export<LoadDocument>(library, "FPDF_LoadMemDocument");
+                var close = Export<CloseDocument>(library, "FPDF_CloseDocument");
+                var pageCount = Export<GetPageCount>(library, "FPDF_GetPageCount");
+                var getFormType = Export<GetFormType>(library, "FPDF_GetFormType");
+                var loadPage = Export<LoadPage>(library, "FPDF_LoadPage");
+                var closePage = Export<ClosePage>(library, "FPDF_ClosePage");
+                var getAnnotationCount = Export<GetAnnotationCount>(library, "FPDFPage_GetAnnotCount");
+                var pinned = GCHandle.Alloc(content, GCHandleType.Pinned);
+                var initialized = false;
+                IntPtr document = IntPtr.Zero;
+                try
+                {
+                    init();
+                    initialized = true;
+                    document = load(pinned.AddrOfPinnedObject(), content.Length, IntPtr.Zero);
+                    if (document == IntPtr.Zero) throw new InvalidDataException("PDFium rejected the source PDF.");
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var count = pageCount(document);
+                    if (count <= 0) throw new InvalidDataException("PDFium returned an invalid page count.");
+                    if (getFormType(document) != 0) return false;
+                    for (var index = 0; index < count; index++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var page = loadPage(document, index);
+                        if (page == IntPtr.Zero) throw new InvalidDataException("PDFium could not inspect a source page.");
+                        try
+                        {
+                            var annotations = getAnnotationCount(page);
+                            if (annotations < 0) throw new InvalidDataException("PDFium returned an invalid annotation count.");
+                            if (annotations > 0) return false;
+                        }
+                        finally { closePage(page); }
+                    }
+                    return true;
+                }
+                finally
+                {
+                    if (document != IntPtr.Zero) close(document);
+                    pinned.Free();
+                    if (initialized) destroy();
+                }
+            }
+            finally
+            {
+                if (library != IntPtr.Zero) NativeLibrary.Free(library);
+                TryDeleteRuntimeDirectory(runtimeDirectory);
+            }
+        }
     }
 
     public async Task<int> GetPageCountAsync(Stream pdf, CancellationToken cancellationToken)
@@ -311,8 +391,10 @@ public sealed class PdfiumArtifactInspector
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr LoadDocument(IntPtr data, int length, IntPtr password);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void CloseDocument(IntPtr document);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int GetPageCount(IntPtr document);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int GetFormType(IntPtr document);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr LoadPage(IntPtr document, int pageIndex);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void ClosePage(IntPtr page);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int GetAnnotationCount(IntPtr page);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate float GetPageDimension(IntPtr page);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr CreateBitmap(int width, int height, int format, IntPtr firstScan, int stride);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void DestroyBitmap(IntPtr bitmap);

@@ -1,4 +1,5 @@
 using PaperBatch.Pdfium.Windows.Tests;
+using PaperBatch.Core.Rendering;
 
 var failures = 0;
 foreach (var (name, run) in new (string Name, Action Run)[]
@@ -9,6 +10,7 @@ foreach (var (name, run) in new (string Name, Action Run)[]
     ("page-edit API results preserve unavailable and not-run states", PageEditApiResultsPreserveStatuses),
     ("page-edit proof cannot pass without verified native behavior", PageEditUnavailableFailsProof),
     ("form fixture identifies one bounded text widget", FormFixtureIsBounded),
+    ("pinned PDFium accepts static pages and rejects widget annotations", PinnedStaticContentInspectionIsConservative),
     ("missing form exports retain per-API execution status", MissingFormExportsAreReported),
     ("form API failure status survives report formatting", FormApiFailureStatusIsReported),
     ("blocked form fixture preserves exports without native calls", BlockedFormFixturePreservesExportStatus),
@@ -109,6 +111,18 @@ static void FormFixtureIsBounded()
     Assert.Contains("/FT /Tx", fixture);
     Assert.Contains("SyntheticField", fixture);
     Assert.Contains("fixture-value", fixture);
+}
+
+static void PinnedStaticContentInspectionIsConservative()
+{
+    var runtimePath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH");
+    var expectedHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_SHA256");
+    if (string.IsNullOrWhiteSpace(runtimePath) || string.IsNullOrWhiteSpace(expectedHash)) return;
+    var inspector = new PdfiumArtifactInspector(runtimePath, expectedHash);
+    using var staticPdf = new MemoryStream(SyntheticPdf.CreateCompositionSource());
+    Assert.True(inspector.HasStaticPageContentAsync(staticPdf, CancellationToken.None).GetAwaiter().GetResult());
+    using var widgetPdf = new MemoryStream(SyntheticPdf.CreateTextFieldFixture());
+    Assert.True(!inspector.HasStaticPageContentAsync(widgetPdf, CancellationToken.None).GetAwaiter().GetResult());
 }
 
 static void MissingFormExportsAreReported()

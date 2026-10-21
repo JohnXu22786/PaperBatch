@@ -36,6 +36,17 @@ public sealed class PreparedArtifactCoordinator(
 {
     private const long MaximumPreparedSourceBytes = 512L * 1024 * 1024;
 
+    public Task<PreparedArtifactResult> PrepareAsync(
+        IEnumerable<SourceInput> inputs,
+        PrintSettings printSettings,
+        LayoutOptions layoutOptions,
+        string idempotencyKey,
+        RetentionMetadata retention,
+        DateTimeOffset createdAtUtc,
+        CancellationToken cancellationToken = default) =>
+        PrepareAsync(inputs, printSettings, layoutOptions, idempotencyKey, retention, createdAtUtc,
+            null, null, cancellationToken);
+
     public async Task<PreparedArtifactResult> PrepareAsync(
         IEnumerable<SourceInput> inputs,
         PrintSettings printSettings,
@@ -43,18 +54,24 @@ public sealed class PreparedArtifactCoordinator(
         string idempotencyKey,
         RetentionMetadata retention,
         DateTimeOffset createdAtUtc,
+        IReadOnlyList<PrintSettings>? perItemPrintSettings,
+        IReadOnlyList<LayoutDocumentSettings>? perItemLayoutSettings,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(inputs);
         ArgumentNullException.ThrowIfNull(printSettings);
         ArgumentNullException.ThrowIfNull(layoutOptions);
         ArgumentNullException.ThrowIfNull(retention);
+        var inputArray = inputs.ToArray();
         var diagnostics = new List<string>();
-        var prepared = await intake.PrepareAsync(inputs, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var prepared = await intake.PrepareAsync(inputArray, cancellationToken: cancellationToken).ConfigureAwait(false);
         var retainedSnapshots = prepared.Items.Where(item => item.Snapshot is not null)
             .Select(item => item.Snapshot!.SnapshotId).Distinct(StringComparer.Ordinal).ToArray();
         try
         {
+            if (perItemPrintSettings is not null && perItemPrintSettings.Count != prepared.Items.Length ||
+                perItemLayoutSettings is not null && perItemLayoutSettings.Count != prepared.Items.Length)
+                return new(null, null, ["Per-document settings must match the ordered queue length."], false);
             if (prepared.IsCancelled || cancellationToken.IsCancellationRequested)
                 return new(null, null, ["Preparation was cancelled; no prepared run was created."], IsCancelled: true);
             if (prepared.Items.IsDefaultOrEmpty || prepared.Items.Any(item => !item.IsReady))
@@ -63,15 +80,28 @@ public sealed class PreparedArtifactCoordinator(
                 if (diagnostics.Count == 0) diagnostics.Add("Every selected source must pass intake preflight before preparation.");
                 return new(null, null, diagnostics, IsCancelled: false);
             }
-            if (layoutOptions.Copies != 1)
-                return new(null, null, ["Set layout copies to one; print copies are carried by the selected driver settings."], IsCancelled: false);
-
+            for (var sourceIndex = 0; sourceIndex < inputArray.Length; sourceIndex++)
+            {
+                var expectedSha256 = inputArray[sourceIndex].ExpectedSha256;
+                if (expectedSha256 is not null && !string.Equals(expectedSha256,
+                    prepared.Items[sourceIndex].Snapshot!.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    diagnostics.Add($"{Path.GetFileName(prepared.Items[sourceIndex].SourcePath)} changed after queue preflight. Reimport the source before preparing; no final artifact was created.");
+                    return new(null, null, diagnostics, IsCancelled: false);
+                }
+            }
             var items = new List<PreparedItem>(prepared.Items.Length);
             var layoutDocuments = new List<LayoutDocument>(prepared.Items.Length);
             var compositionSources = new List<PdfCompositionSource>(prepared.Items.Length);
             long sourceBytes = 0;
-            foreach (var source in prepared.Items)
+            for (var sourceIndex = 0; sourceIndex < prepared.Items.Length; sourceIndex++)
             {
+                var source = prepared.Items[sourceIndex];
+                // Copies are compiled into the immutable PDF. The print settings stored on
+                // the prepared item describe the downstream device request, which must be
+                // one copy to avoid applying the requested count a second time.
+                var sourceSettings = (perItemPrintSettings is null ? printSettings : perItemPrintSettings[sourceIndex])
+                    with { Copies = 1 };
                 cancellationToken.ThrowIfCancellationRequested();
                 var snapshot = source.Snapshot!;
                 var render = await renderers.RenderAsync(
@@ -104,9 +134,10 @@ public sealed class PreparedArtifactCoordinator(
                     artifactReceipt.ArtifactId, artifactReceipt.Sha256, artifactReceipt.LengthBytes, pageSizes.Count,
                     new RendererCapabilities(1, ["application/pdf"]));
                 var pageMap = Enumerable.Range(1, pageSizes.Count).Select(page => new PageMapping(page, page)).ToArray();
-                items.Add(new PreparedItem(itemId, snapshot, rendererResult, pageMap, printSettings));
-                layoutDocuments.Add(new LayoutDocument(itemId, pageSizes, printSettings.Media,
-                    printSettings.PrinterId, printSettings.TrayId));
+                items.Add(new PreparedItem(itemId, snapshot, rendererResult, pageMap, sourceSettings));
+                layoutDocuments.Add(new LayoutDocument(itemId, pageSizes, sourceSettings.Media,
+                    sourceSettings.PrinterId, sourceSettings.TrayId,
+                    perItemLayoutSettings is null ? null : perItemLayoutSettings[sourceIndex], Path.GetFileName(source.SourcePath)));
                 compositionSources.Add(new PdfCompositionSource(itemId, sourceBuffer.ToArray(), StaticPageContentVerified: true));
             }
 
@@ -114,10 +145,14 @@ public sealed class PreparedArtifactCoordinator(
             var layout = LayoutCompiler.Compile(layoutDocuments, layoutOptions);
             if (!layout.Succeeded)
                 return new(null, null, layout.Diagnostics.Select(diagnostic => diagnostic.Message).ToArray(), IsCancelled: false);
-            var segment = new CompatibleSegment("segment_0", 0, items.Select(item => item.ItemId),
-                "layout-v1", printSettings);
+            var segments = new List<CompatibleSegment>();
+            var segmentedItems = items.Select((item, index) => (Item: item,
+                LayoutSettings: perItemLayoutSettings is null ? null : perItemLayoutSettings[index]));
+            foreach (var group in segmentedItems.GroupAdjacentBy(entry => (entry.Item.PrintSettings, entry.LayoutSettings)))
+                segments.Add(new CompatibleSegment("segment_" + segments.Count.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    segments.Count, group.Select(entry => entry.Item.ItemId), "layout-v1", group[0].Item.PrintSettings));
             var finalId = "run_" + Guid.NewGuid().ToString("N");
-            var fingerprint = ComputeFingerprint(items, printSettings, layoutOptions);
+            var fingerprint = ComputeFingerprint(items, printSettings, layoutOptions, perItemLayoutSettings);
             using var composedPdf = new MemoryStream();
             await composer.ComposePdfAsync(layout, compositionSources, composedPdf, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
@@ -133,7 +168,7 @@ public sealed class PreparedArtifactCoordinator(
             }
             var finalArtifact = new FinalPdfArtifact(finalReceipt.Artifact.ArtifactId,
                 finalReceipt.Artifact.Sha256, finalReceipt.Artifact.LengthBytes, layout.Pages.Length);
-            var run = PreparedRun.Create(finalId, createdAtUtc, fingerprint, items, [segment], finalArtifact);
+            var run = PreparedRun.Create(finalId, createdAtUtc, fingerprint, items, segments, finalArtifact);
             var persisted = runs.CreateRun(run, idempotencyKey, retention);
             return new(run, persisted, diagnostics, IsCancelled: false);
         }
@@ -151,7 +186,8 @@ public sealed class PreparedArtifactCoordinator(
         }
     }
 
-    private static string ComputeFingerprint(IEnumerable<PreparedItem> items, PrintSettings settings, LayoutOptions options)
+    private static string ComputeFingerprint(IEnumerable<PreparedItem> items, PrintSettings settings, LayoutOptions options,
+        IReadOnlyList<LayoutDocumentSettings>? perItemLayoutSettings)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         void Add(string value) => hash.AppendData(Encoding.UTF8.GetBytes(value + "\n"));
@@ -161,8 +197,11 @@ public sealed class PreparedArtifactCoordinator(
             Add(item.Source.Sha256);
             Add(item.Render.ArtifactId);
             Add(item.Render.ArtifactSha256);
+            Add(System.Text.Json.JsonSerializer.Serialize(item.PrintSettings));
         }
         Add(System.Text.Json.JsonSerializer.Serialize(settings));
+        Add(System.Text.Json.JsonSerializer.Serialize(perItemLayoutSettings?.Select(document => document is null ? null :
+            document with { Ranges = document.Ranges.IsDefault ? [] : document.Ranges }).ToArray()));
         Add(System.Text.Json.JsonSerializer.Serialize(new
         {
             options.Copies,
@@ -180,5 +219,26 @@ public sealed class PreparedArtifactCoordinator(
             options.MaximumOutputPages
         }));
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+}
+
+internal static class AdjacentGrouping
+{
+    internal static IEnumerable<List<T>> GroupAdjacentBy<T, TKey>(this IEnumerable<T> source, Func<T, TKey> keySelector)
+    {
+        List<T>? group = null;
+        TKey? previous = default;
+        foreach (var item in source)
+        {
+            var key = keySelector(item);
+            if (group is null || !EqualityComparer<TKey>.Default.Equals(previous!, key))
+            {
+                if (group is not null) yield return group;
+                group = [];
+                previous = key;
+            }
+            group.Add(item);
+        }
+        if (group is not null) yield return group;
     }
 }

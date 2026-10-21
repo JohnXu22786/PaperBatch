@@ -1,8 +1,11 @@
 using System.Collections.ObjectModel;
+using System.Collections.Immutable;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows.Input;
 using Avalonia.Threading;
+using PaperBatch.Core.Domain;
+using PaperBatch.Core.Layout;
 
 namespace PaperBatch.Desktop.Presentation;
 
@@ -26,6 +29,15 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     private long _previewRequestNumber;
     private string _language = "en";
     private TemplateSnapshot? _selectedTemplate;
+    private int _requestedCopies = 1;
+    private int _requestedNUp = 1;
+    private int _orientationIndex;
+    private int _scalingIndex;
+    private int _mediaIndex;
+    private int _duplexIndex;
+    private string _pageRange = "";
+    private ColorMode _requestedColorMode = ColorMode.Color;
+    private PaperBatch.Core.Recipes.JobRecipe? _activeRecipe;
 
     public DesktopShellViewModel(
         IQueuePresentationSource queueSource,
@@ -95,6 +107,119 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     public ICommand RemoveQueueItemCommand { get; }
 
+    public int RequestedCopies { get => _requestedCopies; set { if (SetProperty(ref _requestedCopies, Math.Clamp(value, 1, 999))) InvalidatePreparedQueue(); } }
+    public int RequestedNUp { get => _requestedNUp; set { if (SetProperty(ref _requestedNUp, value is 2 or 4 ? value : 1)) InvalidatePreparedQueue(); } }
+    public int RequestedNUpIndex { get => RequestedNUp switch { 2 => 1, 4 => 2, _ => 0 }; set => RequestedNUp = value switch { 1 => 2, 2 => 4, _ => 1 }; }
+    public int OrientationIndex { get => _orientationIndex; set { if (SetProperty(ref _orientationIndex, Math.Clamp(value, 0, 2))) InvalidatePreparedQueue(); } }
+    public int ScalingIndex { get => _scalingIndex; set { if (SetProperty(ref _scalingIndex, Math.Clamp(value, 0, 1))) InvalidatePreparedQueue(); } }
+    public int MediaIndex { get => _mediaIndex; set { if (SetProperty(ref _mediaIndex, Math.Clamp(value, 0, 1))) InvalidatePreparedQueue(); } }
+    public int DuplexIndex { get => _duplexIndex; set { if (SetProperty(ref _duplexIndex, Math.Clamp(value, 0, 2))) InvalidatePreparedQueue(); } }
+    public string PageRange { get => _pageRange; set { if (SetProperty(ref _pageRange, value ?? "")) InvalidatePreparedQueue(); } }
+    public string PrepareLabel => Localize("Prepare and preview PDF", "准备并预览 PDF");
+    public string PreparationSettingsHeading => Localize("Requested preparation settings", "请求的准备设置");
+    public string CopiesLabel => Localize("Copies", "份数");
+    public string OrientationLabel => Localize("Orientation", "方向");
+    public string ScalingLabel => Localize("Scaling", "缩放");
+    public string NUpLabel => Localize("Pages per sheet", "每张页数");
+    public string MediaLabel => Localize("Sheet size", "纸张尺寸");
+    public string DuplexLabel => Localize("Duplex request", "双面请求");
+    public string PageRangeLabel => Localize("Page range (blank = all)", "页码范围（留空为全部）");
+    public IReadOnlyList<string> OrientationOptions => IsChinese ? ["自动", "纵向", "横向"] : ["Auto", "Portrait", "Landscape"];
+    public IReadOnlyList<string> ScalingOptions => IsChinese ? ["缩小以适合", "实际大小"] : ["Shrink to fit", "Actual size"];
+    public IReadOnlyList<string> NUpOptions => ["1", "2", "4"];
+    public IReadOnlyList<string> MediaOptions => ["Letter", "A4"];
+    public IReadOnlyList<string> DuplexOptions => IsChinese ? ["单面", "双面长边", "双面短边"] : ["Simplex", "Long edge", "Short edge"];
+    public string PreparationSettingsNote => Localize("Values above are requested for this batch or explicitly loaded recipe. Recipe defaults apply only after you load that recipe. Printer and tray capabilities are not connected; media, color and duplex requests are not validated against a device. Nothing will be printed.",
+        "以上是此批次或明确加载的配方请求值。仅在加载配方后应用其默认值。打印机和纸盒能力尚未连接；纸张、颜色和双面请求未经设备验证。不会提交打印。");
+    public string PreparationResolutionNote
+    {
+        get
+        {
+            var summaries = _queueSource is IQueuePreparationPresentationSource source ? source.ResolutionSummaries : [];
+            if (_activeRecipe is null) return Localize("No recipe is loaded; batch controls supply these requested values.", "未加载配方；当前请求值来自批次控件。");
+            return summaries.Count == 0
+                ? Localize("Resolved values and their source will appear here after preparation.", "准备后将在此处显示解析值及其来源。")
+                : Localize("Per-file requested values and provenance: " + string.Join("\n", summaries),
+                    "每个文件的请求值及来源：" + string.Join("\n", summaries));
+        }
+    }
+    public bool CanPrepareQueue => IsProductionMode && _queueSource is IQueuePreparationPresentationSource { CanPrepare: true };
+
+    public async Task PrepareQueueAsync(CancellationToken cancellationToken = default)
+    {
+        if (_queueSource is not IQueuePreparationPresentationSource source || !source.CanPrepare)
+            throw new InvalidOperationException("Preparation requires a configured PDFium runtime and a nonempty supported queue.");
+        var media = MediaIndex == 1 ? "A4" : "Letter";
+        var orientation = OrientationIndex switch { 1 => Orientation.Portrait, 2 => Orientation.Landscape, _ => Orientation.Auto };
+        var scaling = ScalingIndex == 1 ? ScalingMode.ActualSize : ScalingMode.ShrinkToFit;
+        var duplex = DuplexIndex switch { 1 => DuplexMode.LongEdge, 2 => DuplexMode.ShortEdge, _ => DuplexMode.Simplex };
+        PageSize? size = orientation == Orientation.Auto ? null : media == "A4"
+            ? (orientation == Orientation.Landscape ? new PageSize(841.89, 595.28) : new PageSize(595.28, 841.89))
+            : (orientation == Orientation.Landscape ? new PageSize(792, 612) : new PageSize(612, 792));
+        ImmutableArray<PageRange> ranges;
+        try { ranges = ParsePageRange(PageRange); }
+        catch (InvalidOperationException exception)
+        {
+            OperationError = LocalizePreparationError(exception.Message);
+            return;
+        }
+        var settings = new PrintSettings(RequestedCopies, _requestedColorMode, duplex, media, orientation, scaling);
+        var options = new LayoutOptions(Copies: RequestedCopies, NUp: RequestedNUp switch { 2 => NUpMode.Two, 4 => NUpMode.Four, _ => NUpMode.One },
+            Duplex: duplex != DuplexMode.Simplex, Fit: scaling == ScalingMode.ActualSize ? FitMode.ActualSize : FitMode.ShrinkToFit,
+            SheetSize: size, Ranges: ranges);
+        var result = await source.PrepareQueueAsync(settings, options, _activeRecipe, cancellationToken).ConfigureAwait(true);
+        OperationError = result.Succeeded ? null : LocalizePreparationError(string.Join(" ", result.Diagnostics));
+        if (result.Succeeded) await RefreshSelectedItemAsync().ConfigureAwait(true);
+        OnPropertyChanged(nameof(PrepareLabel));
+        OnPropertyChanged(nameof(PreparationResolutionNote));
+    }
+
+    private static System.Collections.Immutable.ImmutableArray<PageRange> ParsePageRange(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return [];
+        var parts = value.Split('-', StringSplitOptions.TrimEntries);
+        if (parts.Length is < 1 or > 2 || !int.TryParse(parts[0], out var first) || first < 1 ||
+            (parts.Length == 2 && (!int.TryParse(parts[1], out var last) || last < first)) ||
+            (parts.Length == 2 && string.IsNullOrEmpty(parts[1])))
+            throw new InvalidOperationException("Enter a page range such as 1-5, or leave it blank to include every page.");
+        var end = parts.Length == 2 ? int.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture) : first;
+        return [new PageRange(first, end)];
+    }
+
+    private string LocalizePreparationError(string message)
+    {
+        if (!IsChinese) return message;
+        if (message.Contains("changed after queue preflight", StringComparison.Ordinal))
+            return "源文件在队列预检后发生变化。请重新导入后再准备；未创建最终文件。";
+        if (message.Contains("Per-file device requests resolve differently", StringComparison.Ordinal))
+            return "不同文件的设备请求不一致。当前准备运行模型要求每个兼容分段使用单一设备配置，且此界面无法验证逐文件设备设置；未创建文件。";
+        if (message.Contains("Enter a page range such as", StringComparison.Ordinal))
+            return "请输入页码范围，例如 1-5；留空则包含所有页面。";
+        var pageRangeError = message.IndexOf(" is invalid; valid pages are 1-", StringComparison.Ordinal);
+        if (pageRangeError >= 0)
+        {
+            var context = message[..pageRangeError];
+            var validPages = message[(pageRangeError + " is invalid; valid pages are 1-".Length)..].TrimEnd('.');
+            var fileMarker = context.LastIndexOf(" for ", StringComparison.Ordinal);
+            return fileMarker >= 0
+                ? $"文件 {context[(fileMarker + 5)..]} 的页码范围 {context["Page range ".Length..fileMarker]} 无效；有效页码为 1-{validPages}。"
+                : $"文件 {context["The selected page range for ".Length..]} 的页码范围无效；有效页码为 1-{validPages}。";
+        }
+        if (message.Contains("requested media is not supported", StringComparison.Ordinal))
+            return "请求的纸张尺寸不受桌面布局控件支持；未创建文件。";
+        if (message.Contains("recipe rules support only PDF, JPEG, and PNG", StringComparison.Ordinal))
+            return "配方规则仅支持 PDF、JPEG 和 PNG 文件。";
+        return "准备失败。请检查来源、预检状态和请求设置后重试。详细信息：" + message;
+    }
+
+    private void InvalidatePreparedQueue()
+    {
+        if (_queueSource is not IPreparedArtifactPresentationSource prepared) return;
+        foreach (var item in QueueItems) prepared.InvalidatePreparedRun(item.Id);
+        CurrentPreview = null;
+        OnPropertyChanged(nameof(CanPrepareQueue));
+    }
+
     public int LanguageIndex
     {
         get => _language == "zh-CN" ? 1 : 0;
@@ -144,7 +269,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
             }).ToArray();
         }
         foreach (var property in new[] { nameof(SectionQueueLabel), nameof(SectionHistoryLabel), nameof(SectionTemplatesLabel),
-                     nameof(ActiveSectionTitle), nameof(HistoryEyebrow), nameof(HistoryTitle), nameof(HistoryDescription), nameof(HistoryEntries), nameof(TemplateEyebrow), nameof(TemplateTitle), nameof(TemplateDescription), nameof(Templates), nameof(CreateRecipeLabel), nameof(RenameRecipeLabel), nameof(DeleteRecipeLabel), nameof(ImportRecipeLabel), nameof(ExportRecipeLabel), nameof(LoadRecipeLabel), nameof(RefreshRecipesLabel) })
+                     nameof(ActiveSectionTitle), nameof(HistoryEyebrow), nameof(HistoryTitle), nameof(HistoryDescription), nameof(HistoryEntries), nameof(TemplateEyebrow), nameof(TemplateTitle), nameof(TemplateDescription), nameof(Templates), nameof(CreateRecipeLabel), nameof(RenameRecipeLabel), nameof(DeleteRecipeLabel), nameof(ImportRecipeLabel), nameof(ExportRecipeLabel), nameof(LoadRecipeLabel), nameof(RefreshRecipesLabel), nameof(PreparationSettingsHeading), nameof(SettingsHeading), nameof(CopiesLabel), nameof(OrientationLabel), nameof(ScalingLabel), nameof(NUpLabel), nameof(MediaLabel), nameof(DuplexLabel), nameof(PageRangeLabel), nameof(OrientationOptions), nameof(ScalingOptions), nameof(DuplexOptions), nameof(PreparationSettingsNote), nameof(PreparationResolutionNote), nameof(PrepareLabel) })
             OnPropertyChanged(property);
     }
 
@@ -174,6 +299,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         if (SelectedQueueItem is null || !QueueItems.Contains(SelectedQueueItem))
             SelectedQueueItem = imported.FirstOrDefault(item => QueueItems.Contains(item)) ?? QueueItems.FirstOrDefault();
         OnPropertyChanged(nameof(QueueStateLabel));
+        OnPropertyChanged(nameof(CanPrepareQueue));
     }
 
     public void RefreshTemplates()
@@ -237,8 +363,20 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         if (_templateSource is not IRecipeManagementPresentationSource manager || !CanManageRecipes ||
             _queueSource is not IQueueEditingPresentationSource editable || _queueSource is not IQueueImportPresentationSource importer)
             throw new InvalidOperationException("Recipe sources cannot be loaded in this presentation mode.");
+        var savedRecipe = manager.GetRecipe(recipe.RecipeId);
+        if (savedRecipe.Settings.Media is not ("Letter" or "A4"))
+            throw new InvalidOperationException("This recipe requests a sheet size not supported by the desktop layout controls. Its sources were not loaded.");
         var paths = manager.GetRecipeSourceLocations(recipe.RecipeId);
+        _activeRecipe = new PaperBatch.Core.Recipes.JobRecipe(savedRecipe.SchemaVersion, savedRecipe.RecipeId,
+            savedRecipe.Name, savedRecipe.Sources, savedRecipe.Settings) { Rules = savedRecipe.Rules };
+        OnPropertyChanged(nameof(PreparationResolutionNote));
         var imported = await importer.ImportAsync(paths, cancellationToken).ConfigureAwait(true);
+        RequestedCopies = savedRecipe.Settings.Copies;
+        OrientationIndex = savedRecipe.Settings.Orientation switch { Orientation.Portrait => 1, Orientation.Landscape => 2, _ => 0 };
+        ScalingIndex = savedRecipe.Settings.ScalingMode == ScalingMode.ActualSize ? 1 : 0;
+        MediaIndex = savedRecipe.Settings.Media == "A4" ? 1 : 0;
+        DuplexIndex = savedRecipe.Settings.DuplexMode switch { DuplexMode.LongEdge => 1, DuplexMode.ShortEdge => 2, _ => 0 };
+        _requestedColorMode = savedRecipe.Settings.ColorMode;
         if (replaceQueue)
         {
             var importedIds = imported.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
@@ -255,6 +393,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         if (SelectedQueueItem is null || !QueueItems.Contains(SelectedQueueItem))
             SelectedQueueItem = imported.FirstOrDefault(item => QueueItems.Contains(item)) ?? QueueItems.FirstOrDefault();
         OnPropertyChanged(nameof(QueueStateLabel));
+        OnPropertyChanged(nameof(CanPrepareQueue));
     }
 
     public WorkspaceStatusSnapshot WorkspaceStatus => _workspaceStatus;
@@ -270,7 +409,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     public string PreflightHeading => _workspaceStatus.IsDemo ? "Demo checks only" : "Source preflight";
 
-    public string SettingsHeading => _workspaceStatus.IsDemo ? "Example values and reasons" : "Effective values and provenance";
+    public string SettingsHeading => _workspaceStatus.IsDemo ? "Example values and reasons" : Localize("Resolved status and provenance", "已解析状态与来源");
 
     public string PreviewHeading => _workspaceStatus.IsDemo ? "DEMO PREVIEW" : HasPreviewImage ? "FINAL PREVIEW · PREPARED ARTIFACT" : "FINAL PREVIEW UNAVAILABLE";
 
@@ -343,7 +482,8 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     public string QueueDescription => _workspaceStatus.IsDemo
         ? "Selecting a row updates only the sample preview and sample settings."
-        : "Source files are captured and checked by the shared core. Rendering and print submission are unavailable.";
+        : Localize("Sources are captured and checked before preparation. PDF/JPEG/PNG preparation requires the configured PDFium runtime. This flow creates and previews a PDF only; it does not submit a print job.",
+            "来源会在准备前进行捕获和检查。准备 PDF/JPEG/PNG 需要配置 PDFium 运行时。此流程仅生成并预览 PDF，不会提交打印任务。");
 
     public string? OperationError
     {
@@ -461,6 +601,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         if (_previewSource is IPreparedArtifactPresentationSource preparedArtifacts)
             foreach (var item in QueueItems) preparedArtifacts.InvalidatePreparedRun(item.Id);
         OnPropertyChanged(nameof(QueueStateLabel));
+        OnPropertyChanged(nameof(CanPrepareQueue));
     }
 
     public void MoveSelectedQueueItem(int delta) => MoveQueueItemCommand.Execute(delta);
@@ -475,6 +616,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         QueueItems.Remove(selected);
         SelectedQueueItem = QueueItems.Count == 0 ? null : QueueItems[Math.Min(index, QueueItems.Count - 1)];
         OnPropertyChanged(nameof(QueueStateLabel));
+        OnPropertyChanged(nameof(CanPrepareQueue));
     }
 
     private static bool CanNavigate(object? parameter) => TryGetSection(parameter, out _);

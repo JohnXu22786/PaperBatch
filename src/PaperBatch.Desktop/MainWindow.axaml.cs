@@ -41,6 +41,17 @@ internal partial class MainWindow : Window
         }
     }
 
+    private async void PrepareQueueClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        try { await _viewModel.PrepareQueueAsync(); }
+        catch (Exception exception)
+        {
+            _viewModel.OperationError = _viewModel.IsChinese
+                ? $"准备失败（{exception.GetType().Name}）；不会提交打印。"
+                : $"Preparation failed ({exception.GetType().Name}); no print job was submitted.";
+        }
+    }
+
     private async void CreateRecipeClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         try
