@@ -6,6 +6,8 @@ using System.Windows.Input;
 using Avalonia.Threading;
 using PaperBatch.Core.Domain;
 using PaperBatch.Core.Layout;
+using PaperBatch.Core.Printing;
+using PaperBatch.Core.Persistence;
 
 namespace PaperBatch.Desktop.Presentation;
 
@@ -36,6 +38,11 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     private int _scalingIndex;
     private int _mediaIndex;
     private int _duplexIndex;
+    private PrinterQueueCapabilitySnapshot? _selectedPrinter;
+    private IReadOnlyList<PrintJobSnapshot> _printJobs = [];
+    private int _printSubmissionGate;
+    private long _printJobsRequestNumber;
+    private bool _printStatusUnavailable;
     private string _pageRange = "";
     private ColorMode _requestedColorMode = ColorMode.Color;
     private PaperBatch.Core.Recipes.JobRecipe? _activeRecipe;
@@ -74,6 +81,9 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         MoveQueueItemCommand = new RelayCommand(MoveQueueItem, CanMoveQueueItem);
         RemoveQueueItemCommand = new RelayCommand(_ => RemoveSelectedQueueItem(), _ => SelectedQueueItem is not null);
         RefreshPrinterCapabilitiesCommand = new RelayCommand(_ => _ = RefreshPrinterCapabilitiesAsync(), _ => CanRefreshPrinterCapabilities);
+        PrintPreparedRunCommand = new RelayCommand(_ => _ = SubmitPreparedRunAsync(), _ => CanSubmitPreparedRun);
+        RefreshPrintJobsCommand = new RelayCommand(_ => _ = RefreshPrintJobsAsync(), _ => CanRefreshPrintJobs);
+        CancelPrintJobCommand = new RelayCommand(value => _ = CancelPrintJobAsync(value as string), value => value is string id && _printJobs.Any(job => job.JobId == id && job.CanCancel));
 
         if (QueueItems.Count > 0)
         {
@@ -112,8 +122,20 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     public ICommand RemoveQueueItemCommand { get; }
 
     public ICommand RefreshPrinterCapabilitiesCommand { get; }
+    public ICommand PrintPreparedRunCommand { get; }
+    public ICommand RefreshPrintJobsCommand { get; }
+    public ICommand CancelPrintJobCommand { get; }
 
     public ObservableCollection<PrinterQueueCapabilitySnapshot> PrinterQueues { get; }
+    public PrinterQueueCapabilitySnapshot? SelectedPrinter { get => _selectedPrinter; set { if (SetProperty(ref _selectedPrinter, value)) { InvalidatePreparedQueue(); OnPropertyChanged(nameof(CanPrepareSelectedQueue)); OnPropertyChanged(nameof(CanSubmitPreparedRun)); } } }
+    public IReadOnlyList<PrintJobSnapshot> PrintJobs { get => _printJobs; private set { if (SetProperty(ref _printJobs, value)) OnPropertyChanged(nameof(CanSubmitPreparedRun)); } }
+    public bool CanSubmitPreparedRun => IsProductionMode && _queueSource is IPrintSubmissionPresentationSource { CanSubmitPrintJobs: true } &&
+        SelectedPrinter is not null && HasPreviewImage && !_printStatusUnavailable && PrintJobs.Count > 0 && PrintJobs.All(job => job.State == nameof(JobState.Ready)) &&
+        Volatile.Read(ref _printSubmissionGate) == 0;
+    public bool CanRefreshPrintJobs => _queueSource is IPrintSubmissionPresentationSource { CanSubmitPrintJobs: true } && SelectedQueueItem is not null;
+    public string PrintLabel => Localize("Print prepared PDF", "打印已准备的 PDF");
+    public string PrintStatus => Localize("OS spooler status only; paper output is not confirmed. Cancellation targets the owned job receipt; emitted pages cannot be recalled and Winspool cancellation is not atomic.",
+        "仅显示操作系统队列状态；不代表纸张已输出。取消仅针对本应用持有的作业回执；已输出页面无法撤回，且 Winspool 取消并非原子操作。");
 
     private string _printerCapabilityStatusEnglish = "Select Refresh to read local Windows queue capabilities. No print jobs are submitted.";
     private string _printerCapabilityStatusChinese = "选择“刷新”以读取本地 Windows 队列能力。不会提交打印作业。";
@@ -150,6 +172,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
                 async () => await _printerCapabilitySource.ReadPrinterCapabilitiesAsync(cancellationToken).ConfigureAwait(false),
                 cancellationToken).ConfigureAwait(true);
             foreach (var entry in entries) PrinterQueues.Add(entry with { Chinese = IsChinese });
+            if (SelectedPrinter is not null) SelectedPrinter = PrinterQueues.FirstOrDefault(entry => entry.QueueIdentity == SelectedPrinter.QueueIdentity);
             if (entries.Count == 0)
                 SetPrinterCapabilityStatus("No local print queues were reported.", "没有发现本地打印队列。");
             else
@@ -195,14 +218,17 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     public string NUpLabel => Localize("Pages per sheet", "每张页数");
     public string MediaLabel => Localize("Sheet size", "纸张尺寸");
     public string DuplexLabel => Localize("Duplex request", "双面请求");
+    public string ColorLabel => Localize("Color mode", "颜色模式");
     public string PageRangeLabel => Localize("Page range (blank = all)", "页码范围（留空为全部）");
     public IReadOnlyList<string> OrientationOptions => IsChinese ? ["自动", "纵向", "横向"] : ["Auto", "Portrait", "Landscape"];
     public IReadOnlyList<string> ScalingOptions => IsChinese ? ["缩小以适合", "实际大小"] : ["Shrink to fit", "Actual size"];
     public IReadOnlyList<string> NUpOptions => ["1", "2", "4"];
     public IReadOnlyList<string> MediaOptions => ["Letter", "A4"];
     public IReadOnlyList<string> DuplexOptions => IsChinese ? ["单面", "双面长边", "双面短边"] : ["Simplex", "Long edge", "Short edge"];
-    public string PreparationSettingsNote => Localize("Values above are requested for this batch or explicitly loaded recipe. Recipe defaults apply only after you load that recipe. Printer and tray capabilities are not connected; media, color and duplex requests are not validated against a device. Nothing will be printed.",
-        "以上是此批次或明确加载的配方请求值。仅在加载配方后应用其默认值。打印机和纸盒能力尚未连接；纸张、颜色和双面请求未经设备验证。不会提交打印。");
+    public IReadOnlyList<string> ColorOptions => IsChinese ? ["彩色", "黑白"] : ["Color", "Monochrome"];
+    public int RequestedColorIndex { get => _requestedColorMode == ColorMode.Color ? 0 : 1; set { var mode = value == 1 ? ColorMode.Monochrome : ColorMode.Color; if (_requestedColorMode != mode) { _requestedColorMode = mode; OnPropertyChanged(nameof(RequestedColorIndex)); InvalidatePreparedQueue(); } } }
+    public string PreparationSettingsNote => Localize("Values above are requested for this batch or explicitly loaded recipe. Recipe defaults apply only after you load that recipe. Printing requires an explicit queue and supported exact settings.",
+        "以上是此批次或明确加载的配方请求值。仅在加载配方后应用其默认值。打印需要明确选择队列及该队列报告支持的精确设置。");
     public string PreparationResolutionNote
     {
         get
@@ -215,12 +241,36 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
                     "每个文件的请求值及来源：" + string.Join("\n", summaries));
         }
     }
-    public bool CanPrepareQueue => IsProductionMode && _queueSource is IQueuePreparationPresentationSource { CanPrepare: true };
+    public bool CanPrepareQueue => IsProductionMode && _queueSource is IQueuePreparationPresentationSource { CanPrepare: true } && CanPrepareSelectedQueue;
+    public bool CanPrepareSelectedQueue
+    {
+        get
+        {
+            var capabilities = SelectedPrinter?.Capabilities;
+            if (capabilities is null) return false;
+            var media = MediaIndex == 1 ? "A4" : "Letter";
+            var duplex = DuplexIndex switch { 1 => DuplexMode.LongEdge, 2 => DuplexMode.ShortEdge, _ => DuplexMode.Simplex };
+            try
+            {
+                // Copies are materialized in the prepared PDF, so the driver must receive one copy.
+                _ = WindowsPrintJobOptions.Map(capabilities.QueueIdentity, capabilities,
+                    new PrintSettings(1, _requestedColorMode, duplex, media,
+                        Orientation.Auto, ScalingMode.ShrinkToFit, capabilities.QueueIdentity));
+                return true;
+            }
+            catch (PrintCapabilityException) { return false; }
+        }
+    }
 
     public async Task PrepareQueueAsync(CancellationToken cancellationToken = default)
     {
         if (_queueSource is not IQueuePreparationPresentationSource source || !source.CanPrepare)
             throw new InvalidOperationException("Preparation requires a configured PDFium runtime and a nonempty supported queue.");
+        if (!CanPrepareSelectedQueue)
+        {
+            OperationError = Localize("Select a queue and choose only settings reported as supported by that queue.", "请选择队列，并仅选择该队列报告支持的设置。");
+            return;
+        }
         var media = MediaIndex == 1 ? "A4" : "Letter";
         var orientation = OrientationIndex switch { 1 => Orientation.Portrait, 2 => Orientation.Landscape, _ => Orientation.Auto };
         var scaling = ScalingIndex == 1 ? ScalingMode.ActualSize : ScalingMode.ShrinkToFit;
@@ -235,7 +285,9 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
             OperationError = LocalizePreparationError(exception.Message);
             return;
         }
-        var settings = new PrintSettings(RequestedCopies, _requestedColorMode, duplex, media, orientation, scaling);
+        // LayoutCompiler materializes RequestedCopies in the persisted PDF; asking the driver for
+        // the same count would multiply the requested output (for example, 3 × 3).
+        var settings = new PrintSettings(1, _requestedColorMode, duplex, media, orientation, scaling, SelectedPrinter?.QueueIdentity);
         var options = new LayoutOptions(Copies: RequestedCopies, NUp: RequestedNUp switch { 2 => NUpMode.Two, 4 => NUpMode.Four, _ => NUpMode.One },
             Duplex: duplex != DuplexMode.Simplex, Fit: scaling == ScalingMode.ActualSize ? FitMode.ActualSize : FitMode.ShrinkToFit,
             SheetSize: size, Ranges: ranges);
@@ -244,6 +296,118 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         if (result.Succeeded) await RefreshSelectedItemAsync().ConfigureAwait(true);
         OnPropertyChanged(nameof(PrepareLabel));
         OnPropertyChanged(nameof(PreparationResolutionNote));
+        OnPropertyChanged(nameof(CanSubmitPreparedRun));
+    }
+
+    public async Task SubmitPreparedRunAsync(CancellationToken cancellationToken = default)
+    {
+        if (!CanSubmitPreparedRun || SelectedQueueItem is null || _queueSource is not IPrintSubmissionPresentationSource source) return;
+        var queueItemId = SelectedQueueItem.Id;
+        if (Interlocked.CompareExchange(ref _printSubmissionGate, 1, 0) != 0) return;
+        var requestNumber = Interlocked.Increment(ref _printJobsRequestNumber);
+        OnPropertyChanged(nameof(CanSubmitPreparedRun));
+        try
+        {
+            var jobs = await source.SubmitPreparedRunAsync(queueItemId, cancellationToken).ConfigureAwait(true);
+            if (requestNumber == Volatile.Read(ref _printJobsRequestNumber) && string.Equals(SelectedQueueItem?.Id, queueItemId, StringComparison.Ordinal))
+            {
+                SetPrintStatusUnavailable(false);
+                PrintJobs = LocalizePrintJobs(jobs);
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            if (requestNumber == Volatile.Read(ref _printJobsRequestNumber) && string.Equals(SelectedQueueItem?.Id, queueItemId, StringComparison.Ordinal))
+            {
+                SetPrintStatusUnavailable(true);
+                OperationError = Localize("Print submission could not be completed (" + exception.GetType().Name + ").",
+                    "无法完成打印提交（" + exception.GetType().Name + "）。");
+                PrintJobs = PrintJobs.Select(job => job with { State = "StatusUnavailable", DisplayState = Localize("Status unavailable", "状态不可用"),
+                    Detail = Localize("Submission status could not be confirmed.", "无法确认提交状态。"), CanCancel = false }).ToArray();
+            }
+        }
+        finally { Interlocked.Exchange(ref _printSubmissionGate, 0); OnPropertyChanged(nameof(CanSubmitPreparedRun)); }
+    }
+
+    public async Task RefreshPrintJobsAsync(CancellationToken cancellationToken = default)
+    {
+        if (SelectedQueueItem is null) return;
+        await RefreshPrintJobsAsync(SelectedQueueItem.Id, cancellationToken).ConfigureAwait(true);
+    }
+
+    private async Task RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken)
+    {
+        if (_queueSource is not IPrintSubmissionPresentationSource source || !string.Equals(SelectedQueueItem?.Id, queueItemId, StringComparison.Ordinal)) return;
+        var requestNumber = Interlocked.Increment(ref _printJobsRequestNumber);
+        try
+        {
+            var jobs = await source.RefreshPrintJobsAsync(queueItemId, cancellationToken).ConfigureAwait(true);
+            if (requestNumber == Volatile.Read(ref _printJobsRequestNumber) && string.Equals(SelectedQueueItem?.Id, queueItemId, StringComparison.Ordinal))
+            {
+                SetPrintStatusUnavailable(false);
+                PrintJobs = LocalizePrintJobs(jobs);
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            if (requestNumber == Volatile.Read(ref _printJobsRequestNumber) && string.Equals(SelectedQueueItem?.Id, queueItemId, StringComparison.Ordinal))
+            {
+                SetPrintStatusUnavailable(true);
+                OperationError = Localize("Print status unavailable (" + exception.GetType().Name + "). Refresh before submitting.",
+                    "打印状态不可用（" + exception.GetType().Name + "）。请刷新后再提交。");
+                PrintJobs = PrintJobs.Select(job => job with
+                {
+                    State = "StatusUnavailable",
+                    DisplayState = Localize("Status unavailable", "状态不可用"),
+                    Detail = Localize("OS job status could not be read.", "无法读取操作系统作业状态。"),
+                    CanCancel = false
+                }).ToArray();
+            }
+        }
+    }
+
+    public async Task CancelPrintJobAsync(string? jobId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(jobId) || SelectedQueueItem is null || _queueSource is not IPrintSubmissionPresentationSource source) return;
+        var queueItemId = SelectedQueueItem.Id;
+        try { await source.CancelPrintJobAsync(jobId, cancellationToken).ConfigureAwait(true); }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            if (string.Equals(SelectedQueueItem?.Id, queueItemId, StringComparison.Ordinal))
+                OperationError = Localize("Print cancellation could not be confirmed (" + exception.GetType().Name + "). Refresh status before retrying.",
+                    "无法确认打印取消状态（" + exception.GetType().Name + "）。请刷新状态后重试。");
+            return;
+        }
+        if (string.Equals(SelectedQueueItem?.Id, queueItemId, StringComparison.Ordinal))
+            await RefreshPrintJobsAsync(queueItemId, cancellationToken).ConfigureAwait(true);
+    }
+
+    private IReadOnlyList<PrintJobSnapshot> LocalizePrintJobs(IReadOnlyList<PrintJobSnapshot> jobs) => !IsChinese ? jobs : jobs.Select(job => job with
+    {
+        DisplayState = job.State switch
+        {
+            "Ready" => "就绪", "Submitting" => "正在提交", "AcceptedByOs" => "操作系统已接受",
+            "OsProcessing" => "操作系统处理中", "OsReportsComplete" => "操作系统报告完成",
+            "FailedBeforeSubmit" => "提交前失败", "NeedsReviewUnknown" => "结果未知（需检查）",
+            "CancelRequested" => "已请求取消", "CancelObserved" => "操作系统报告已取消",
+            "StatusUnavailable" => "状态不可用", _ => job.State
+        },
+        Detail = job.Detail switch
+        {
+            "Submission outcome unknown; automatic retry is blocked." => "提交结果未知；已阻止自动重试。",
+            "Reported by the OS spooler; this does not confirm paper output." => "操作系统队列已报告此状态；不代表纸张已输出。",
+            "Not accepted: A printer queue must be explicitly selected." => "未接受：必须明确选择打印机队列。",
+            "Not accepted: The selected queue identity changed." => "未接受：所选队列身份已发生变化。",
+            var detail when detail.StartsWith("Not accepted:", StringComparison.Ordinal) => "打印队列未接受此作业。请刷新队列能力并检查打印机设置。",
+            _ => job.Detail
+        }
+    }).ToArray();
+
+    private void SetPrintStatusUnavailable(bool value)
+    {
+        if (_printStatusUnavailable == value) return;
+        _printStatusUnavailable = value;
+        OnPropertyChanged(nameof(CanSubmitPreparedRun));
     }
 
     private static System.Collections.Immutable.ImmutableArray<PageRange> ParsePageRange(string value)
@@ -290,6 +454,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         foreach (var item in QueueItems) prepared.InvalidatePreparedRun(item.Id);
         CurrentPreview = null;
         OnPropertyChanged(nameof(CanPrepareQueue));
+        OnPropertyChanged(nameof(CanPrepareSelectedQueue));
     }
 
     public int LanguageIndex
@@ -342,9 +507,10 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
                 })
             }).ToArray();
         }
-        foreach (var property in new[] { nameof(SectionQueueLabel), nameof(SectionHistoryLabel), nameof(SectionTemplatesLabel), nameof(SectionPrintersLabel), nameof(PrinterRefreshLabel), nameof(PrinterCapabilityStatus), nameof(PrinterCapabilityHelp),
-                     nameof(ActiveSectionTitle), nameof(HistoryEyebrow), nameof(HistoryTitle), nameof(HistoryDescription), nameof(HistoryEntries), nameof(TemplateEyebrow), nameof(TemplateTitle), nameof(TemplateDescription), nameof(Templates), nameof(CreateRecipeLabel), nameof(RenameRecipeLabel), nameof(DeleteRecipeLabel), nameof(ImportRecipeLabel), nameof(ExportRecipeLabel), nameof(LoadRecipeLabel), nameof(RefreshRecipesLabel), nameof(PreparationSettingsHeading), nameof(SettingsHeading), nameof(CopiesLabel), nameof(OrientationLabel), nameof(ScalingLabel), nameof(NUpLabel), nameof(MediaLabel), nameof(DuplexLabel), nameof(PageRangeLabel), nameof(OrientationOptions), nameof(ScalingOptions), nameof(DuplexOptions), nameof(PreparationSettingsNote), nameof(PreparationResolutionNote), nameof(PrepareLabel) })
+        foreach (var property in new[] { nameof(SectionQueueLabel), nameof(SectionHistoryLabel), nameof(SectionTemplatesLabel), nameof(SectionPrintersLabel), nameof(PrinterRefreshLabel), nameof(PrintQueueLabel), nameof(RefreshPrintJobsLabel), nameof(CancelPrintLabel), nameof(PrintLabel), nameof(PrintStatus), nameof(PrinterCapabilityStatus), nameof(PrinterCapabilityHelp),
+                     nameof(ActiveSectionTitle), nameof(HistoryEyebrow), nameof(HistoryTitle), nameof(HistoryDescription), nameof(HistoryEntries), nameof(TemplateEyebrow), nameof(TemplateTitle), nameof(TemplateDescription), nameof(Templates), nameof(CreateRecipeLabel), nameof(RenameRecipeLabel), nameof(DeleteRecipeLabel), nameof(ImportRecipeLabel), nameof(ExportRecipeLabel), nameof(LoadRecipeLabel), nameof(RefreshRecipesLabel), nameof(PreparationSettingsHeading), nameof(SettingsHeading), nameof(CopiesLabel), nameof(OrientationLabel), nameof(ScalingLabel), nameof(NUpLabel), nameof(MediaLabel), nameof(DuplexLabel), nameof(ColorLabel), nameof(ColorOptions), nameof(RequestedColorIndex), nameof(PageRangeLabel), nameof(OrientationOptions), nameof(ScalingOptions), nameof(DuplexOptions), nameof(PreparationSettingsNote), nameof(PreparationResolutionNote), nameof(PrepareLabel) })
             OnPropertyChanged(property);
+        if (CanRefreshPrintJobs) _ = RefreshPrintJobsAsync();
     }
 
     public string SectionQueueLabel => Localize("Queue and review", "队列与审核");
@@ -352,6 +518,9 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     public string SectionTemplatesLabel => Localize("Templates", "模板");
     public string SectionPrintersLabel => Localize("Printers", "打印机");
     public string PrinterRefreshLabel => Localize("Refresh local queue capabilities", "刷新本地队列能力");
+    public string PrintQueueLabel => Localize("Select a queue explicitly (required)", "明确选择打印队列（必需）");
+    public string RefreshPrintJobsLabel => Localize("Refresh OS job status", "刷新操作系统作业状态");
+    public string CancelPrintLabel => Localize("Cancel", "取消");
     public string PrinterCapabilityHelp => Localize("Read-only local queue and driver capability inventory. Paper output and real job behavior are not verified here.",
         "只读读取本地队列和驱动能力清单；这里不会验证实际纸张输出或真实作业行为。");
     public string CreateRecipeLabel => Localize("Create from queue…", "从队列创建…");
@@ -560,8 +729,8 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     public string QueueDescription => _workspaceStatus.IsDemo
         ? "Selecting a row updates only the sample preview and sample settings."
-        : Localize("Sources are captured and checked before preparation. PDF/JPEG/PNG preparation requires the configured PDFium runtime. This flow creates and previews a PDF only; it does not submit a print job.",
-            "来源会在准备前进行捕获和检查。准备 PDF/JPEG/PNG 需要配置 PDFium 运行时。此流程仅生成并预览 PDF，不会提交打印任务。");
+        : Localize("Sources are captured and checked before preparation. PDF/JPEG/PNG preparation requires the configured PDFium runtime. Printing submits only the prepared PDF after you select a queue and click Print.",
+            "来源会在准备前进行捕获和检查。准备 PDF/JPEG/PNG 需要配置 PDFium 运行时。只有在选择队列并点击“打印”后，才会提交已准备的 PDF。");
 
     public string? OperationError
     {
@@ -588,7 +757,14 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
                 return;
             }
 
+            OperationError = null;
+            SetPrintStatusUnavailable(false);
+            PrintJobs = [];
+            Interlocked.Increment(ref _printJobsRequestNumber);
+            if (CanRefreshPrintJobs) _ = RefreshPrintJobsAsync();
             RefreshSelectedItem();
+            OnPropertyChanged(nameof(CanSubmitPreparedRun));
+            OnPropertyChanged(nameof(CanRefreshPrintJobs));
             (MoveQueueItemCommand as RelayCommand)?.NotifyCanExecuteChanged();
             (RemoveQueueItemCommand as RelayCommand)?.NotifyCanExecuteChanged();
         }

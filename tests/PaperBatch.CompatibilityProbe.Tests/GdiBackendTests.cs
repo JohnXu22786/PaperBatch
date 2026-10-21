@@ -145,7 +145,8 @@ internal static class GdiBackendTests
             [PrintOption.Media] = new(CapabilityState.Supported, ["Letter"], null),
             [PrintOption.Tray] = new(CapabilityState.Supported, ["Tray1"], null),
             [PrintOption.Color] = new(CapabilityState.Supported, ["Color"], null),
-            [PrintOption.Duplex] = new(CapabilityState.Supported, ["LongEdge"], null)
+            [PrintOption.Duplex] = new(CapabilityState.Supported, ["LongEdge"], null),
+            [PrintOption.Copies] = new(CapabilityState.Supported, ["1..999"], null)
         });
 
     private sealed class FakeRasterizer : IWindowsPrintPdfRasterizer

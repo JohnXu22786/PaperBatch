@@ -18,6 +18,7 @@ var tests = new (string Name, Action Run)[]
     ("selection refreshes preview, settings, and preflight from presentation sources", SelectionRefreshesPresentationSnapshots),
     ("navigation changes the active section", NavigationChangesTheActiveSection),
     ("printer inspection is explicit, read-only, and keeps demo mode disabled", PrinterInspectionIsReadOnly),
+    ("print status and cancellation failures remain visible and block unsafe submission", PrintStatusFailuresAreVisibleAndBlockSubmission),
     ("queue ordering and removal are actionable and clear prepared previews", QueueEditsPreserveSelectionAndInvalidateRemovedPreview),
     ("language selection localizes desktop section labels", LanguageSelectionLocalizesSectionLabels),
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
@@ -205,6 +206,19 @@ static void PrinterInspectionIsReadOnly()
     Assert.Equal(1, delayedSource.ReadCalls);
     Assert.Equal(1, pending.PrinterQueues.Count);
     Assert.True(!pending.IsPrinterCapabilityRefreshInProgress);
+}
+
+static void PrintStatusFailuresAreVisibleAndBlockSubmission()
+{
+    var source = new FakeUnavailablePrintSource([new QueueItemSnapshot("queue-item", "Prepared.pdf", "Ready", "Prepared")]);
+    var viewModel = new DesktopShellViewModel(source, new FakeSettingsSource(), new FakePreviewSource(),
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+
+    Assert.Contains("Print status unavailable", viewModel.OperationError);
+    Assert.True(!viewModel.CanSubmitPreparedRun);
+    viewModel.CancelPrintJobAsync("owned-job").GetAwaiter().GetResult();
+    Assert.Contains("Print cancellation could not be confirmed", viewModel.OperationError);
 }
 
 static void SourceIntakeErrorsRemainVisibleAndAppend()
@@ -531,6 +545,7 @@ static void PreparationControlsForwardRequestedSettingsAndInvalidate()
     var source = new FakePreparationSource([new QueueItemSnapshot("a", "A.pdf", "ready", "Ready")]);
     var viewModel = new DesktopShellViewModel(source, new FakeSettingsSource(), source,
         new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource());
+    SelectSupportedPrinter(viewModel);
     viewModel.RequestedCopies = 3;
     viewModel.RequestedNUpIndex = 2;
     viewModel.OrientationIndex = 2;
@@ -538,7 +553,7 @@ static void PreparationControlsForwardRequestedSettingsAndInvalidate()
     viewModel.DuplexIndex = 1;
     viewModel.PageRange = "2-4";
     viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
-    Assert.Equal(3, source.Settings!.Copies);
+    Assert.Equal(1, source.Settings!.Copies);
     Assert.Equal(3, source.Options!.Copies);
     Assert.Equal(PaperBatch.Core.Layout.NUpMode.Four, source.Options.NUp);
     Assert.True(source.Options.SheetSize!.WidthPoints > source.Options.SheetSize.HeightPoints);
@@ -611,6 +626,7 @@ static void PreparationErrorsFollowSelectedLanguage()
     source.Diagnostics = ["A.pdf changed after queue preflight. Reimport the source before preparing; no final artifact was created."];
     var viewModel = new DesktopShellViewModel(source, new FakeSettingsSource(), source,
         new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource());
+    SelectSupportedPrinter(viewModel);
     viewModel.SetLanguage("zh-CN");
     viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
     Assert.Contains("源文件在队列预检后发生变化", viewModel.OperationError);
@@ -676,7 +692,7 @@ static void RecipeDuplexRequestChangesCompiledLayout()
         Assert.True(composer.CompiledPlacements.Skip(1).All(placement => placement.Bounds!.WidthPoints == 100d));
         var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
-        Assert.True(viewModel.PreparationSettingsNote.Contains("not validated", StringComparison.OrdinalIgnoreCase));
+        Assert.True(viewModel.PreparationSettingsNote.Contains("explicit queue", StringComparison.OrdinalIgnoreCase));
     }
     finally
     {
@@ -891,9 +907,36 @@ static DesktopShellViewModel CreateViewModel(
         new FakeHistorySource(),
         new FakeTemplateSource());
 
+static void SelectSupportedPrinter(DesktopShellViewModel viewModel)
+{
+    var capabilities = new PaperBatch.Core.Printing.PrinterCapabilitySnapshot("test-queue", "Test Queue", "Test Driver", "test-port", "test-fingerprint",
+        new Dictionary<PaperBatch.Core.Printing.PrintOption, PaperBatch.Core.Printing.PrintOptionCapability>
+        {
+            [PaperBatch.Core.Printing.PrintOption.Media] = new(PaperBatch.Core.Printing.CapabilityState.Supported, ["Letter", "A4"], null),
+            [PaperBatch.Core.Printing.PrintOption.Color] = new(PaperBatch.Core.Printing.CapabilityState.Supported, ["Color", "Monochrome"], null),
+            [PaperBatch.Core.Printing.PrintOption.Duplex] = new(PaperBatch.Core.Printing.CapabilityState.Supported, ["Simplex", "LongEdge", "ShortEdge"], null),
+            [PaperBatch.Core.Printing.PrintOption.Copies] = new(PaperBatch.Core.Printing.CapabilityState.Supported, ["1..999"], null)
+        });
+    var selection = new PrinterQueueCapabilitySnapshot("test-queue", "Test Queue", "Test Driver", capabilities, "test details", "测试详情");
+    viewModel.PrinterQueues.Add(selection);
+    viewModel.SelectedPrinter = selection;
+}
+
 sealed class FakeQueueSource(IReadOnlyList<QueueItemSnapshot> items) : IQueuePresentationSource
 {
     public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => items;
+}
+
+sealed class FakeUnavailablePrintSource(IReadOnlyList<QueueItemSnapshot> items) : IQueuePresentationSource, IPrintSubmissionPresentationSource
+{
+    public bool CanSubmitPrintJobs => true;
+    public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => items;
+    public Task<IReadOnlyList<PrintJobSnapshot>> SubmitPreparedRunAsync(string queueItemId, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("unused");
+    public Task<IReadOnlyList<PrintJobSnapshot>> RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken = default) =>
+        Task.FromException<IReadOnlyList<PrintJobSnapshot>>(new UnauthorizedAccessException());
+    public Task<bool> CancelPrintJobAsync(string jobId, CancellationToken cancellationToken = default) =>
+        Task.FromException<bool>(new UnauthorizedAccessException());
 }
 
 sealed class FakePreparedPreviewSource : IFinalPreviewPresentationSource, IPreparedArtifactPresentationSource
@@ -1036,7 +1079,8 @@ sealed class FakePrinterCapabilitySource : IQueuePresentationSource, IPrinterCap
     }
 
     private static IReadOnlyList<PrinterQueueCapabilitySnapshot> Entries() => [
-            new("Sample Queue", "Sample Driver", "Port: LPT1\nMedia: Supported (Letter)\nDuplex: Unavailable — The driver did not report duplex capability.",
+            new("sample-queue-id", "Sample Queue", "Sample Driver", null,
+                "Port: LPT1\nMedia: Supported (Letter)\nDuplex: Unavailable — The driver did not report duplex capability.",
                 "端口：LPT1\n纸张：支持（Letter）\n双面：不可用 — 驱动未报告双面能力。")
         ];
 }

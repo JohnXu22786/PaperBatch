@@ -133,6 +133,8 @@ var tests = new List<(string Name, Action Run)>
     ("CLI validates recipe compatibility using the core parser", WatchFolderTests.CliValidatesRecipes),
     ("CLI reports redacted permission errors for recipe import and export", WatchFolderTests.CliReportsPermissionDeniedForRecipeImportAndExport),
     ("submission passes the exact persisted final PDF", PrintingTests.SubmissionPassesTheExactPersistedFinalPdf),
+    ("missing explicit print queue is rejected before capability lookup", PrintingTests.MissingExplicitQueueIsRejectedBeforeCapabilityLookup),
+    ("run submission proceeds sequentially and stops without resuming unknown segments", PrintingTests.RunSubmissionIsSequentialAndDoesNotResumeUnknownSegments),
     ("submission rejects legacy runs without a final artifact", PrintingTests.SubmissionRejectsLegacyRunWithoutFinalArtifact),
     ("prepared artifact pipeline composes ordered immutable snapshots", PreparedArtifactCoordinatorTests.PipelineComposesOrderedSnapshotsAndPersistsExactFinalPdf),
     ("prepared-run invariants reject invalid hashes and copy collections", CoreTests.PreparedRunInvariantsRejectInvalidHashesAndCopyCollections),
