@@ -159,6 +159,7 @@ class DocumentCorpusTests(unittest.TestCase):
         pdf = (CORPUS_DIR / fixtures["pdf_variant_004"]["path"]).read_bytes()
         self.assertEqual(len(re.findall(rb"/Type\s*/Page\b", pdf)), fixtures["pdf_variant_004"]["expected"]["page_count"])
         self.assertTrue(pdf.startswith(b"%PDF-1.4\n"))
+        self.assertIn(b"\x00", pdf[:128], "PDF header must retain its binary marker across Windows checkouts")
         startxref = re.search(rb"startxref\n(\d+)\n%%EOF", pdf)
         self.assertIsNotNone(startxref)
         self.assertEqual(pdf[int(startxref.group(1)) :].splitlines()[0], b"xref")

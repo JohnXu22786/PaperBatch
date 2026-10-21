@@ -413,7 +413,9 @@ def _build_pdf_variant(index: int) -> tuple[bytes, dict[str, int]]:
             b"<< /Length " + str(len(stream := f"BT /F1 12 Tf 36 {height - 48} Td (Synthetic PDF case {index:03d}, page {page + 1}) Tj ET\n".encode("ascii"))).encode("ascii") + b" >>\nstream\n" + stream + b"endstream",
         ])
     objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
-    output = bytearray(b"%PDF-1.4\n%PaperBatch locally authored synthetic variant\n")
+    # Mark the PDF as binary in its comment header so Windows Git checkouts do
+    # not normalize its syntax newlines as text.
+    output = bytearray(b"%PDF-1.4\n%PaperBatch locally authored synthetic variant\x00\n")
     offsets = [0]
     for number, body in enumerate(objects, start=1):
         offsets.append(len(output))

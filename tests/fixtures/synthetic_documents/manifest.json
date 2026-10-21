@@ -557,8 +557,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "4376399b0072aedc63792f4af2a86c80b03ecf483bea765bc9f84c311ff40b89",
-      "size_bytes": 679
+      "sha256": "b785e2563297bf2d79fa369204af99ecd0fcf93fc712d1249e55c1129980c42b",
+      "size_bytes": 680
     },
     {
       "id": "malformed_variant_000",
@@ -682,8 +682,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "5ed1d1b57553f568d4b28fba1ea055b329cfaf9e5ad4e7c38ce98f0257aeee2b",
-      "size_bytes": 962
+      "sha256": "d0227e6a853f711ce33445f2441fe65f3ec8b8d866581968940a07bcf724bf23",
+      "size_bytes": 963
     },
     {
       "id": "malformed_variant_001",
@@ -807,8 +807,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "e40b09e01ba84d2b2f7b41285f5499cf28c1d667d585961a2f902e89beb06785",
-      "size_bytes": 1247
+      "sha256": "dae7d65a26c154dfbd0ea64850a1005df90af9032ab42f7ed12c3608e08f904f",
+      "size_bytes": 1248
     },
     {
       "id": "malformed_variant_002",
@@ -932,8 +932,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "23d452d994974bc6d5d5b6564eb242880bfa843ccc1f5b93d6629b275af2bbcb",
-      "size_bytes": 1538
+      "sha256": "c47ca20c5e048439c1b12fde294d0062d8bc7fb85e2a50d2111f2bbd80daadcc",
+      "size_bytes": 1539
     },
     {
       "id": "malformed_variant_003",
@@ -1057,8 +1057,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "fff22eb9905351e413ff70574c417d91cbc09837605870e33c62a15ad8d6d7d8",
-      "size_bytes": 1826
+      "sha256": "983683e25c3c9f26ac97bea409cb0da8660b51f395b9d81db1b5be4b5da9a919",
+      "size_bytes": 1827
     },
     {
       "id": "malformed_variant_004",
@@ -1182,8 +1182,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "49bfb432c0b9f0931afcd2240906fd1241a857aa4ecf9778f840a1b9610bb54c",
-      "size_bytes": 679
+      "sha256": "da05f8faa79fdfebffdc26de10f0b4cf7a2f7291a5b9bdd34ecc5b4bf0e898ff",
+      "size_bytes": 680
     },
     {
       "id": "malformed_variant_005",
@@ -1307,8 +1307,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "59dae5a52ee74e103d796db208de8fff6dec6c1cf29a10bed512c722f2659682",
-      "size_bytes": 962
+      "sha256": "f5760f121439cefca82b3c640da00aeb067bb72e6fe100cd4d8e93f21fd68cbf",
+      "size_bytes": 963
     },
     {
       "id": "malformed_variant_006",
@@ -1432,8 +1432,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "6d960049ec04f8f9d1e874c7811f9116a935637ec0646657a28ad4cf648aff9c",
-      "size_bytes": 1247
+      "sha256": "e8608060b9ed50abdc521a517312dae76696d82e6eba4ccd529ea74a6281dbc3",
+      "size_bytes": 1248
     },
     {
       "id": "malformed_variant_007",
@@ -1557,8 +1557,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "ae99356b35573b7c89804c4115d83a3dbcf4e480ddf23ad112eb4bcf5848a4e6",
-      "size_bytes": 1538
+      "sha256": "68d4202b022b88b0f5403687ecd19a219297fe43fc111fdee5e19cdba9427484",
+      "size_bytes": 1539
     },
     {
       "id": "malformed_variant_008",
@@ -1682,8 +1682,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "23c8612454e71d167d872531c3cce2ffd298aeca8fb9ad095df86acf9d005ba6",
-      "size_bytes": 1826
+      "sha256": "19abc053b8c00981eeb04547c053d7f348e2dc7d2e6b3399efd12f62e90ab5bf",
+      "size_bytes": 1827
     },
     {
       "id": "malformed_variant_009",
@@ -1807,8 +1807,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "686bad885d988b8114c28fbc4aee4c24e44cb5578d4e4e22383b9e1a56558540",
-      "size_bytes": 679
+      "sha256": "88d75d10fb343f29d9899f70dbe7f272e6ddc0fc6ac5fbc4632a2bdf8e5676dc",
+      "size_bytes": 680
     },
     {
       "id": "malformed_variant_010",
@@ -1932,8 +1932,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "b0948a3a64b712accb800f52eff1d70200faa555f6af95555fc31d42dd36a68a",
-      "size_bytes": 962
+      "sha256": "2454c813ac78137736990fa9a28724b01aaf764a817d390983eaf6c1e4a11511",
+      "size_bytes": 963
     },
     {
       "id": "malformed_variant_011",
@@ -2057,8 +2057,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "2222a05991fb19baa245787a3848b3b91bd995286e4aaceb142c1892babf61ac",
-      "size_bytes": 1247
+      "sha256": "c442a822f22b5e4330ea1377f52e98ada0f24eb28e3c48917b79e8d7f4e26643",
+      "size_bytes": 1248
     },
     {
       "id": "malformed_variant_012",
@@ -2182,8 +2182,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "caaec5eb591bd2c7c31e98c86ab588c7cc4544a156af86c971890c7b32861663",
-      "size_bytes": 1538
+      "sha256": "133065f550d5b583108c1a70d80f4bf88c041a7d08a30ee4dab03ce4adce85d9",
+      "size_bytes": 1539
     },
     {
       "id": "malformed_variant_013",
@@ -2307,8 +2307,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "db1d7dca0facad12c4ca7d777d6562b4b854d1ed00910cf1cc2b18035146e781",
-      "size_bytes": 1826
+      "sha256": "4855bdfbe50091f3f839feabc820f6cce1fb542be02b1d3135c6ece461ef45fb",
+      "size_bytes": 1827
     },
     {
       "id": "malformed_variant_014",
@@ -2432,8 +2432,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "8d006f5c026f06695c422bdd48985bcb6e0d650e688c9447eb0ee44f5f8a97a3",
-      "size_bytes": 679
+      "sha256": "22221d32cc50fe594b718d174969653f6fb951625c5e63b32556366c71f24175",
+      "size_bytes": 680
     },
     {
       "id": "malformed_variant_015",
@@ -2557,8 +2557,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "ef01f1f954422cbdc6e883cd7822cd176d13ba8b47f82d2692bd46b54eb3b44d",
-      "size_bytes": 962
+      "sha256": "c2d00f6a794fccf2027aeb3f55a9712703b7d6e470498032249df43d4b0b600f",
+      "size_bytes": 963
     },
     {
       "id": "malformed_variant_016",
@@ -2682,8 +2682,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "9337593f826868fc8980bd9c18c060041ba3061210ba70c65cd59c9dbf193c7f",
-      "size_bytes": 1247
+      "sha256": "0c1b865c4a2074b2b30db2a82ace3c0341aa1e1cf6d52f5a32f0e19dc2ce3138",
+      "size_bytes": 1248
     },
     {
       "id": "malformed_variant_017",
@@ -2807,8 +2807,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "25d076142ce1ffa155624fc5a93c4ff1b90f0acd2c64dc243f1c60a49981e824",
-      "size_bytes": 1538
+      "sha256": "9d085c036d5d0e990175d56421c05378f6dd2768bc6042f3e5df52565eb4065e",
+      "size_bytes": 1539
     },
     {
       "id": "malformed_variant_018",
@@ -2932,8 +2932,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "4971d5e7f3154df7c1df6b5854aa6c585463a6d87fe4aee7f0ab938143da4a10",
-      "size_bytes": 1826
+      "sha256": "542f519f45007fdba24ae6778abafb4442e703d8334841d5b9df67ce654fe5b0",
+      "size_bytes": 1827
     },
     {
       "id": "malformed_variant_019",
@@ -3057,8 +3057,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "743d72ca9abb51c8c4358ea18123eaabbb54d3b90769842ff9d88362f1b3d68d",
-      "size_bytes": 679
+      "sha256": "2d52e65d67cb65fad3e0337c75b1e3df271d3d1e6c27d2d562fe498ec2f2db4d",
+      "size_bytes": 680
     },
     {
       "id": "malformed_variant_020",
@@ -3182,8 +3182,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "4c367487ef130533dc5120c7c1ae369a21cde95d4bebce57e1776ea694e69f9e",
-      "size_bytes": 962
+      "sha256": "54ae59b54e857e6474a44ad60facdc11d6ff49d132a08680564db8d4a4a5a2d4",
+      "size_bytes": 963
     },
     {
       "id": "malformed_variant_021",
@@ -3307,8 +3307,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "c8991d586b144f3acb7e472435dfbc6b711cdb0398578b6962f5b9623519252c",
-      "size_bytes": 1247
+      "sha256": "dfd784cdd139fbf3669b18fd22b8c7836027c8a179bb761e9baeec7aa3e41570",
+      "size_bytes": 1248
     },
     {
       "id": "malformed_variant_022",
@@ -3432,8 +3432,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "edfc44a1115897793bb2857e32c8ca26c017e727d04ade77bf3b145b53031918",
-      "size_bytes": 1538
+      "sha256": "181456c6ffb04b9f6165addf641ce4f5d1ec4272c14c892bb432f6ecf9af97f0",
+      "size_bytes": 1539
     },
     {
       "id": "malformed_variant_023",
@@ -3557,8 +3557,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "1dff5af78aec349659e2611bc7e5f6be4f59918db3d1c5a650f77baf6d981837",
-      "size_bytes": 1826
+      "sha256": "6387fc46796977064e0d04b73849b7b5a3a0caebb67628801a87381420d7e945",
+      "size_bytes": 1827
     },
     {
       "id": "malformed_variant_024",
@@ -3682,8 +3682,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "28e09c0a35d5ec8e8d795d83f1ceab3600594eeed3281c68451eee127f0ae07e",
-      "size_bytes": 679
+      "sha256": "600b60e025ba2c8b7026b7a9f303353f7d58ba060fee4bbb66a6b074c3e58b55",
+      "size_bytes": 680
     },
     {
       "id": "malformed_variant_025",
@@ -3807,8 +3807,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "d598a8d66a1f5d6379c4952fd9a1e2ffd5df3573a85351b2dca5802199c1f489",
-      "size_bytes": 962
+      "sha256": "bcab544b7266f7b8a5a5f21420e27950167d1972e063fb2d99737e1a3a0faf14",
+      "size_bytes": 963
     },
     {
       "id": "malformed_variant_026",
@@ -3932,8 +3932,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "6caaa868e375d83116834950ed14b5f07719a91066d31103d6b006f5c99b0efe",
-      "size_bytes": 1247
+      "sha256": "b8d68c872a243c2c18f4b6b777bdb34fbc7782778b401928c764506df49d2dda",
+      "size_bytes": 1248
     },
     {
       "id": "malformed_variant_027",
@@ -4057,8 +4057,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "fc3c237de67ce350cee8c0e4e2cd050b48d2532af2a56ebebe22269ddb4aa0ab",
-      "size_bytes": 1538
+      "sha256": "bf01a8491ca858530dbad202760c903610ccd6851e1f402dfc7da7b641057ff6",
+      "size_bytes": 1539
     },
     {
       "id": "malformed_variant_028",
@@ -4182,8 +4182,8 @@
         "status": "accepted",
         "reason": "Synthetic fixture only; real engine and device behavior is unmeasured."
       },
-      "sha256": "f524dc4285bd141f457848e972362ec3ca02ca789a3fc9378a3372afb4497851",
-      "size_bytes": 1826
+      "sha256": "731b5cff4fa9ea000ded4491aebeec368eae24a4a233e2cc509cec6d27a1fb85",
+      "size_bytes": 1827
     },
     {
       "id": "malformed_variant_029",
