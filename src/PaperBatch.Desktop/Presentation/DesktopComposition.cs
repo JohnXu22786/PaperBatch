@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using Avalonia;
@@ -78,7 +79,7 @@ internal sealed class ProductionPresentationSources :
     IPreparedArtifactPresentationSource,
     IPreflightPresentationSource,
     IHistoryPresentationSource,
-    ITemplatePresentationSource
+    IRecipeManagementPresentationSource
 {
     private readonly SourceIntakeService? _intake;
     private readonly RendererCoordinator _renderer;
@@ -89,8 +90,10 @@ internal sealed class ProductionPresentationSources :
     private readonly SqliteRunStore? _runStore;
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
+    private readonly Dictionary<string, string> _queueLocations = new(StringComparer.Ordinal);
 
     public event Action<string>? PreparedArtifactChanged;
+    public bool IsRecipeStoreAvailable => _runStore is not null && TemplateReadError is null;
 
     public ProductionPresentationSources(SourceIntakeService? intake = null, RendererCoordinator? renderer = null,
         SourceSnapshotCache? cache = null, bool rendererAvailable = false,
@@ -120,7 +123,11 @@ internal sealed class ProductionPresentationSources :
         _queue.Insert(target, item);
     }
 
-    public void Remove(string queueItemId) => _queue.RemoveAll(item => string.Equals(item.Id, queueItemId, StringComparison.Ordinal));
+    public void Remove(string queueItemId)
+    {
+        _queue.RemoveAll(item => string.Equals(item.Id, queueItemId, StringComparison.Ordinal));
+        _queueLocations.Remove(queueItemId);
+    }
 
     public async Task<IReadOnlyList<QueueItemSnapshot>> ImportAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default)
     {
@@ -152,6 +159,7 @@ internal sealed class ProductionPresentationSources :
                 }
                 var item = new QueueItemSnapshot(id, title, details, status);
                 _queue.Add(item);
+                _queueLocations[id] = source.SourcePath;
                 _findings[id] = findings;
             }
             return _queue.Skip(_queue.Count - prepared.Items.Length).ToArray();
@@ -266,22 +274,118 @@ internal sealed class ProductionPresentationSources :
 
     public string? TemplateReadError { get; private set; }
 
-    public IReadOnlyList<TemplateSnapshot> GetTemplates()
+    public IReadOnlyList<TemplateSnapshot> GetTemplates(bool chinese = false)
     {
         TemplateReadError = null;
         if (_runStore is null) return [];
         try
         {
             return _runStore.GetRecipes()
-                .Select(saved => new TemplateSnapshot(saved.Recipe.Name,
-                    $"Saved locally · {saved.Recipe.Sources.Length} source(s)",
-                    $"Defaults: {saved.Recipe.Settings.Copies} copies · {saved.Recipe.Settings.ColorMode} · {saved.Recipe.Settings.DuplexMode} · {saved.Recipe.Settings.Media} (not applied)"))
+                .Select(saved => new TemplateSnapshot(saved.Recipe.RecipeId, saved.Recipe.Name,
+                    chinese ? $"已保存在本地 · {saved.Recipe.Sources.Length} 个来源" : $"Saved locally · {saved.Recipe.Sources.Length} source(s)",
+                    chinese
+                        ? $"默认值：{saved.Recipe.Settings.Copies} 份 · {Localize(saved.Recipe.Settings.ColorMode, true)} · {Localize(saved.Recipe.Settings.DuplexMode, true)} · {saved.Recipe.Settings.Media}（未应用）"
+                        : $"Defaults: {saved.Recipe.Settings.Copies} copies · {saved.Recipe.Settings.ColorMode} · {saved.Recipe.Settings.DuplexMode} · {saved.Recipe.Settings.Media} (not applied)"))
                 .ToArray();
         }
         catch (Exception exception) when (exception is System.Text.Json.JsonException or InvalidDataException or FormatException or UnsupportedSchemaVersionException or System.Data.Common.DbException)
         {
-            TemplateReadError = "Saved recipes could not be read. The local recipe data may be damaged or use a newer schema.";
+            TemplateReadError = chinese
+                ? "无法读取已保存配方。本地配方数据可能已损坏或使用了更新的架构。"
+                : "Saved recipes could not be read. The local recipe data may be damaged or use a newer schema.";
             return [];
         }
     }
+
+    private static string Localize(ColorMode value, bool chinese) => !chinese ? value.ToString() : value switch
+    {
+        ColorMode.Color => "彩色", ColorMode.Monochrome => "黑白", _ => value.ToString()
+    };
+
+    private static string Localize(DuplexMode value, bool chinese) => !chinese ? value.ToString() : value switch
+    {
+        DuplexMode.Simplex => "单面", DuplexMode.LongEdge => "双面长边翻转", DuplexMode.ShortEdge => "双面短边翻转", _ => value.ToString()
+    };
+
+    public JobRecipeSnapshot CreateRecipe(string name, IReadOnlyList<string> queueItemIds, RecipeDefaultsSnapshot defaults)
+    {
+        if (_runStore is null) throw new InvalidOperationException("Local recipe storage is unavailable.");
+        var locations = queueItemIds.Select(id => _queueLocations.TryGetValue(id, out var path)
+            ? path : throw new InvalidOperationException("A selected queue source is no longer available.")).ToArray();
+        if (locations.Length == 0) throw new InvalidOperationException("Select at least one queue source before saving a recipe.");
+        var recipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, Guid.NewGuid().ToString("N"), name,
+            locations.Select(path => new RecipeSource(Guid.NewGuid().ToString("N"), path)).ToImmutableArray(),
+            new RecipePrintSettings(defaults.Copies, defaults.ColorMode, defaults.DuplexMode, defaults.Orientation,
+                defaults.ScalingMode, defaults.Media));
+        JobRecipeJson.Serialize(recipe);
+        return new JobRecipeSnapshot(recipe.SchemaVersion, recipe.RecipeId, recipe.Name, recipe.Sources, recipe.Settings);
+    }
+
+    public void SaveRecipe(JobRecipeSnapshot snapshot)
+    {
+        if (_runStore is null) throw new InvalidOperationException("Local recipe storage is unavailable.");
+        var existing = _runStore.GetRecipes();
+        if (existing.Any(item => !string.Equals(item.Recipe.RecipeId, snapshot.RecipeId, StringComparison.Ordinal) &&
+            string.Equals(item.Recipe.Name, snapshot.Name, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("A recipe with this name already exists.");
+        _runStore.SaveRecipe(new JobRecipe(snapshot.SchemaVersion, snapshot.RecipeId, snapshot.Name, snapshot.Sources, snapshot.Settings));
+        _ = GetTemplates();
+    }
+
+    public JobRecipeSnapshot GetRecipe(string recipeId)
+    {
+        var recipe = _runStore?.GetRecipes().SingleOrDefault(item => item.Recipe.RecipeId == recipeId)?.Recipe ??
+            throw new InvalidOperationException("The selected recipe is no longer available.");
+        return new JobRecipeSnapshot(recipe.SchemaVersion, recipe.RecipeId, recipe.Name, recipe.Sources, recipe.Settings);
+    }
+
+    public bool DeleteRecipe(string recipeId) => _runStore?.DeleteRecipe(recipeId) ??
+        throw new InvalidOperationException("Local recipe storage is unavailable.");
+
+    public void ImportRecipe(string path)
+    {
+        if (_runStore is null) throw new InvalidOperationException("Local recipe storage is unavailable.");
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (stream.Length > JobRecipeJson.MaximumRecipeBytes) throw new InvalidDataException("The recipe file exceeds the supported size limit.");
+        var bytes = new byte[(int)stream.Length];
+        stream.ReadExactly(bytes);
+        var recipe = JobRecipeJson.Parse(bytes);
+        var existing = _runStore.GetRecipes();
+        if (existing.Any(item => string.Equals(item.Recipe.RecipeId, recipe.RecipeId, StringComparison.Ordinal)))
+            throw new InvalidOperationException("This recipe is already saved. Existing recipes are never overwritten during import.");
+        if (existing.Any(item => string.Equals(item.Recipe.Name, recipe.Name, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("A recipe with this name already exists. Rename it before importing.");
+        _runStore.SaveRecipe(recipe);
+        _ = GetTemplates();
+    }
+
+    public void ExportRecipe(string recipeId, string path)
+    {
+        var recipe = _runStore?.GetRecipes().SingleOrDefault(item => item.Recipe.RecipeId == recipeId)?.Recipe ??
+            throw new InvalidOperationException("The selected recipe is no longer available.");
+        var bytes = Encoding.UTF8.GetBytes(JobRecipeJson.Serialize(recipe));
+        var destination = Path.GetFullPath(path);
+        var directory = Path.GetDirectoryName(destination) ?? throw new InvalidOperationException("The export location is invalid.");
+        Directory.CreateDirectory(directory);
+        var temporary = Path.Combine(directory, "." + Path.GetFileName(destination) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                stream.Write(bytes);
+                stream.Flush(true);
+            }
+            File.Move(temporary, destination, overwrite: false);
+        }
+        finally
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    public IReadOnlyList<string> GetRecipeSourceLocations(string recipeId) =>
+        _runStore?.GetRecipes().SingleOrDefault(item => item.Recipe.RecipeId == recipeId)?.Recipe.Sources.Select(source => source.Location).ToArray()
+        ?? throw new InvalidOperationException("The selected recipe is no longer available.");
 }

@@ -25,6 +25,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     private Task _previewRefreshTask = Task.CompletedTask;
     private long _previewRequestNumber;
     private string _language = "en";
+    private TemplateSnapshot? _selectedTemplate;
 
     public DesktopShellViewModel(
         IQueuePresentationSource queueSource,
@@ -52,7 +53,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         _templateSource = templateSource;
         QueueItems = new ObservableCollection<QueueItemSnapshot>(queueSource.GetQueueItems());
         HistoryEntries = historySource.GetHistoryEntries();
-        Templates = templateSource.GetTemplates();
+        Templates = templateSource.GetTemplates(chinese: false);
         _workspaceStatus = workspaceStatus ?? new WorkspaceStatusSnapshot("Demo mode", "Synthetic sample data only.", true);
         NavigateCommand = new RelayCommand(Navigate, CanNavigate);
         MoveQueueItemCommand = new RelayCommand(MoveQueueItem, CanMoveQueueItem);
@@ -72,6 +73,22 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     public IReadOnlyList<TemplateSnapshot> Templates { get; private set; }
 
+    public TemplateSnapshot? SelectedTemplate
+    {
+        get => _selectedTemplate;
+        set
+        {
+            if (!SetProperty(ref _selectedTemplate, value)) return;
+            OnPropertyChanged(nameof(HasSelectedTemplate));
+            OnPropertyChanged(nameof(CanLoadSelectedRecipe));
+        }
+    }
+
+    public bool CanManageRecipes => IsProductionMode &&
+        _templateSource is IRecipeManagementPresentationSource { IsRecipeStoreAvailable: true };
+    public bool HasSelectedTemplate => SelectedTemplate is not null;
+    public bool CanLoadSelectedRecipe => CanManageRecipes && SelectedTemplate is not null && CanImportFiles;
+
     public ICommand NavigateCommand { get; }
 
     public ICommand MoveQueueItemCommand { get; }
@@ -89,6 +106,8 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         var next = string.Equals(language, "zh-CN", StringComparison.OrdinalIgnoreCase) ? "zh-CN" : "en";
         if (!SetProperty(ref _language, next, nameof(LanguageIndex))) return;
         OnPropertyChanged(nameof(LanguageIndex));
+        OnPropertyChanged(nameof(IsChinese));
+        Templates = _templateSource.GetTemplates(IsChinese);
         if (IsDemoMode)
         {
             HistoryEntries = _historySource.GetHistoryEntries().Select(entry => entry with
@@ -125,13 +144,20 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
             }).ToArray();
         }
         foreach (var property in new[] { nameof(SectionQueueLabel), nameof(SectionHistoryLabel), nameof(SectionTemplatesLabel),
-                     nameof(ActiveSectionTitle), nameof(HistoryEyebrow), nameof(HistoryTitle), nameof(HistoryDescription), nameof(HistoryEntries), nameof(TemplateEyebrow), nameof(TemplateTitle), nameof(TemplateDescription), nameof(Templates) })
+                     nameof(ActiveSectionTitle), nameof(HistoryEyebrow), nameof(HistoryTitle), nameof(HistoryDescription), nameof(HistoryEntries), nameof(TemplateEyebrow), nameof(TemplateTitle), nameof(TemplateDescription), nameof(Templates), nameof(CreateRecipeLabel), nameof(RenameRecipeLabel), nameof(DeleteRecipeLabel), nameof(ImportRecipeLabel), nameof(ExportRecipeLabel), nameof(LoadRecipeLabel), nameof(RefreshRecipesLabel) })
             OnPropertyChanged(property);
     }
 
     public string SectionQueueLabel => Localize("Queue and review", "队列与审核");
     public string SectionHistoryLabel => Localize("History", "历史记录");
     public string SectionTemplatesLabel => Localize("Templates", "模板");
+    public string CreateRecipeLabel => Localize("Create from queue…", "从队列创建…");
+    public string RenameRecipeLabel => Localize("Rename…", "重命名…");
+    public string DeleteRecipeLabel => Localize("Delete…", "删除…");
+    public string ImportRecipeLabel => Localize("Import recipe…", "导入配方…");
+    public string ExportRecipeLabel => Localize("Export recipe…", "导出配方…");
+    public string LoadRecipeLabel => Localize("Load sources into queue…", "将来源加载到队列…");
+    public string RefreshRecipesLabel => Localize("Refresh", "刷新");
 
 
     public async Task ImportFilesAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default)
@@ -145,7 +171,89 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
             if (!QueueItems.Any(existing => string.Equals(existing.Id, item.Id, StringComparison.Ordinal)))
                 QueueItems.Add(item);
         }
-        SelectedQueueItem ??= QueueItems.FirstOrDefault();
+        if (SelectedQueueItem is null || !QueueItems.Contains(SelectedQueueItem))
+            SelectedQueueItem = imported.FirstOrDefault(item => QueueItems.Contains(item)) ?? QueueItems.FirstOrDefault();
+        OnPropertyChanged(nameof(QueueStateLabel));
+    }
+
+    public void RefreshTemplates()
+    {
+        Templates = _templateSource.GetTemplates(IsChinese);
+        SelectedTemplate = null;
+        OnPropertyChanged(nameof(Templates));
+        OnPropertyChanged(nameof(TemplateTitle));
+        OnPropertyChanged(nameof(TemplateDescription));
+        OnPropertyChanged(nameof(CanManageRecipes));
+        OnPropertyChanged(nameof(CanLoadSelectedRecipe));
+    }
+
+    public void SaveRecipe(string name, IReadOnlyList<string>? queueItemIds = null,
+        RecipeDefaultsSnapshot? defaults = null, TemplateSnapshot? edit = null)
+    {
+        if (!CanManageRecipes || _templateSource is not IRecipeManagementPresentationSource manager)
+            throw new InvalidOperationException("Recipe management is available only in production mode with local storage.");
+        JobRecipeSnapshot recipe;
+        if (edit is null)
+        {
+            recipe = manager.CreateRecipe(name, queueItemIds ?? [], defaults ?? new RecipeDefaultsSnapshot(1,
+                PaperBatch.Core.Domain.ColorMode.Color, PaperBatch.Core.Domain.DuplexMode.Simplex,
+                PaperBatch.Core.Domain.Orientation.Auto, PaperBatch.Core.Domain.ScalingMode.ShrinkToFit, "Letter"));
+        }
+        else
+        {
+            var stored = manager.GetRecipe(edit.RecipeId);
+            recipe = stored with { Name = name };
+        }
+        manager.SaveRecipe(recipe);
+        RefreshTemplates();
+        SelectedTemplate = Templates.FirstOrDefault(item => item.RecipeId == recipe.RecipeId);
+    }
+
+    public void DeleteRecipe(TemplateSnapshot recipe)
+    {
+        if (_templateSource is not IRecipeManagementPresentationSource manager || !CanManageRecipes)
+            throw new InvalidOperationException("Recipe management is unavailable.");
+        manager.DeleteRecipe(recipe.RecipeId);
+        RefreshTemplates();
+    }
+
+    public void ImportRecipe(string path)
+    {
+        if (_templateSource is not IRecipeManagementPresentationSource manager || !CanManageRecipes)
+            throw new InvalidOperationException("Recipe management is unavailable.");
+        manager.ImportRecipe(path);
+        RefreshTemplates();
+    }
+
+    public void ExportRecipe(TemplateSnapshot recipe, string path)
+    {
+        if (_templateSource is not IRecipeManagementPresentationSource manager || !CanManageRecipes)
+            throw new InvalidOperationException("Recipe management is unavailable.");
+        manager.ExportRecipe(recipe.RecipeId, path);
+    }
+
+    public async Task LoadRecipeSourcesAsync(TemplateSnapshot recipe, bool replaceQueue, CancellationToken cancellationToken = default)
+    {
+        if (_templateSource is not IRecipeManagementPresentationSource manager || !CanManageRecipes ||
+            _queueSource is not IQueueEditingPresentationSource editable || _queueSource is not IQueueImportPresentationSource importer)
+            throw new InvalidOperationException("Recipe sources cannot be loaded in this presentation mode.");
+        var paths = manager.GetRecipeSourceLocations(recipe.RecipeId);
+        var imported = await importer.ImportAsync(paths, cancellationToken).ConfigureAwait(true);
+        if (replaceQueue)
+        {
+            var importedIds = imported.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+            foreach (var item in QueueItems.Where(item => !importedIds.Contains(item.Id)).ToArray())
+            {
+                editable.Remove(item.Id);
+                if (_previewSource is IPreparedArtifactPresentationSource preparedArtifacts)
+                    preparedArtifacts.InvalidatePreparedRun(item.Id);
+                QueueItems.Remove(item);
+            }
+        }
+        foreach (var item in imported)
+            if (!QueueItems.Any(existing => existing.Id == item.Id)) QueueItems.Add(item);
+        if (SelectedQueueItem is null || !QueueItems.Contains(SelectedQueueItem))
+            SelectedQueueItem = imported.FirstOrDefault(item => QueueItems.Contains(item)) ?? QueueItems.FirstOrDefault();
         OnPropertyChanged(nameof(QueueStateLabel));
     }
 
@@ -154,6 +262,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     public bool IsDemoMode => _workspaceStatus.IsDemo;
 
     public bool IsProductionMode => !_workspaceStatus.IsDemo;
+    public bool IsChinese => _language == "zh-CN";
 
     public bool CanImportFiles => _queueSource is IQueueImportPresentationSource { IsAvailable: true };
 
