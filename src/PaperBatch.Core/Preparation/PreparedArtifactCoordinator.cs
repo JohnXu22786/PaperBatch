@@ -86,7 +86,11 @@ public sealed class PreparedArtifactCoordinator(
             for (var sourceIndex = 0; sourceIndex < prepared.Items.Length; sourceIndex++)
             {
                 var source = prepared.Items[sourceIndex];
-                var sourceSettings = perItemPrintSettings is null ? printSettings : perItemPrintSettings[sourceIndex];
+                // Copies are compiled into the immutable PDF. The print settings stored on
+                // the prepared item describe the downstream device request, which must be
+                // one copy to avoid applying the requested count a second time.
+                var sourceSettings = (perItemPrintSettings is null ? printSettings : perItemPrintSettings[sourceIndex])
+                    with { Copies = 1 };
                 cancellationToken.ThrowIfCancellationRequested();
                 var snapshot = source.Snapshot!;
                 var render = await renderers.RenderAsync(
@@ -180,6 +184,7 @@ public sealed class PreparedArtifactCoordinator(
             Add(item.Source.Sha256);
             Add(item.Render.ArtifactId);
             Add(item.Render.ArtifactSha256);
+            Add(System.Text.Json.JsonSerializer.Serialize(item.PrintSettings));
         }
         Add(System.Text.Json.JsonSerializer.Serialize(settings));
         Add(System.Text.Json.JsonSerializer.Serialize(perItemLayoutSettings));
