@@ -41,6 +41,14 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
         cancellationToken.ThrowIfCancellationRequested();
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("GDI/Winspool printing requires Windows.");
         var baseSnapshot = WindowsPrintCapabilityEnumerator.GetCapabilities(queueIdentity);
+        return GetCapabilitiesAsync(baseSnapshot, cancellationToken);
+    }
+
+    public Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(PrinterCapabilitySnapshot baseSnapshot, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(baseSnapshot);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("GDI/Winspool printing requires Windows.");
         var options = baseSnapshot.Options.ToBuilder();
         var paperIds = MapIds(baseSnapshot, PrintOption.Media, DcPaperIds, 2);
         var trayIds = MapIds(baseSnapshot, PrintOption.Tray, DcBinIds, 2);
@@ -48,10 +56,7 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
         DisableIfUnmapped(options, baseSnapshot, PrintOption.Tray, trayIds);
         var duplex = DeviceCapabilities(baseSnapshot.DisplayName, baseSnapshot.PortName, DcDuplex, IntPtr.Zero, IntPtr.Zero);
         var copies = DeviceCapabilities(baseSnapshot.DisplayName, baseSnapshot.PortName, DcCopies, IntPtr.Zero, IntPtr.Zero);
-        if (duplex < 0) options[PrintOption.Duplex] = new(CapabilityState.Unavailable, [], "The driver did not report duplex capability.");
-        // DC_DUPLEX reports only a boolean capability. It does not enumerate supported binding
-        // edges, so expose only simplex until a driver API reports exact duplex mode tokens.
-        else options[PrintOption.Duplex] = new(CapabilityState.Supported, ["Simplex"], null);
+        options[PrintOption.Duplex] = MapDuplexCapability(duplex);
         if (copies <= 0) options[PrintOption.Copies] = new(CapabilityState.Unavailable, [], "The driver did not report a copy limit.");
         else options[PrintOption.Copies] = new(CapabilityState.Supported, [$"1..{copies}"], null);
 
@@ -284,6 +289,13 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
         IReadOnlyCollection<string> capabilityValues,
         System.Collections.Immutable.ImmutableDictionary<string, string> nativeIds) =>
         capabilityValues.Count == nativeIds.Count && capabilityValues.All(nativeIds.ContainsKey);
+
+    internal static PrintOptionCapability MapDuplexCapability(int deviceCapabilitiesResult) => deviceCapabilitiesResult switch
+    {
+        < 0 => new(CapabilityState.Unavailable, [], "The driver did not report duplex capability."),
+        0 => new(CapabilityState.Unsupported, [], null),
+        _ => new(CapabilityState.Unknown, [], "The driver reports duplex support but does not report exact binding modes.")
+    };
 
     private static (uint Status, string? DocumentName)? ReadJob(SafePrinterHandle printer, uint jobId)
     {

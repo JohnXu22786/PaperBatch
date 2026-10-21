@@ -16,6 +16,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     private readonly IPreflightPresentationSource _preflightSource;
     private readonly IHistoryPresentationSource _historySource;
     private readonly ITemplatePresentationSource _templateSource;
+    private readonly IPrinterCapabilityPresentationSource? _printerCapabilitySource;
     private QueueItemSnapshot? _selectedQueueItem;
     private PreviewSnapshot? _currentPreview;
     private IReadOnlyList<EffectiveSettingSnapshot> _effectiveSettings = [];
@@ -63,13 +64,16 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         _preflightSource = preflightSource;
         _historySource = historySource;
         _templateSource = templateSource;
+        _printerCapabilitySource = queueSource as IPrinterCapabilityPresentationSource;
         QueueItems = new ObservableCollection<QueueItemSnapshot>(queueSource.GetQueueItems());
+        PrinterQueues = new ObservableCollection<PrinterQueueCapabilitySnapshot>();
         HistoryEntries = historySource.GetHistoryEntries();
         Templates = templateSource.GetTemplates(chinese: false);
         _workspaceStatus = workspaceStatus ?? new WorkspaceStatusSnapshot("Demo mode", "Synthetic sample data only.", true);
         NavigateCommand = new RelayCommand(Navigate, CanNavigate);
         MoveQueueItemCommand = new RelayCommand(MoveQueueItem, CanMoveQueueItem);
         RemoveQueueItemCommand = new RelayCommand(_ => RemoveSelectedQueueItem(), _ => SelectedQueueItem is not null);
+        RefreshPrinterCapabilitiesCommand = new RelayCommand(_ => _ = RefreshPrinterCapabilitiesAsync(), _ => CanRefreshPrinterCapabilities);
 
         if (QueueItems.Count > 0)
         {
@@ -106,6 +110,74 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     public ICommand MoveQueueItemCommand { get; }
 
     public ICommand RemoveQueueItemCommand { get; }
+
+    public ICommand RefreshPrinterCapabilitiesCommand { get; }
+
+    public ObservableCollection<PrinterQueueCapabilitySnapshot> PrinterQueues { get; }
+
+    private string _printerCapabilityStatusEnglish = "Select Refresh to read local Windows queue capabilities. No print jobs are submitted.";
+    private string _printerCapabilityStatusChinese = "选择“刷新”以读取本地 Windows 队列能力。不会提交打印作业。";
+    public string PrinterCapabilityStatus => IsChinese ? _printerCapabilityStatusChinese : _printerCapabilityStatusEnglish;
+    private int _printerCapabilityRefreshGate;
+    public bool IsPrinterCapabilityRefreshInProgress => Volatile.Read(ref _printerCapabilityRefreshGate) != 0;
+
+    private void SetPrinterCapabilityStatus(string english, string chinese)
+    {
+        _printerCapabilityStatusEnglish = english;
+        _printerCapabilityStatusChinese = chinese;
+        OnPropertyChanged(nameof(PrinterCapabilityStatus));
+    }
+
+    public bool CanInspectPrinterCapabilities => IsProductionMode && _printerCapabilitySource?.CanInspectPrinterCapabilities == true;
+    public bool CanRefreshPrinterCapabilities => CanInspectPrinterCapabilities && !IsPrinterCapabilityRefreshInProgress;
+
+    public async Task RefreshPrinterCapabilitiesAsync(CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.CompareExchange(ref _printerCapabilityRefreshGate, 1, 0) != 0) return;
+        OnPrinterRefreshStateChanged();
+        PrinterQueues.Clear();
+        try
+        {
+            if (!CanInspectPrinterCapabilities || _printerCapabilitySource is null)
+            {
+                SetPrinterCapabilityStatus("Read-only queue capability inspection is available only in the production Windows app.",
+                    "只读队列能力检查仅在 Windows 生产应用中可用。");
+                return;
+            }
+            SetPrinterCapabilityStatus("Reading local queues and driver-reported capabilities. This does not submit a job or change defaults.",
+                "正在读取本地打印队列和驱动报告的能力；不会提交作业或更改默认设置。");
+            var entries = await Task.Run(
+                async () => await _printerCapabilitySource.ReadPrinterCapabilitiesAsync(cancellationToken).ConfigureAwait(false),
+                cancellationToken).ConfigureAwait(true);
+            foreach (var entry in entries) PrinterQueues.Add(entry with { Chinese = IsChinese });
+            if (entries.Count == 0)
+                SetPrinterCapabilityStatus("No local print queues were reported.", "没有发现本地打印队列。");
+            else
+                SetPrinterCapabilityStatus($"Read {entries.Count} local queue(s). These values are inventory only; route and paper output are unverified.",
+                    $"已读取 {entries.Count} 个本地队列。这里只是能力清单；实际路由和纸张输出尚未验证。");
+        }
+        catch (OperationCanceledException)
+        {
+            SetPrinterCapabilityStatus("Queue capability inspection was cancelled.", "队列能力检查已取消。");
+        }
+        catch (Exception error)
+        {
+            SetPrinterCapabilityStatus($"Queue capability inspection failed ({error.GetType().Name}). No job was submitted.",
+                $"队列能力检查失败（{error.GetType().Name}）。没有提交作业。");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _printerCapabilityRefreshGate, 0);
+            OnPrinterRefreshStateChanged();
+        }
+    }
+
+    private void OnPrinterRefreshStateChanged()
+    {
+        OnPropertyChanged(nameof(IsPrinterCapabilityRefreshInProgress));
+        OnPropertyChanged(nameof(CanRefreshPrinterCapabilities));
+        (RefreshPrinterCapabilitiesCommand as RelayCommand)?.NotifyCanExecuteChanged();
+    }
 
     public int RequestedCopies { get => _requestedCopies; set { if (SetProperty(ref _requestedCopies, Math.Clamp(value, 1, 999))) InvalidatePreparedQueue(); } }
     public int RequestedNUp { get => _requestedNUp; set { if (SetProperty(ref _requestedNUp, value is 2 or 4 ? value : 1)) InvalidatePreparedQueue(); } }
@@ -232,6 +304,8 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         if (!SetProperty(ref _language, next, nameof(LanguageIndex))) return;
         OnPropertyChanged(nameof(LanguageIndex));
         OnPropertyChanged(nameof(IsChinese));
+        for (var index = 0; index < PrinterQueues.Count; index++)
+            PrinterQueues[index] = PrinterQueues[index] with { Chinese = IsChinese };
         Templates = _templateSource.GetTemplates(IsChinese);
         if (IsDemoMode)
         {
@@ -268,7 +342,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
                 })
             }).ToArray();
         }
-        foreach (var property in new[] { nameof(SectionQueueLabel), nameof(SectionHistoryLabel), nameof(SectionTemplatesLabel),
+        foreach (var property in new[] { nameof(SectionQueueLabel), nameof(SectionHistoryLabel), nameof(SectionTemplatesLabel), nameof(SectionPrintersLabel), nameof(PrinterRefreshLabel), nameof(PrinterCapabilityStatus), nameof(PrinterCapabilityHelp),
                      nameof(ActiveSectionTitle), nameof(HistoryEyebrow), nameof(HistoryTitle), nameof(HistoryDescription), nameof(HistoryEntries), nameof(TemplateEyebrow), nameof(TemplateTitle), nameof(TemplateDescription), nameof(Templates), nameof(CreateRecipeLabel), nameof(RenameRecipeLabel), nameof(DeleteRecipeLabel), nameof(ImportRecipeLabel), nameof(ExportRecipeLabel), nameof(LoadRecipeLabel), nameof(RefreshRecipesLabel), nameof(PreparationSettingsHeading), nameof(SettingsHeading), nameof(CopiesLabel), nameof(OrientationLabel), nameof(ScalingLabel), nameof(NUpLabel), nameof(MediaLabel), nameof(DuplexLabel), nameof(PageRangeLabel), nameof(OrientationOptions), nameof(ScalingOptions), nameof(DuplexOptions), nameof(PreparationSettingsNote), nameof(PreparationResolutionNote), nameof(PrepareLabel) })
             OnPropertyChanged(property);
     }
@@ -276,6 +350,10 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     public string SectionQueueLabel => Localize("Queue and review", "队列与审核");
     public string SectionHistoryLabel => Localize("History", "历史记录");
     public string SectionTemplatesLabel => Localize("Templates", "模板");
+    public string SectionPrintersLabel => Localize("Printers", "打印机");
+    public string PrinterRefreshLabel => Localize("Refresh local queue capabilities", "刷新本地队列能力");
+    public string PrinterCapabilityHelp => Localize("Read-only local queue and driver capability inventory. Paper output and real job behavior are not verified here.",
+        "只读读取本地队列和驱动能力清单；这里不会验证实际纸张输出或真实作业行为。");
     public string CreateRecipeLabel => Localize("Create from queue…", "从队列创建…");
     public string RenameRecipeLabel => Localize("Rename…", "重命名…");
     public string DeleteRecipeLabel => Localize("Delete…", "删除…");
@@ -557,6 +635,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(IsQueueSection));
             OnPropertyChanged(nameof(IsHistorySection));
             OnPropertyChanged(nameof(IsTemplatesSection));
+            OnPropertyChanged(nameof(IsPrintersSection));
             OnPropertyChanged(nameof(ActiveSectionTitle));
         }
     }
@@ -567,11 +646,16 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
 
     public bool IsTemplatesSection => ActiveSection == ShellSection.Templates;
 
+    public bool IsPrintersSection => ActiveSection == ShellSection.Printers;
+
+    public bool IsPrinterInspectionSectionVisible => CanInspectPrinterCapabilities;
+
     public string ActiveSectionTitle => ActiveSection switch
     {
         ShellSection.Queue => SectionQueueLabel,
         ShellSection.History => SectionHistoryLabel,
         ShellSection.Templates => SectionTemplatesLabel,
+        ShellSection.Printers => SectionPrintersLabel,
         _ => "PaperBatch"
     };
 
@@ -619,11 +703,12 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(CanPrepareQueue));
     }
 
-    private static bool CanNavigate(object? parameter) => TryGetSection(parameter, out _);
+    private bool CanNavigate(object? parameter) => TryGetSection(parameter, out var section) &&
+        (section != ShellSection.Printers || IsPrinterInspectionSectionVisible);
 
     private void Navigate(object? parameter)
     {
-        if (TryGetSection(parameter, out var section))
+        if (CanNavigate(parameter) && TryGetSection(parameter, out var section))
         {
             ActiveSection = section;
         }

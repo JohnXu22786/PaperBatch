@@ -17,6 +17,7 @@ var tests = new (string Name, Action Run)[]
 {
     ("selection refreshes preview, settings, and preflight from presentation sources", SelectionRefreshesPresentationSnapshots),
     ("navigation changes the active section", NavigationChangesTheActiveSection),
+    ("printer inspection is explicit, read-only, and keeps demo mode disabled", PrinterInspectionIsReadOnly),
     ("queue ordering and removal are actionable and clear prepared previews", QueueEditsPreserveSelectionAndInvalidateRemovedPreview),
     ("language selection localizes desktop section labels", LanguageSelectionLocalizesSectionLabels),
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
@@ -122,6 +123,88 @@ static void LanguageSelectionLocalizesSectionLabels()
     demo.SetLanguage("zh-CN");
     Assert.Equal("示例运行 A", demo.HistoryEntries[0].Title);
     Assert.Equal("示例课堂资料包", demo.Templates[0].Name);
+}
+
+static void PrinterInspectionIsReadOnly()
+{
+    Assert.Equal("驱动未报告双面能力。", ProductionPresentationSources.FormatCapabilityDetail(
+        "The driver did not report duplex capability.", chinese: true));
+    Assert.Equal("驱动报告支持双面，但未报告具体翻转方式。", ProductionPresentationSources.FormatCapabilityDetail(
+        "The driver reports duplex support but does not report exact binding modes.", chinese: true));
+    Assert.Equal("驱动文本：Vendor-specific explanation", ProductionPresentationSources.FormatCapabilityDetail(
+        "Vendor-specific explanation", chinese: true));
+    Assert.Equal("驱动返回的纸盒过多，无法安全检查。", ProductionPresentationSources.FormatCapabilityDetail(
+        "The driver returned too many trays to inspect safely.", chinese: true));
+    Assert.Equal("驱动报告不支持纸盒。", ProductionPresentationSources.FormatCapabilityDetail(
+        "The driver reports no trays.", chinese: true));
+    Assert.Equal("驱动未返回纸张类型。", ProductionPresentationSources.FormatCapabilityDetail(
+        "The driver did not return media types.", chinese: true));
+    Assert.Equal("驱动返回的分辨率过多，无法安全检查。", ProductionPresentationSources.FormatCapabilityDetail(
+        "The driver returned too many resolutions to inspect safely.", chinese: true));
+    Assert.Equal("驱动报告了纸张名称，但无法将其与原生标识符准确对应。", ProductionPresentationSources.FormatCapabilityDetail(
+        "The driver reported Media names but its native identifiers could not be mapped exactly.", chinese: true));
+    Assert.Equal(" (Driver-reported values: Vendor A, Vendor B)", ProductionPresentationSources.FormatCapabilityValues(
+        ["Vendor A", "Vendor B"], chinese: false));
+    Assert.Equal("（驱动报告值：厂商纸张）", ProductionPresentationSources.FormatCapabilityValues(
+        ["厂商纸张"], chinese: true));
+    var source = new FakePrinterCapabilitySource();
+    var production = new DesktopShellViewModel(new FakeQueueSource([]), new FakeSettingsSource(),
+        new FakePreviewSource(), new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "test", false));
+    var attached = new DesktopShellViewModel(source, new FakeSettingsSource(), new FakePreviewSource(),
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "test", false));
+    Assert.True(!production.CanInspectPrinterCapabilities);
+    Assert.True(!production.IsPrinterInspectionSectionVisible);
+    Assert.True(!production.NavigateCommand.CanExecute("Printers"));
+    Assert.True(attached.CanInspectPrinterCapabilities);
+    attached.NavigateCommand.Execute("Printers");
+    Assert.True(attached.IsPrintersSection);
+    var callerThreadId = Environment.CurrentManagedThreadId;
+    Task.Run(async () => await attached.RefreshPrinterCapabilitiesAsync()).GetAwaiter().GetResult();
+    Assert.Equal(1, source.ReadCalls);
+    Assert.True(source.ReadThreadId != callerThreadId);
+    Assert.Equal("Sample Queue", attached.PrinterQueues.Single().DisplayName);
+    Assert.Equal("Queue: Sample Queue", attached.PrinterQueues.Single().QueueDisplay);
+    Assert.Equal("Driver: Sample Driver", attached.PrinterQueues.Single().DriverDisplay);
+    Assert.Contains("Media: Supported", attached.PrinterQueues.Single().Details);
+    Assert.Contains("inventory only", attached.PrinterCapabilityStatus);
+    attached.SetLanguage("zh-CN");
+    Assert.Equal("打印机", attached.SectionPrintersLabel);
+    Assert.Equal("队列：Sample Queue", attached.PrinterQueues.Single().QueueDisplay);
+    Assert.Equal("驱动：Sample Driver", attached.PrinterQueues.Single().DriverDisplay);
+    Assert.Contains("纸张：支持", attached.PrinterQueues.Single().Details);
+    Assert.Contains("端口：", attached.PrinterQueues.Single().Details);
+    Assert.Contains("驱动未报告双面能力。", attached.PrinterQueues.Single().Details);
+    Assert.True(!attached.PrinterQueues.Single().Details.Contains("The driver did not report duplex capability.", StringComparison.Ordinal));
+    Assert.Contains("已读取 1 个本地队列", attached.PrinterCapabilityStatus);
+    var demo = DesktopShellViewModel.CreateDemo();
+    Assert.True(!demo.CanInspectPrinterCapabilities);
+    Assert.True(!demo.IsPrinterInspectionSectionVisible);
+    Assert.True(!demo.RefreshPrinterCapabilitiesCommand.CanExecute(null));
+    Assert.True(!demo.NavigateCommand.CanExecute("Printers"));
+    demo.NavigateCommand.Execute("Printers");
+    Assert.True(!demo.IsPrintersSection);
+
+    var delayedSource = new FakePrinterCapabilitySource { DelayRead = true };
+    var pending = new DesktopShellViewModel(delayedSource, new FakeSettingsSource(), new FakePreviewSource(),
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "test", false));
+    var firstRead = Task.Run(async () =>
+    {
+        await pending.RefreshPrinterCapabilitiesAsync();
+    });
+    Assert.True(SpinWait.SpinUntil(() => delayedSource.ReadCalls == 1, TimeSpan.FromSeconds(5)));
+    Assert.True(pending.IsPrinterCapabilityRefreshInProgress);
+    Assert.True(!pending.RefreshPrinterCapabilitiesCommand.CanExecute(null));
+    pending.RefreshPrinterCapabilitiesAsync().GetAwaiter().GetResult();
+    var readCallsBeforeCompletion = delayedSource.ReadCalls;
+    delayedSource.CompleteRead();
+    firstRead.GetAwaiter().GetResult();
+    Assert.Equal(1, readCallsBeforeCompletion);
+    Assert.Equal(1, delayedSource.ReadCalls);
+    Assert.Equal(1, pending.PrinterQueues.Count);
+    Assert.True(!pending.IsPrinterCapabilityRefreshInProgress);
 }
 
 static void SourceIntakeErrorsRemainVisibleAndAppend()
@@ -933,6 +1016,29 @@ sealed class FakeTemplateSource : ITemplatePresentationSource
 {
     public IReadOnlyList<TemplateSnapshot> GetTemplates(bool chinese = false) => [];
     public string? TemplateReadError => null;
+}
+
+sealed class FakePrinterCapabilitySource : IQueuePresentationSource, IPrinterCapabilityPresentationSource
+{
+    public bool CanInspectPrinterCapabilities => true;
+    public int ReadCalls { get; private set; }
+    public int ReadThreadId { get; private set; }
+    public bool DelayRead { get; init; }
+    private readonly TaskCompletionSource<IReadOnlyList<PrinterQueueCapabilitySnapshot>> _completion =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public void CompleteRead() => _completion.TrySetResult(Entries());
+    public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => [];
+    public Task<IReadOnlyList<PrinterQueueCapabilitySnapshot>> ReadPrinterCapabilitiesAsync(CancellationToken cancellationToken = default)
+    {
+        ReadCalls++;
+        ReadThreadId = Environment.CurrentManagedThreadId;
+        return DelayRead ? _completion.Task : Task.FromResult(Entries());
+    }
+
+    private static IReadOnlyList<PrinterQueueCapabilitySnapshot> Entries() => [
+            new("Sample Queue", "Sample Driver", "Port: LPT1\nMedia: Supported (Letter)\nDuplex: Unavailable — The driver did not report duplex capability.",
+                "端口：LPT1\n纸张：支持（Letter）\n双面：不可用 — 驱动未报告双面能力。")
+        ];
 }
 
 static class Assert
