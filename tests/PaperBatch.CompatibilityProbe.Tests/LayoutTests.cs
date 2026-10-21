@@ -119,6 +119,16 @@ internal static class LayoutTests
         Assert.Equal(2, result.Pages.Single(page => page.Placements[0].ItemId == "b").Placements[0].SourcePageNumber);
     }
 
+    internal static void AutoOrientationPreservesSourcePageDimensions()
+    {
+        var landscape = new PageSize(792, 612);
+        var portrait = new PageSize(612, 792);
+        var result = LayoutCompiler.Compile([new LayoutDocument("mixed", [landscape, portrait], "Letter")], new());
+        Assert.True(result.Succeeded, string.Join("; ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        Assert.True(result.Pages.Select(page => page.OutputSize).SequenceEqual<PageSize?>([landscape, portrait]));
+        Assert.True(result.Pages.SelectMany(page => page.Placements).All(placement => placement.Scale == 1d));
+    }
+
     internal static void OutputLimitAndCopiesAreExplicit()
     {
         Assert.Equal("InvalidCopies", LayoutCompiler.Compile([Doc("a", 1)], new(Copies: 1000)).Diagnostics[0].Code);

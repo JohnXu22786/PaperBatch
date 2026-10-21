@@ -386,6 +386,9 @@ static void PreparationControlsForwardRequestedSettingsAndInvalidate()
     Assert.True(source.Options.Duplex);
     Assert.Equal(new PaperBatch.Core.Layout.PageRange(2, 4), source.Options.Ranges.Single());
     Assert.True(source.InvalidatedIds.Contains("a"));
+    viewModel.OrientationIndex = 0;
+    viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
+    Assert.Null(source.Options!.SheetSize);
 }
 
 static void RecipeDeviceConflictCreatesNoRunOrFinalArtifact()

@@ -152,8 +152,9 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         var orientation = OrientationIndex switch { 1 => Orientation.Portrait, 2 => Orientation.Landscape, _ => Orientation.Auto };
         var scaling = ScalingIndex == 1 ? ScalingMode.ActualSize : ScalingMode.ShrinkToFit;
         var duplex = DuplexIndex switch { 1 => DuplexMode.LongEdge, 2 => DuplexMode.ShortEdge, _ => DuplexMode.Simplex };
-        var size = media == "A4" ? (OrientationIndex == 2 ? new PageSize(841.89, 595.28) : new PageSize(595.28, 841.89))
-            : (OrientationIndex == 2 ? new PageSize(792, 612) : new PageSize(612, 792));
+        PageSize? size = orientation == Orientation.Auto ? null : media == "A4"
+            ? (orientation == Orientation.Landscape ? new PageSize(841.89, 595.28) : new PageSize(595.28, 841.89))
+            : (orientation == Orientation.Landscape ? new PageSize(792, 612) : new PageSize(612, 792));
         var ranges = ParsePageRange(PageRange);
         var settings = new PrintSettings(RequestedCopies, _requestedColorMode, duplex, media, orientation, scaling);
         var options = new LayoutOptions(Copies: RequestedCopies, NUp: RequestedNUp switch { 2 => NUpMode.Two, 4 => NUpMode.Four, _ => NUpMode.One },

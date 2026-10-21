@@ -152,6 +152,7 @@ var tests = new List<(string Name, Action Run)>
     ("duplex file boundary inserts a blank back face", LayoutTests.DuplexFileBoundariesInsertBlankBackFace),
     ("copy expansion and segment keys preserve order", LayoutTests.CopyExpansionAndSegmentsPreserveOrder),
     ("per-document copies ranges N-up and fit alter the compiled page map", LayoutTests.PerDocumentCopyRangeNUpAndFitSettingsAffectCompiledPages),
+    ("automatic orientation preserves inspected source page dimensions", LayoutTests.AutoOrientationPreservesSourcePageDimensions),
     ("layout enforces copy and output limits", LayoutTests.OutputLimitAndCopiesAreExplicit),
     ("layout chooses rotation for mixed page orientation", LayoutTests.MixedOrientationUsesRotationWhenItFitsBetter),
     ("covers and separators are explicit layout pages", LayoutTests.CoversAndSeparatorsAreExplicitLayoutPages),

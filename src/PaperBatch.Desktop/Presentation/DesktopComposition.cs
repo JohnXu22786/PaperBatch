@@ -260,14 +260,18 @@ internal sealed class ProductionPresentationSources :
             // keep file boundaries on the correct physical face. This remains a
             // requested layout value; it is not validation of printer capability.
             layoutOptions = layoutOptions with { Duplex = first.Values.DuplexMode != DuplexMode.Simplex };
+            if (resolved.Any(item => item.Values.Orientation == Orientation.Auto))
+                layoutOptions = layoutOptions with { SheetSize = null };
             var sourceSettings = new List<PrintSettings>(resolved.Count);
             var documentSettings = new List<LayoutDocumentSettings>(resolved.Count);
             foreach (var item in resolved)
             {
                 if (item.Values.Media is not ("Letter" or "A4"))
                     return new(null, null, [$"{item.MatchingRuleId ?? "recipe defaults"}: requested media is not supported by the desktop layout controls; no artifact was created."], false);
-                var size = item.Values.Media == "A4" ? new PageSize(595.28, 841.89) : new PageSize(612, 792);
-                if (item.Values.Orientation == Orientation.Landscape) size = new PageSize(size.HeightPoints, size.WidthPoints);
+                PageSize? size = item.Values.Orientation == Orientation.Auto ? null :
+                    item.Values.Media == "A4" ? new PageSize(595.28, 841.89) : new PageSize(612, 792);
+                if (item.Values.Orientation == Orientation.Landscape && size is not null)
+                    size = new PageSize(size.HeightPoints, size.WidthPoints);
                 sourceSettings.Add(new PrintSettings(item.Values.Copies, item.Values.ColorMode, item.Values.DuplexMode,
                     item.Values.Media, item.Values.Orientation, item.Values.ScalingMode, item.Values.PrinterId, item.Values.TrayId));
                 documentSettings.Add(new LayoutDocumentSettings(item.Values.Copies,
