@@ -20,8 +20,7 @@ uses a Linux-only owner-only operation directory and marker. Its source program
 tree and shared-library paths must also be non-writable by the current user or
 other untrusted accounts; otherwise its capability probe reports unavailable.
 
-The following work remains before a source can produce a `PreparedRun` or a final
-preview:
+The following renderer limitations remain:
 
 1. Extend built-in image rendering to PNG alpha/palette/interlaced variants,
 JPEGs with EXIF rotation or mirroring, and TIFF with an explicit multi-page
@@ -36,15 +35,8 @@ interlacing or alpha and JPEGs with no orientation change.
 3. Extend the corpus across DOCX/ODT/spreadsheets/presentations and record
    rendered-output comparisons with bounded variance. Confirm the declared
    format table against the pinned build before advertising those formats.
-4. Add the preparation coordinator that assembles source snapshots, renderer
-receipts, page maps, and the PDF artifact into a persisted `PreparedRun`, then
-serves preview bytes from that exact artifact ID.
-5. Wire only adapters that pass runtime capability checks. Keep native Microsoft
-Office and WPS unavailable until a supported interactive path is implemented
-and tested; LibreOffice does not establish their support.
+4. Wire only adapters that pass runtime capability checks. Keep native Microsoft
+   Office and WPS unavailable until a supported interactive path is implemented
+   and tested; LibreOffice does not establish their support.
 
-The desktop can persist PDF pass-through and supported JPEG/PNG render artifacts,
-but there is no preparation coordinator to bind those artifacts to a `PreparedRun`
-or serve final preview bytes. It reports prepared-run/final-preview/submission as
-unavailable. This work does not close G1 or G2 and does not implement printing or
-device output.
+The production desktop now has a `PreparedArtifactCoordinator` that binds source snapshots, renderer receipts, page maps, and the final PDF artifact into a persisted `PreparedRun`; preview reads that same artifact. These PDF/JPEG/PNG preparation and preview paths require an explicitly configured PDFium runtime and digest, and PDF source inspection rejects forms and annotations. The desktop still has no production printer submission path or device output. This work does not close G1 or G2.
