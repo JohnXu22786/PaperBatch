@@ -30,9 +30,13 @@ this prototype. The package omits PDFium, so preparation and preview can operate
 only after the user supplies a separately trusted runtime using an explicit
 `PAPERBATCH_PDFIUM_RUNTIME_PATH` and matching
 `PAPERBATCH_PDFIUM_RUNTIME_SHA256`; the application verifies the digest before
-loading it. The package does not provide or select that runtime. Production
-print submission is not implemented. The package does not establish clean-PC
-installation, Office/WPS compatibility, a printer route, or physical output.
+loading it. The package does not provide or select that runtime. With PDFium
+explicitly configured and a supported queue explicitly selected, the desktop
+Print action submits the exact prepared PDF through the Windows GDI/Winspool
+coordinator. Submission statuses report spooler facts only; cancellation is
+best-effort for the exact receipt and cannot recall pages already emitted. The
+package and its CI do not establish clean-PC installation, Office/WPS
+compatibility, a verified printer route, or physical output.
 
 The binary is unsigned. No paid signing certificate or signing service is
 used. This is a CI verification artifact, not a stable or beta release. No
