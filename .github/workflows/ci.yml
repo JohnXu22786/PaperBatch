@@ -259,6 +259,38 @@ jobs:
             Write-Output "::error title=Managed test failure::$diagnostic"
           }
 
+      - name: Expose Ubuntu managed test failure details
+        if: failure() && runner.os == 'Linux' && steps.managed-test-runner.outcome == 'failure'
+        shell: bash
+        run: |
+          test_log="$RUNNER_TEMP/ubuntu-managed-test-retry.log"
+          if timeout --signal=TERM --kill-after=10s 5m dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false >"$test_log" 2>&1; then
+            test_exit_code=0
+          else
+            test_exit_code=$?
+          fi
+          {
+            echo '### Ubuntu managed test runner diagnostic retry'
+            echo '```text'
+            echo "Exit code: $test_exit_code"
+            grep '^FAIL ' "$test_log" | head -20 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          failure_count=0
+          while IFS= read -r diagnostic; do
+            [ -n "$diagnostic" ] || continue
+            failure_count=$((failure_count + 1))
+            [ "$failure_count" -le 20 ] || break
+            diagnostic=${diagnostic//"$GITHUB_WORKSPACE"/[WORKSPACE]}
+            diagnostic=${diagnostic//"$RUNNER_TEMP"/[RUNNER_TEMP]}
+            if [ "${#diagnostic}" -gt 1000 ]; then diagnostic="${diagnostic:0:1000} [truncated]"; fi
+            diagnostic=${diagnostic//'%'/'%25'}
+            diagnostic=${diagnostic//':'/'%3A'}
+            diagnostic=${diagnostic//$'\r'/'%0D'}
+            diagnostic=${diagnostic//$'\n'/'%0A'}
+            printf '::error title=Managed test failure::%s\n' "$diagnostic"
+          done < <(grep '^FAIL ' "$test_log" || true)
+
       - name: Remove temporary Linux renderer runtimes
         if: always() && runner.os == 'Linux'
         run: |
