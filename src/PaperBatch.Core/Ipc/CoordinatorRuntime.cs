@@ -458,7 +458,7 @@ public sealed class AutoStartingCoordinatorTransport(ILocalCoordinatorTransport?
         catch (Exception exception) when (exception is NotSupportedException or IOException)
         {
             using var process = CoordinatorProcessLauncher.StartHostProcess();
-            var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
             while (DateTimeOffset.UtcNow < deadline)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -468,7 +468,7 @@ public sealed class AutoStartingCoordinatorTransport(ILocalCoordinatorTransport?
                     await Task.Delay(100, cancellationToken).ConfigureAwait(false);
                 }
             }
-            throw new NotSupportedException("The coordinator host did not become ready within five seconds.");
+            throw new NotSupportedException("The coordinator host did not become ready within ten seconds.");
         }
     }
 }

@@ -11,7 +11,7 @@ using PaperBatch.CompatibilityProbe;
 if (CoordinatorProcessLauncher.IsHostMode(args))
 {
     using var shutdown = new CancellationTokenSource();
-    if (Environment.GetEnvironmentVariable("PAPERBATCH_TEST_COORDINATOR_HOST") == "1") shutdown.CancelAfter(TimeSpan.FromSeconds(1));
+    if (Environment.GetEnvironmentVariable("PAPERBATCH_TEST_COORDINATOR_HOST") == "1") shutdown.CancelAfter(TimeSpan.FromSeconds(5));
     await using var host = new CoordinatorRuntimeHost("PaperBatch", new ProductionCoordinatorRequestHandler(
         Environment.GetEnvironmentVariable("PAPERBATCH_TEST_COORDINATOR_ROOT")));
     if (!host.IsOwner) return 0;

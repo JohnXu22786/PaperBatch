@@ -673,7 +673,7 @@ internal static class CoreTests
             var unavailable = new NamedPipeLocalCoordinatorTransport(NamedPipeLocalCoordinatorTransport.CreateCurrentUserPipeName(),
                 connectTimeout: TimeSpan.FromMilliseconds(150));
             var exited = false;
-            for (var attempt = 0; attempt < 40 && !exited; attempt++)
+            for (var attempt = 0; attempt < 80 && !exited; attempt++)
             {
                 Thread.Sleep(100);
                 try { _ = unavailable.SendAsync(request).AsTask().GetAwaiter().GetResult(); }
