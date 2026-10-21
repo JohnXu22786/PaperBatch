@@ -1,4 +1,5 @@
 using PaperBatch.Core.Watch;
+using PaperBatch.Core.Ipc;
 
 internal static class WatchFolderTests
 {
@@ -303,6 +304,50 @@ internal static class WatchFolderTests
         public void Dispose() { if (File.Exists(Path)) File.Delete(Path); }
     }
 
+    public static void CliCoordinatorUsesStableIdempotencyKeys()
+    {
+        var transport = new RecordingTransport();
+        var coordinator = new NamedPipeCliCoordinator(transport);
+        var first = coordinator.ExecuteAsync("submit", ["job-42"]).AsTask().GetAwaiter().GetResult();
+        var retry = coordinator.ExecuteAsync("submit", ["job-42"]).AsTask().GetAwaiter().GetResult();
+        Assert.Equal("queued", first);
+        Assert.Equal("queued", retry);
+        Assert.Equal(2, transport.Requests.Count);
+        Assert.Equal(transport.Requests[0].IdempotencyKey!, transport.Requests[1].IdempotencyKey!);
+        Assert.True(transport.Requests[0].CorrelationId != transport.Requests[1].CorrelationId);
+        Assert.Equal("cli.submit", transport.Requests[0].Operation);
+    }
+
+    public static void CliPrepareIdempotencyTracksRecipeContent()
+    {
+        using var recipe = new TemporaryFile();
+        var transport = new RecordingTransport();
+        var coordinator = new NamedPipeCliCoordinator(transport);
+        var relativePath = Path.GetRelativePath(Environment.CurrentDirectory, recipe.Path);
+        File.WriteAllText(recipe.Path, "{\"first\":true}");
+        _ = coordinator.ExecuteAsync("prepare", [relativePath]).AsTask().GetAwaiter().GetResult();
+        _ = coordinator.ExecuteAsync("prepare", [relativePath]).AsTask().GetAwaiter().GetResult();
+        Assert.Equal(Path.GetFullPath(relativePath), transport.Requests[0].Payload.GetProperty("arguments")[0].GetString()!);
+        Assert.Equal(transport.Requests[0].IdempotencyKey!, transport.Requests[1].IdempotencyKey!);
+        Assert.Equal(transport.Requests[0].Payload.GetProperty("recipeSha256").GetString()!,
+            transport.Requests[1].Payload.GetProperty("recipeSha256").GetString()!);
+        File.WriteAllText(recipe.Path, "{\"second\":true}");
+        _ = coordinator.ExecuteAsync("prepare", [recipe.Path]).AsTask().GetAwaiter().GetResult();
+        Assert.True(transport.Requests[2].IdempotencyKey != transport.Requests[1].IdempotencyKey);
+        Assert.True(transport.Requests[2].Payload.GetProperty("recipeSha256").GetString() != transport.Requests[1].Payload.GetProperty("recipeSha256").GetString());
+    }
+
+    private sealed class RecordingTransport : ILocalCoordinatorTransport
+    {
+        public List<IpcRequestEnvelope> Requests { get; } = [];
+        public ValueTask<IpcResponseEnvelope> SendAsync(IpcRequestEnvelope request, CancellationToken cancellationToken = default)
+        {
+            Requests.Add(request);
+            using var payload = System.Text.Json.JsonDocument.Parse("{\"result\":\"queued\"}");
+            return ValueTask.FromResult(new IpcResponseEnvelope(1, request.CorrelationId, payload.RootElement.Clone(), null));
+        }
+    }
+
     public static void CliDoesNotPretendToSubmit()
     {
         var cli = new PaperBatchCli();
@@ -318,7 +363,7 @@ internal static class WatchFolderTests
         }
         using var output = new StringWriter();
         using var error = new StringWriter();
-        var exitCode = PaperBatchCli.ExecuteAsync(["submit", "job-1"], output, error).GetAwaiter().GetResult();
+        var exitCode = PaperBatchCli.ExecuteAsync(["submit", "job-1"], output, error, cli: new PaperBatchCli()).GetAwaiter().GetResult();
         Assert.Equal(3, exitCode);
         Assert.Contains("\"error\":\"unavailable\"", error.ToString());
     }

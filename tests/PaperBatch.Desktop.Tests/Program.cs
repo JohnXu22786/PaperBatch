@@ -11,6 +11,8 @@ using PaperBatch.Core.Rendering;
 using PaperBatch.Core.Preparation;
 using PaperBatch.Core.Recipes;
 using PaperBatch.Core.Layout;
+using PaperBatch.Core.Ipc;
+using PaperBatch.Core.Serialization;
 using PaperBatch.Desktop.Presentation;
 
 var tests = new (string Name, Action Run)[]
@@ -518,7 +520,8 @@ static void ChangedSourceAfterPreflightCreatesNoPreparedArtifact()
         var coordinator = new PreparedArtifactCoordinator(intake, cache, renderer, new ConflictTestInspector(),
             new ConflictTestInspector(), composer, artifacts, store);
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
-            artifacts: artifacts, runStore: store, preparation: coordinator);
+            artifacts: artifacts, runStore: store, preparationAvailable: true,
+            coordinatorTransport: new PreparedArtifactTestTransport(coordinator));
         var queueItem = sources.ImportAsync([path]).GetAwaiter().GetResult().Single();
         File.AppendAllText(path, "\n% changed after preflight\n");
 
@@ -591,7 +594,8 @@ static void RecipeDeviceConflictCreatesNoRunOrFinalArtifact()
         var coordinator = new PreparedArtifactCoordinator(intake, cache, renderer, new ConflictTestInspector(),
             new ConflictTestInspector(), composer, artifacts, store);
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
-            artifacts: artifacts, runStore: store, preparation: coordinator);
+            artifacts: artifacts, runStore: store, preparationAvailable: true,
+            coordinatorTransport: new PreparedArtifactTestTransport(coordinator));
         sources.ImportAsync([firstPath, secondPath]).GetAwaiter().GetResult();
         var recipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "r", "conflict",
             [new RecipeSource("first", firstPath), new RecipeSource("second", secondPath)],
@@ -661,7 +665,8 @@ static void RecipeDuplexRequestChangesCompiledLayout()
         var coordinator = new PreparedArtifactCoordinator(intake, cache, renderer, new ConflictTestInspector(),
             new ConflictTestInspector(), composer, artifacts, store);
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
-            artifacts: artifacts, runStore: store, preparation: coordinator);
+            artifacts: artifacts, runStore: store, preparationAvailable: true,
+            coordinatorTransport: new PreparedArtifactTestTransport(coordinator));
         sources.ImportAsync([firstPath, firstPath]).GetAwaiter().GetResult();
         var recipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "r", "duplex",
             [new RecipeSource("first", firstPath) { Override = new RecipeSettingsOverride(DuplexMode: DuplexMode.LongEdge) },
@@ -1010,6 +1015,37 @@ sealed class LayoutCaptureComposer : IPageCompositionAdapter
         CompiledPlacements = compilation.Pages.SelectMany(page => page.Placements)
             .Select(placement => (placement.ItemId, placement.TargetBounds)).ToArray();
         throw new LayoutCapturedException();
+    }
+}
+
+sealed class PreparedArtifactTestTransport(PreparedArtifactCoordinator preparation) : ILocalCoordinatorTransport
+{
+    public async ValueTask<IpcResponseEnvelope> SendAsync(IpcRequestEnvelope request, CancellationToken cancellationToken = default)
+    {
+        if (request.Operation != "desktop.prepare")
+            return IpcJson.CreateErrorResponse(request.CorrelationId, "unavailable", "The test transport only serves desktop preparation.");
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        var payload = request.Payload;
+        var inputs = payload.GetProperty("inputs").Deserialize<SourceInput[]>(options)!;
+        var settings = payload.GetProperty("requestedSettings").Deserialize<PrintSettings>(options)!;
+        var layout = payload.GetProperty("layoutOptions").Deserialize<LayoutOptions>(options)!;
+        var perItemSettings = payload.TryGetProperty("perItemPrintSettings", out var settingsJson)
+            ? settingsJson.Deserialize<PrintSettings[]>(options) : null;
+        var perItemLayout = payload.TryGetProperty("perItemLayoutSettings", out var layoutJson)
+            ? layoutJson.Deserialize<LayoutDocumentSettings[]>(options) : null;
+        var now = DateTimeOffset.UtcNow;
+        var result = await preparation.PrepareAsync(inputs, settings, layout, request.IdempotencyKey!,
+            new RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true), now,
+            perItemSettings, perItemLayout, cancellationToken).ConfigureAwait(false);
+        if (!result.Succeeded)
+            return IpcJson.CreateErrorResponse(request.CorrelationId, "unavailable", string.Join(" ", result.Diagnostics));
+        var responsePayload = JsonSerializer.SerializeToElement(new
+        {
+            status = "prepared",
+            serializedRun = PreparedRunJson.Serialize(result.Run!),
+            diagnostics = result.Diagnostics
+        });
+        return new IpcResponseEnvelope(IpcJson.CurrentProtocolVersion, request.CorrelationId, responsePayload, null);
     }
 }
 

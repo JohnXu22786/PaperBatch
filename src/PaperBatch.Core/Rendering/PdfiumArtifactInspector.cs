@@ -26,6 +26,16 @@ public sealed class PdfiumArtifactInspector
         _runtimeSha256 = expectedSha256.ToLowerInvariant();
     }
 
+    /// <summary>Checks the configured runtime file and digest without loading native code.</summary>
+    public void ValidateConfiguredRuntime()
+    {
+        if ((File.GetAttributes(_runtimePath) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
+            throw new InvalidDataException("The configured PDFium runtime must be a direct file.");
+        using var runtime = new FileStream(_runtimePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (!string.Equals(Convert.ToHexString(SHA256.HashData(runtime)).ToLowerInvariant(), _runtimeSha256, StringComparison.Ordinal))
+            throw new InvalidDataException("The configured PDFium runtime does not match its configured digest.");
+    }
+
     /// <summary>Conservatively accepts only PDFs with no AcroForm/XFA form data or page annotations.</summary>
     public async Task<bool> HasStaticPageContentAsync(Stream pdf, CancellationToken cancellationToken)
     {

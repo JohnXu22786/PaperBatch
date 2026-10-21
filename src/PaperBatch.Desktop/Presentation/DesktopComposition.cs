@@ -14,6 +14,7 @@ using PaperBatch.Core.Preparation;
 using PaperBatch.Core.Recipes;
 using PaperBatch.Core.Rendering;
 using PaperBatch.Core.Serialization;
+using PaperBatch.Core.Ipc;
 
 namespace PaperBatch.Desktop.Presentation;
 
@@ -58,34 +59,40 @@ internal static class DesktopComposition
         store.Initialize();
         var printerBackend = OperatingSystem.IsWindows() ? new WindowsGdiNativeAdapter() : null;
         IPdfArtifactPreviewRenderer? previewRenderer = null;
-        PreparedArtifactCoordinator? preparation = null;
+        var preparationAvailable = false;
         var pdfiumPath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH");
         var pdfiumHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_SHA256");
         if (!string.IsNullOrWhiteSpace(pdfiumPath) && !string.IsNullOrWhiteSpace(pdfiumHash))
         {
-            var pdfium = new PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
-            previewRenderer = pdfium;
-            preparation = new PreparedArtifactCoordinator(intake, cache, renderer, pdfium, pdfium,
-                new PdfiumPageCompositionAdapter(pdfiumPath, pdfiumHash), artifactStore, store);
+            if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
+            {
+                try
+                {
+                    var pdfium = new PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
+                    pdfium.ValidateConfiguredRuntime();
+                    previewRenderer = pdfium;
+                    preparationAvailable = true;
+                }
+                catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException)
+                {
+                    // Keep preparation and final preview disabled until the shared host can use the pinned runtime.
+                }
+            }
         }
 
-        WindowsPrintCoordinator? printCoordinator = null;
-        if (printerBackend is not null && store is not null && !string.IsNullOrWhiteSpace(pdfiumPath) && !string.IsNullOrWhiteSpace(pdfiumHash))
-            printCoordinator = new WindowsPrintCoordinator(store,
-                new WindowsGdiPrintBackend(printerBackend, new PinnedPdfiumWindowsPrintRasterizer(pdfiumPath, pdfiumHash)),
-                artifacts: artifactStore);
+        var printAvailable = printerBackend is not null && preparationAvailable;
 
         // Unsupported formats have no renderer. Submission is available only with the pinned PDFium runtime and Windows backend.
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
-            artifacts: artifactStore, previewRenderer: previewRenderer, runStore: store, preparation: preparation,
-            printerCapabilityReader: printerBackend, printCoordinator: printCoordinator);
+            artifacts: artifactStore, previewRenderer: previewRenderer, runStore: store, preparationAvailable: preparationAvailable,
+            printerCapabilityReader: printerBackend, printAvailable: printAvailable);
         return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE",
-                preparation is null
+                !preparationAvailable
                     ? "PDF pass-through and supported JPEG/PNG artifact rendering are available. Preparation and final preview require an explicitly configured PDFium runtime; read-only printer capability inspection is Windows-only; LibreOffice conversion is unavailable."
-                    : printCoordinator is null
+                    : !printAvailable
                         ? "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Read-only local printer capability inspection is Windows-only; Office conversion and desktop print submission are unavailable."
-                        : "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Explicit Windows queue selection and a deliberate Print click submit the persisted PDF through the GDI coordinator; displayed states are OS spooler reports, not confirmation of paper output.", false));
+                        : "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Explicit Windows queue selection and a deliberate Print click submit the persisted PDF through the shared per-user coordinator; displayed states are OS spooler reports, not confirmation of paper output.", false));
     }
 }
 
@@ -109,9 +116,10 @@ internal sealed class ProductionPresentationSources :
     private readonly RenderArtifactStore? _artifacts;
     private readonly IPdfArtifactPreviewRenderer? _previewRenderer;
     private readonly SqliteRunStore? _runStore;
-    private readonly PreparedArtifactCoordinator? _preparation;
+    private readonly bool _preparationAvailable;
     private readonly IWindowsGdiNativeAdapter? _printerCapabilityReader;
-    private readonly WindowsPrintCoordinator? _printCoordinator;
+    private readonly bool _printAvailable;
+    private readonly ILocalCoordinatorTransport _coordinatorTransport;
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
     private readonly Dictionary<string, string> _queueLocations = new(StringComparer.Ordinal);
@@ -125,8 +133,9 @@ internal sealed class ProductionPresentationSources :
     public ProductionPresentationSources(SourceIntakeService? intake = null, RendererCoordinator? renderer = null,
         SourceSnapshotCache? cache = null, bool rendererAvailable = false,
         RenderArtifactStore? artifacts = null, IPdfArtifactPreviewRenderer? previewRenderer = null,
-        SqliteRunStore? runStore = null, PreparedArtifactCoordinator? preparation = null,
-        IWindowsGdiNativeAdapter? printerCapabilityReader = null, WindowsPrintCoordinator? printCoordinator = null)
+        SqliteRunStore? runStore = null, bool preparationAvailable = false,
+        IWindowsGdiNativeAdapter? printerCapabilityReader = null, bool printAvailable = false,
+        ILocalCoordinatorTransport? coordinatorTransport = null)
     {
         _intake = intake;
         _renderer = renderer ?? new RendererCoordinator(Array.Empty<IRendererAdapter>());
@@ -135,34 +144,54 @@ internal sealed class ProductionPresentationSources :
         _artifacts = artifacts;
         _previewRenderer = previewRenderer;
         _runStore = runStore;
-        _preparation = preparation;
+        _preparationAvailable = preparationAvailable;
         _printerCapabilityReader = printerCapabilityReader;
-        _printCoordinator = printCoordinator;
+        _printAvailable = printAvailable;
+        _coordinatorTransport = coordinatorTransport ?? new AutoStartingCoordinatorTransport();
     }
 
     public bool CanInspectPrinterCapabilities => _printerCapabilityReader is not null && OperatingSystem.IsWindows();
-    public bool CanSubmitPrintJobs => _printCoordinator is not null && OperatingSystem.IsWindows();
+    public bool CanSubmitPrintJobs => _printAvailable && OperatingSystem.IsWindows();
 
     public async Task<IReadOnlyList<PrintJobSnapshot>> SubmitPreparedRunAsync(string queueItemId, CancellationToken cancellationToken = default)
     {
-        if (!CanSubmitPrintJobs || _printCoordinator is null || _runStore is null ||
+        if (!CanSubmitPrintJobs || _runStore is null ||
             !_preparedRunsByQueueItem.TryGetValue(queueItemId, out var run) || run.FinalArtifact is null)
             throw new InvalidOperationException("A persisted prepared PDF and configured Windows print backend are required.");
-        var results = await _printCoordinator.SubmitRunAsync(run, "desktop-print", DateTimeOffset.UtcNow,
-            cancellationToken).ConfigureAwait(false);
-        var rejected = results.FirstOrDefault(result => result.Status != PrintSubmissionStatus.Accepted);
+        var refreshedJobs = new List<PrintJobSnapshot>();
+        foreach (var job in _runStore.GetJobs(run.RunId).Where(job => job.State == JobState.Ready))
+        {
+            var arguments = new[] { job.JobId };
+            var response = await SendCoordinatorRequestAsync("cli.submit",
+                CoordinatorRequestKeys.Create("submit", arguments), new { arguments }, cancellationToken).ConfigureAwait(false);
+            if (response.Error is { } error)
+                throw new InvalidOperationException($"Coordinator rejected print submission ({error.Code}): {error.Message}");
+            var responseStatus = response.Payload!.Value.TryGetProperty("status", out var status)
+                ? status.GetString() : null;
+            if (!string.Equals(responseStatus, PrintSubmissionStatus.Accepted.ToString(), StringComparison.Ordinal))
+            {
+                var detail = response.Payload.Value.TryGetProperty("detail", out var detailJson) && detailJson.ValueKind == System.Text.Json.JsonValueKind.String
+                    ? detailJson.GetString() : null;
+                refreshedJobs.Add(new PrintJobSnapshot(job.JobId, job.SegmentIndex, responseStatus ?? "Unknown",
+                    string.IsNullOrWhiteSpace(detail) ? "Submission was not accepted; later segments were not submitted." : detail,
+                    false, responseStatus ?? "Unknown"));
+                break;
+            }
+        }
         var refreshed = await RefreshPrintJobsAsync(queueItemId, cancellationToken).ConfigureAwait(false);
-        return rejected?.Reason is null ? refreshed : refreshed.Select(job => job.JobId == rejected!.Job?.JobId
-            ? job with { Detail = $"Not accepted: {rejected.Reason}" }
-            : job).ToArray();
+        return refreshedJobs.Count == 0 ? refreshed : refreshed.Select(job => refreshedJobs.FirstOrDefault(rejected => rejected.JobId == job.JobId) ?? job).ToArray();
     }
 
     public async Task<IReadOnlyList<PrintJobSnapshot>> RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken = default)
     {
         if (_runStore is null || !_preparedRunsByQueueItem.TryGetValue(queueItemId, out var run)) return [];
-        if (_printCoordinator is not null)
-            foreach (var job in _runStore.GetJobs(run.RunId).Where(job => job.OsReceipt is not null))
-                await _printCoordinator.RefreshStatusAsync(job.JobId, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+        foreach (var job in _runStore.GetJobs(run.RunId).Where(job => job.OsReceipt is not null))
+        {
+            var response = await SendCoordinatorRequestAsync("cli.status", null,
+                new { arguments = new[] { job.JobId } }, cancellationToken).ConfigureAwait(false);
+            if (response.Error is { } error)
+                throw new InvalidOperationException($"Coordinator could not refresh print status ({error.Code}): {error.Message}");
+        }
         return _runStore.GetJobs(run.RunId).Select(job => new PrintJobSnapshot(job.JobId, job.SegmentIndex,
             job.State.ToString(), job.State is JobState.NeedsReviewUnknown
                 ? "Submission outcome unknown; automatic retry is blocked."
@@ -173,9 +202,11 @@ internal sealed class ProductionPresentationSources :
 
     public async Task<bool> CancelPrintJobAsync(string jobId, CancellationToken cancellationToken = default)
     {
-        if (_printCoordinator is null || _runStore?.GetJob(jobId)?.OsReceipt is null) return false;
-        var result = await _printCoordinator.CancelAsync(jobId, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
-        return result.State == JobState.CancelObserved;
+        if (!_printAvailable || _runStore?.GetJob(jobId)?.OsReceipt is null) return false;
+        var response = await SendCoordinatorRequestAsync("cli.cancel",
+            CoordinatorRequestKeys.Create("cancel", [jobId]), new { arguments = new[] { jobId } }, cancellationToken).ConfigureAwait(false);
+        if (response.Error is { } error) throw new InvalidOperationException($"Coordinator rejected cancellation ({error.Code}): {error.Message}");
+        return response.Payload!.Value.TryGetProperty("status", out var status) && status.GetString() == JobState.CancelObserved.ToString();
     }
 
     public async Task<IReadOnlyList<PrinterQueueCapabilitySnapshot>> ReadPrinterCapabilitiesAsync(CancellationToken cancellationToken = default)
@@ -398,7 +429,7 @@ internal sealed class ProductionPresentationSources :
     }
 
     private readonly Dictionary<string, List<PreflightFindingSnapshot>> _findings = new(StringComparer.Ordinal);
-    public bool CanPrepare => _preparation is not null && _queue.Count > 0 &&
+    public bool CanPrepare => _preparationAvailable && _queue.Count > 0 &&
         _queue.All(item => _queueLocations.ContainsKey(item.Id) && _queueSourceHashes.ContainsKey(item.Id) &&
             _preparableQueueItems.Contains(item.Id));
     public IReadOnlyList<string> ResolutionSummaries => _resolutionSummaries;
@@ -406,7 +437,7 @@ internal sealed class ProductionPresentationSources :
     public async Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings, LayoutOptions layoutOptions,
         PaperBatch.Core.Recipes.JobRecipe? recipe = null, CancellationToken cancellationToken = default)
     {
-        if (_preparation is null || _runStore is null || _queue.Count == 0)
+        if (!_preparationAvailable || _runStore is null || _queue.Count == 0)
             return new(null, null, ["A trusted PDFium runtime and a nonempty local queue are required before preparation."], false);
         var now = DateTimeOffset.UtcNow;
         var seenPaths = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
@@ -486,15 +517,45 @@ internal sealed class ProductionPresentationSources :
             requestedSettings = sourceSettings[0];
         }
         else _resolutionSummaries = [];
-        var result = await _preparation.PrepareAsync(paths, requestedSettings, layoutOptions,
-            "desktop-prepare-" + Guid.NewGuid().ToString("N"),
-            new RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true), now,
-            perItemPrintSettings, perItemLayoutSettings, cancellationToken).ConfigureAwait(false);
-        if (result.Run is { } run)
+        // System.Text.Json cannot enumerate default ImmutableArray values. Make the
+        // wire representation explicit for both batch and per-document page ranges.
+        var wireLayoutOptions = layoutOptions with
         {
-            foreach (var item in _queue) RegisterPreparedRun(item.Id, run);
+            Ranges = layoutOptions.Ranges.IsDefault ? [] : layoutOptions.Ranges
+        };
+        var wirePerItemLayoutSettings = perItemLayoutSettings?.Select(item => item with
+        {
+            Ranges = item.Ranges.IsDefault ? [] : item.Ranges
+        }).ToArray();
+        var requestPayload = new { inputs = paths, sourceSha256 = paths.Select(input => input.ExpectedSha256).ToArray(),
+            requestedSettings, layoutOptions = wireLayoutOptions, perItemPrintSettings,
+            perItemLayoutSettings = wirePerItemLayoutSettings };
+        var requestBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(requestPayload);
+        var idempotencyKey = Convert.ToHexString(SHA256.HashData(requestBytes)).ToLowerInvariant();
+        var response = await SendCoordinatorRequestAsync("desktop.prepare", idempotencyKey,
+            requestPayload, cancellationToken).ConfigureAwait(false);
+        if (response.Error is { } error)
+            return new(null, null, [error.Message], false);
+        var serializedRun = response.Payload!.Value.GetProperty("serializedRun").GetString()
+            ?? throw new InvalidDataException("Coordinator returned no prepared run.");
+        var run = PreparedRunJson.Parse(Encoding.UTF8.GetBytes(serializedRun));
+        var storedRun = _runStore!.GetRun(run.RunId) ?? throw new InvalidDataException("Coordinator did not persist the prepared run.");
+        var persisted = new RunCreationResult(storedRun, _runStore.GetJobs(run.RunId), Replayed: false);
+        var result = new PreparedArtifactResult(run, persisted, [], false);
+        if (result.Run is { } preparedRun)
+        {
+            foreach (var item in _queue) RegisterPreparedRun(item.Id, preparedRun);
         }
         return result;
+    }
+
+    private async Task<IpcResponseEnvelope> SendCoordinatorRequestAsync(string operation,
+        string? idempotencyKey, object payload, CancellationToken cancellationToken)
+    {
+        var request = new IpcRequestEnvelope(IpcJson.CurrentProtocolVersion, Guid.NewGuid(), operation, idempotencyKey,
+            System.Text.Json.JsonSerializer.SerializeToElement(payload,
+                new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase }));
+        return await _coordinatorTransport.SendAsync(request, cancellationToken).ConfigureAwait(false);
     }
 
     private static string FormatResolutionSummary(string fileName, PaperBatch.Core.Recipes.ResolvedRecipeSettings resolved)
@@ -534,7 +595,7 @@ internal sealed class ProductionPresentationSources :
 
     public IReadOnlyList<EffectiveSettingSnapshot> GetEffectiveSettings(string queueItemId) =>
         [new("Renderer", _rendererAvailable ? "Partial" : "Unavailable", _rendererAvailable
-            ? (_preparation is null
+            ? (!_preparationAvailable
                 ? "Background PDF pass-through and JPEG/PNG artifact rendering are configured; preparation needs the explicitly pinned PDFium runtime."
                 : "Pinned PDFium preparation is configured for supported PDF/JPEG/PNG formats; Office and other unregistered formats remain unsupported.")
             : "No renderer is configured; no setting is treated as effective."),
