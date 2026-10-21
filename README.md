@@ -40,7 +40,7 @@ dotnet build src/PaperBatch.Desktop/PaperBatch.Desktop.csproj --no-restore -p:Nu
 dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
 ```
 
-The desktop composition references the shared core for snapshot intake, source preflight, and the renderer coordinator. The view model accepts a prepared-run result for artifact-backed preview; app-level preparation/settings flow, durable run history, and real print submission remain unavailable. Direct and transitive NuGet versions are captured by the project lockfiles; package license metadata was checked and recorded in [docs/dependencies/desktop-ui.md](docs/dependencies/desktop-ui.md).
+The production shell includes a persisted history view that displays locally stored prepared-run records when present; it cannot currently create a prepared run through a complete in-app workflow. Recipe management supports create, rename, delete, strict JSON import/export, and loading validated local source paths into the queue. Recipe defaults are reference values, not effective printer settings. The app still has no production preparation/settings workflow or real print submission backend, and this UI does not establish native or physical output evidence. Direct and transitive NuGet versions are captured by the project lockfiles; package license metadata was checked and recorded in [docs/dependencies/desktop-ui.md](docs/dependencies/desktop-ui.md).
 
 ## Tests
 
