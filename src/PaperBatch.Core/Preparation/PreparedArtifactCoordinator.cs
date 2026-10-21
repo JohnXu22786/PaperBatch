@@ -60,7 +60,15 @@ public sealed class PreparedArtifactCoordinator(
         IReadOnlyList<LayoutDocumentSettings>? perItemLayoutSettings,
         CancellationToken cancellationToken = default)
     {
-        await _prepareGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _prepareGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new(null, null, ["Preparation was cancelled; no prepared run was created."], IsCancelled: true);
+        }
+
         try
         {
             return await PrepareCoreAsync(inputs, printSettings, layoutOptions, idempotencyKey, retention,
