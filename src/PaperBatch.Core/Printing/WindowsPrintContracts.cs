@@ -19,7 +19,8 @@ public enum PrintOption
     Color,
     Duplex,
     Resolution,
-    Finishing
+    Finishing,
+    Copies
 }
 
 public sealed record PrintOptionCapability(
@@ -40,6 +41,10 @@ public sealed record PrinterCapabilitySnapshot(
     string Fingerprint,
     ImmutableDictionary<PrintOption, PrintOptionCapability> Options)
 {
+    /// <summary>Exact driver-native tokens for reported values when the API exposes them.</summary>
+    public ImmutableDictionary<PrintOption, ImmutableDictionary<string, string>> NativeTokens { get; init; } =
+        ImmutableDictionary<PrintOption, ImmutableDictionary<string, string>>.Empty;
+
     public PrinterCapabilitySnapshot(
         string queueIdentity,
         string displayName,

@@ -16,6 +16,27 @@ internal static class PrintingTests
             !string.IsNullOrWhiteSpace(queue.PortName) && queue.Options.ContainsKey(PrintOption.Media)));
     }
 
+    internal static void NativeGdiCapabilityBoundaryIsReadOnly()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var queues = WindowsPrintCapabilityEnumerator.EnumerateLocalQueues();
+        if (queues.IsEmpty) return;
+        var adapter = new WindowsGdiNativeAdapter();
+        foreach (var queue in queues)
+        {
+            var current = adapter.GetCapabilitiesAsync(queue.QueueIdentity).GetAwaiter().GetResult();
+            Assert.Equal(queue.QueueIdentity, current.QueueIdentity);
+            Assert.True(current.NativeTokens.ContainsKey(PrintOption.Media));
+            Assert.True(current.NativeTokens.ContainsKey(PrintOption.Tray));
+            foreach (var option in new[] { PrintOption.Media, PrintOption.Tray })
+            {
+                if (current.Options[option].State != CapabilityState.Supported) continue;
+                Assert.Equal(current.Options[option].Values.Length, current.NativeTokens[option].Count);
+                Assert.True(current.Options[option].Values.All(current.NativeTokens[option].ContainsKey));
+            }
+        }
+    }
+
     internal static void CapabilitiesRejectUnsupportedAndMapExactOptions()
     {
         var capabilities = Capabilities();
