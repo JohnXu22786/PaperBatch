@@ -115,6 +115,18 @@ internal static class GdiBackendTests
         Assert.False(WindowsGdiNativeAdapter.HasExactNativeMapping(values, complete.SetItem("Other", "12")));
     }
 
+    internal static void DuplexCapabilityDoesNotInventBindingModes()
+    {
+        var unsupported = WindowsGdiNativeAdapter.MapDuplexCapability(-1);
+        Assert.Equal(CapabilityState.Unavailable, unsupported.State);
+        Assert.Equal(CapabilityState.Unsupported, WindowsGdiNativeAdapter.MapDuplexCapability(0).State);
+        Assert.Equal(0, WindowsGdiNativeAdapter.MapDuplexCapability(0).Values.Length);
+        var duplex = WindowsGdiNativeAdapter.MapDuplexCapability(1);
+        Assert.Equal(CapabilityState.Unknown, duplex.State);
+        Assert.Equal(0, duplex.Values.Length);
+        Assert.Contains("exact binding modes", duplex.Detail!);
+    }
+
     private static WindowsPrintSubmission Submission(byte[] pdf, FinalPdfArtifact artifact)
     {
         var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.LongEdge, "Letter", Orientation.Portrait,

@@ -129,6 +129,8 @@ static void PrinterInspectionIsReadOnly()
 {
     Assert.Equal("驱动未报告双面能力。", ProductionPresentationSources.FormatCapabilityDetail(
         "The driver did not report duplex capability.", chinese: true));
+    Assert.Equal("驱动报告支持双面，但未报告具体翻转方式。", ProductionPresentationSources.FormatCapabilityDetail(
+        "The driver reports duplex support but does not report exact binding modes.", chinese: true));
     Assert.Equal("驱动文本：Vendor-specific explanation", ProductionPresentationSources.FormatCapabilityDetail(
         "Vendor-specific explanation", chinese: true));
     Assert.Equal("驱动返回的纸盒过多，无法安全检查。", ProductionPresentationSources.FormatCapabilityDetail(

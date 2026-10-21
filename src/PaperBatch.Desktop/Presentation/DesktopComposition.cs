@@ -198,6 +198,7 @@ internal sealed class ProductionPresentationSources :
         var localized = detail switch
         {
             "The driver did not report duplex capability." => "驱动未报告双面能力。",
+            "The driver reports duplex support but does not report exact binding modes." => "驱动报告支持双面，但未报告具体翻转方式。",
             "The driver did not report a copy limit." => "驱动未报告份数上限。",
             "This driver did not provide a verified finishing-option inventory." => "此驱动未提供经过验证的装订选项清单。",
             "The driver did not report color-device capability." => "驱动未报告彩色设备能力。",
