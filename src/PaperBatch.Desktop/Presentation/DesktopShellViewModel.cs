@@ -183,6 +183,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         if (_previewSource is not IPreparedArtifactPresentationSource preparedArtifacts)
             throw new InvalidOperationException("Prepared-artifact preview is unavailable in this presentation mode.");
         preparedArtifacts.RegisterPreparedRun(queueItemId, run);
+        RefreshHistoryEntries();
     }
 
     /// <summary>Removes the prior run from preview when an item is re-prepared or removed.</summary>
@@ -193,21 +194,43 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         preparedArtifacts.InvalidatePreparedRun(queueItemId);
     }
 
+    private void RefreshHistoryEntries()
+    {
+        HistoryEntries = _historySource.GetHistoryEntries();
+        OnPropertyChanged(nameof(HistoryEntries));
+        OnPropertyChanged(nameof(HistoryTitle));
+        OnPropertyChanged(nameof(HistoryDescription));
+    }
+
     public string HistoryEyebrow => _workspaceStatus.IsDemo ? Localize("HISTORY · SAMPLE VIEW", "历史记录 · 示例") : Localize("HISTORY", "历史记录");
 
-    public string HistoryTitle => _workspaceStatus.IsDemo ? Localize("Example activity", "示例活动") : Localize("Print history unavailable", "打印历史记录不可用");
+    public string HistoryTitle => _workspaceStatus.IsDemo ? Localize("Example activity", "示例活动") :
+        _workspaceStatus.InitializationFailed || _historySource.HistoryReadError is not null ? Localize("History unavailable", "历史记录不可用") :
+        Localize(HistoryEntries.Count == 0 ? "No saved runs yet" : "Saved run history", HistoryEntries.Count == 0 ? "暂无已保存的运行记录" : "已保存的运行记录");
 
     public string HistoryDescription => _workspaceStatus.IsDemo
         ? Localize("These rows are illustrative. This shell does not save completed runs or print records.", "这些示例行仅供说明。此界面不会保存已完成的运行或打印记录。")
-        : Localize("No persisted runs are available in the current core read API.", "当前核心读取接口无法提供已保存的运行记录。");
+        : _workspaceStatus.InitializationFailed ? _workspaceStatus.Detail
+        : _historySource.HistoryReadError is not null ? _historySource.HistoryReadError
+        : Localize(HistoryEntries.Count == 0
+            ? "Prepared runs will appear here when the desktop coordinator records them. No print completion is implied."
+            : "Local prepared run records are shown below. Their status does not claim physical paper output.",
+            HistoryEntries.Count == 0 ? "桌面协调器记录准备的运行后，这里会显示记录。此处不代表打印已完成。" : "以下为本地准备记录；其状态不表示纸张已实际输出。");
 
     public string TemplateEyebrow => _workspaceStatus.IsDemo ? Localize("TEMPLATES · SAMPLE VIEW", "模板 · 示例") : Localize("TEMPLATES", "模板");
 
-    public string TemplateTitle => _workspaceStatus.IsDemo ? Localize("Example recipes", "示例配方") : Localize("Saved recipes unavailable", "已保存的配方不可用");
+    public string TemplateTitle => _workspaceStatus.IsDemo ? Localize("Example recipes", "示例配方") :
+        _workspaceStatus.InitializationFailed || _templateSource.TemplateReadError is not null ? Localize("Recipes unavailable", "配方不可用") :
+        Localize(Templates.Count == 0 ? "No recipes saved" : "Saved recipes", Templates.Count == 0 ? "尚未保存配方" : "已保存的配方");
 
     public string TemplateDescription => _workspaceStatus.IsDemo
         ? Localize("These sample cards are not saved recipes and do not change application settings.", "这些示例卡片不是已保存配方，也不会更改应用设置。")
-        : Localize("Recipe persistence and application are unavailable in the current core API.", "当前核心接口不支持配方持久化和应用。");
+        : _workspaceStatus.InitializationFailed ? _workspaceStatus.Detail
+        : _templateSource.TemplateReadError is not null ? _templateSource.TemplateReadError
+        : Localize(Templates.Count == 0
+            ? "Saved recipes will appear here. Their defaults are not effective printer settings."
+            : "Saved recipe defaults are shown for reference and are not effective printer settings.",
+            Templates.Count == 0 ? "这里会显示已保存的配方；其默认值不是有效打印机设置。" : "已保存配方默认值仅供参考，不是有效打印机设置。");
 
     public string QueueDescription => _workspaceStatus.IsDemo
         ? "Selecting a row updates only the sample preview and sample settings."

@@ -23,7 +23,7 @@ internal sealed record HistoryEntrySnapshot(string Title, string Summary, string
 
 internal sealed record TemplateSnapshot(string Name, string Summary, string SettingsSummary);
 
-internal sealed record WorkspaceStatusSnapshot(string Title, string Detail, bool IsDemo);
+internal sealed record WorkspaceStatusSnapshot(string Title, string Detail, bool IsDemo, bool InitializationFailed = false);
 
 internal interface IQueuePresentationSource
 {
@@ -67,9 +67,11 @@ internal interface IPreflightPresentationSource
 internal interface IHistoryPresentationSource
 {
     IReadOnlyList<HistoryEntrySnapshot> GetHistoryEntries();
+    string? HistoryReadError { get; }
 }
 
 internal interface ITemplatePresentationSource
 {
     IReadOnlyList<TemplateSnapshot> GetTemplates();
+    string? TemplateReadError { get; }
 }

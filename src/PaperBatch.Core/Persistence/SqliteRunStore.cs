@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using PaperBatch.Core.Domain;
+using PaperBatch.Core.Recipes;
 using PaperBatch.Core.Serialization;
 
 namespace PaperBatch.Core.Persistence;
@@ -25,6 +26,8 @@ public sealed record StoredRun(
     RunState State,
     string PreparedRunJson,
     RetentionMetadata Retention);
+
+public sealed record StoredRecipe(JobRecipe Recipe, DateTimeOffset SavedAtUtc);
 
 public sealed record StoredJob(
     string JobId,
@@ -53,7 +56,10 @@ public sealed class IdempotencyConflictException(string message) : InvalidOperat
 /// <summary>Transactional local metadata store. It persists prepared metadata and OS receipts, never document bytes or passwords.</summary>
 public sealed class SqliteRunStore
 {
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
+    public const int MaximumSavedRecipes = 100;
+    public const int MaximumHistoryRows = 100;
+    public const int MaximumStoredRuns = 1000;
     private const int MaximumIdempotencyKeyLength = 128;
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
 
@@ -93,6 +99,10 @@ public sealed class SqliteRunStore
                         UpgradeVersionOneToTwo(connection, transaction);
                         version = 2;
                         break;
+                    case 2:
+                        UpgradeVersionTwoToThree(connection, transaction);
+                        version = 3;
+                        break;
                     default:
                         throw new NotSupportedException($"No forward migration exists from database schema version {version}.");
                 }
@@ -110,6 +120,7 @@ public sealed class SqliteRunStore
         }
 
         _initialized = true;
+        ProtectDatabaseFile();
         DeleteExpiredRuns(DateTimeOffset.UtcNow);
     }
 
@@ -141,6 +152,15 @@ public sealed class SqliteRunStore
             var existingJobs = ReadJobsForRun(connection, transaction, existing.RunId);
             transaction.Commit();
             return new RunCreationResult(existing, existingJobs, Replayed: true);
+        }
+
+        var storedRunCount = Convert.ToInt64(Scalar(connection, transaction, "SELECT COUNT(*) FROM runs;"), CultureInfo.InvariantCulture);
+        if (storedRunCount >= MaximumStoredRuns)
+        {
+            DeleteExpiredRuns(connection, transaction, DateTimeOffset.UtcNow);
+            storedRunCount = Convert.ToInt64(Scalar(connection, transaction, "SELECT COUNT(*) FROM runs;"), CultureInfo.InvariantCulture);
+            if (storedRunCount >= MaximumStoredRuns)
+                throw new InvalidOperationException($"Local run history is full ({MaximumStoredRuns} retained runs). Remove or wait for retained runs to expire before preparing another run.");
         }
 
         Execute(connection, transaction, """
@@ -185,6 +205,72 @@ public sealed class SqliteRunStore
         return ReadRun(connection, null, runId);
     }
 
+    /// <summary>Returns a bounded newest-first view of retained run metadata; it does not imply that a run printed.</summary>
+    public ImmutableArray<StoredRun> GetRecentRuns(int limit = MaximumHistoryRows)
+    {
+        EnsureInitialized();
+        if (limit is < 1 or > MaximumHistoryRows)
+            throw new ArgumentOutOfRangeException(nameof(limit), $"History limit must be between 1 and {MaximumHistoryRows}.");
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT run_id FROM runs ORDER BY created_utc DESC, run_id DESC LIMIT $limit;";
+        command.Parameters.AddWithValue("$limit", limit);
+        using var reader = command.ExecuteReader();
+        var ids = new List<string>();
+        while (reader.Read()) ids.Add(reader.GetString(0));
+        reader.Close();
+        var runs = ids.Select(id => ReadRun(connection, transaction, id) ?? throw new InvalidDataException("A history row disappeared while reading.")).ToImmutableArray();
+        transaction.Commit();
+        return runs;
+    }
+
+    public ImmutableArray<StoredRecipe> GetRecipes()
+    {
+        EnsureInitialized();
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT recipe_json, saved_utc FROM recipes ORDER BY name COLLATE NOCASE, recipe_id;";
+        using var reader = command.ExecuteReader();
+        var recipes = ImmutableArray.CreateBuilder<StoredRecipe>();
+        while (reader.Read())
+        {
+            var json = reader.GetString(0);
+            recipes.Add(new StoredRecipe(JobRecipeJson.Parse(Encoding.UTF8.GetBytes(json)), ParseTimestamp(reader.GetString(1))));
+        }
+        return recipes.ToImmutable();
+    }
+
+    /// <summary>Creates or replaces one saved recipe atomically. Recipe defaults are not effective printer settings.</summary>
+    public void SaveRecipe(JobRecipe recipe, DateTimeOffset? savedAtUtc = null)
+    {
+        EnsureInitialized();
+        ArgumentNullException.ThrowIfNull(recipe);
+        var json = JobRecipeJson.Serialize(recipe);
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        var exists = Convert.ToInt64(Scalar(connection, transaction,
+            "SELECT COUNT(*) FROM recipes WHERE recipe_id = $recipeId;", ("$recipeId", recipe.RecipeId)), CultureInfo.InvariantCulture) != 0;
+        if (!exists && Convert.ToInt64(Scalar(connection, transaction, "SELECT COUNT(*) FROM recipes;"), CultureInfo.InvariantCulture) >= MaximumSavedRecipes)
+            throw new InvalidOperationException($"At most {MaximumSavedRecipes} local recipes can be saved.");
+        Execute(connection, transaction, """
+            INSERT INTO recipes (recipe_id, name, recipe_json, saved_utc) VALUES ($recipeId, $name, $json, $savedUtc)
+            ON CONFLICT(recipe_id) DO UPDATE SET name = excluded.name, recipe_json = excluded.recipe_json, saved_utc = excluded.saved_utc;
+            """,
+            ("$recipeId", recipe.RecipeId), ("$name", recipe.Name), ("$json", json),
+            ("$savedUtc", FormatTimestamp(savedAtUtc ?? DateTimeOffset.UtcNow)));
+        transaction.Commit();
+    }
+
+    public bool DeleteRecipe(string recipeId)
+    {
+        EnsureInitialized();
+        ArgumentException.ThrowIfNullOrWhiteSpace(recipeId);
+        using var connection = OpenConnection();
+        return Execute(connection, null, "DELETE FROM recipes WHERE recipe_id = $recipeId;", ("$recipeId", recipeId)) != 0;
+    }
+
     public PreparedRun? GetPreparedRun(string runId)
     {
         var storedRun = GetRun(runId);
@@ -218,7 +304,13 @@ public sealed class SqliteRunStore
         EnsureInitialized();
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
+        var deletedRunIds = DeleteExpiredRuns(connection, transaction, nowUtc);
+        transaction.Commit();
+        return deletedRunIds;
+    }
 
+    private static ImmutableArray<string> DeleteExpiredRuns(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset nowUtc)
+    {
         var expiredRuns = new List<(string RunId, bool RetainWhileUnresolved)>();
         using (var command = connection.CreateCommand())
         {
@@ -249,7 +341,6 @@ public sealed class SqliteRunStore
             deletedRunIds.Add(runId);
         }
 
-        transaction.Commit();
         return deletedRunIds.ToImmutable();
     }
 
@@ -472,6 +563,28 @@ public sealed class SqliteRunStore
             """);
     }
 
+    private static void UpgradeVersionTwoToThree(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        Execute(connection, transaction, """
+            CREATE TABLE recipes (
+                recipe_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                recipe_json TEXT NOT NULL,
+                saved_utc TEXT NOT NULL
+            );
+            """);
+    }
+
+    private void ProtectDatabaseFile()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var directory = Path.GetDirectoryName(_databasePath)!;
+        if (Directory.Exists(directory))
+            File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        foreach (var path in new[] { _databasePath, _databasePath + "-wal", _databasePath + "-shm" })
+            if (File.Exists(path)) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+    }
+
     private SqliteConnection OpenConnection()
     {
         var builder = new SqliteConnectionStringBuilder
@@ -641,11 +754,13 @@ public sealed class SqliteRunStore
     private static int ReadUserVersion(SqliteConnection connection, SqliteTransaction transaction) =>
         Convert.ToInt32(Scalar(connection, transaction, "PRAGMA user_version;"), CultureInfo.InvariantCulture);
 
-    private static object? Scalar(SqliteConnection connection, SqliteTransaction? transaction, string sql)
+    private static object? Scalar(SqliteConnection connection, SqliteTransaction? transaction, string sql, params (string Name, object? Value)[] parameters)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = sql;
+        foreach (var (name, value) in parameters)
+            command.Parameters.AddWithValue(name, value ?? DBNull.Value);
         return command.ExecuteScalar();
     }
 

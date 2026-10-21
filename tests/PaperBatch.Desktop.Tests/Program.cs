@@ -7,6 +7,7 @@ using PaperBatch.Core.Intake;
 using PaperBatch.Core.Domain;
 using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Rendering;
+using PaperBatch.Core.Recipes;
 using PaperBatch.Desktop.Presentation;
 
 var tests = new (string Name, Action Run)[]
@@ -21,6 +22,8 @@ var tests = new (string Name, Action Run)[]
     ("headless shell identifies demo data and has no print action", HeadlessShellIsExplicitlyDemoOnly),
     ("production presentation exposes unavailable production capabilities without demo rows", ProductionPresentationIsExplicitlyUnavailable),
     ("production preview raster comes from the persisted prepared artifact", ProductionPreviewReadsPreparedArtifact),
+    ("corrupt saved recipes leave production shell available with an error state", CorruptSavedRecipesRemainVisibleAsAnError),
+    ("corrupt saved history leaves production shell available with an error state", CorruptSavedHistoryRemainsVisibleAsAnError),
     ("presentation assembly keeps native backends behind shared core contracts", PresentationAssemblyReferencesCoreWithoutNativeImports)
 };
 
@@ -103,7 +106,7 @@ static void LanguageSelectionLocalizesSectionLabels()
     viewModel.SetLanguage("zh-CN");
     Assert.Equal("队列与审核", viewModel.SectionQueueLabel);
     Assert.Equal("历史记录", viewModel.SectionHistoryLabel);
-    Assert.Contains("不可用", viewModel.HistoryTitle);
+    Assert.Contains("已保存的运行记录", viewModel.HistoryTitle);
 
     var demo = DesktopShellViewModel.CreateDemo();
     demo.SetLanguage("zh-CN");
@@ -264,6 +267,13 @@ static void ProductionPresentationIsExplicitlyUnavailable()
     Assert.Empty(sources.GetHistoryEntries());
     Assert.Empty(sources.GetTemplates());
 
+    var failedViewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
+        new WorkspaceStatusSnapshot("PRODUCTION MODE · INITIALIZATION FAILED", "Local storage could not initialize.", false,
+            InitializationFailed: true));
+    Assert.Equal("History unavailable", failedViewModel.HistoryTitle);
+    Assert.Equal("Recipes unavailable", failedViewModel.TemplateTitle);
+    Assert.Contains("could not initialize", failedViewModel.HistoryDescription);
+
     var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
         new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
     var window = new MainWindow(viewModel);
@@ -275,9 +285,9 @@ static void ProductionPresentationIsExplicitlyUnavailable()
         Assert.Equal("FINAL PREVIEW UNAVAILABLE", window.FindControl<TextBlock>("PreviewHeading")!.Text);
         Assert.Equal("No prepared artifact preview is available.", window.FindControl<TextBlock>("PreviewDescription")!.Text);
         viewModel.NavigateCommand.Execute("History");
-        Assert.Equal("Print history unavailable", window.FindControl<TextBlock>("HistoryTitle")!.Text);
+        Assert.Equal("No saved runs yet", window.FindControl<TextBlock>("HistoryTitle")!.Text);
         viewModel.NavigateCommand.Execute("Templates");
-        Assert.Equal("Saved recipes unavailable", window.FindControl<TextBlock>("TemplateTitle")!.Text);
+        Assert.Equal("No recipes saved", window.FindControl<TextBlock>("TemplateTitle")!.Text);
     }
     finally
     {
@@ -304,10 +314,16 @@ static void ProductionPreviewReadsPreparedArtifact()
         var run = PreparedRun.Create("run-preview", DateTimeOffset.UtcNow, new string('c', 64), [item],
             [new CompatibleSegment("segment", 0, [item.ItemId], "compat", settings)], final);
         var preview = new FakeArtifactPreviewRenderer(pdfBytes);
-        var sources = new ProductionPresentationSources(artifacts: artifacts, previewRenderer: preview);
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
+        store.CreateRun(run, "coordinator-request-key", new RetentionMetadata(run.CreatedAtUtc.AddDays(30), true));
+        store.SaveRecipe(new JobRecipe(1, "recipe-1", "Saved packet", [new RecipeSource("source-1", "/tmp/a.pdf")],
+            new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter")));
+        var sources = new ProductionPresentationSources(artifacts: artifacts, previewRenderer: preview, runStore: store);
         var viewModel = new DesktopShellViewModel(new FakeQueueSource([new QueueItemSnapshot("queue-item", "prepared.pdf", "Ready", "Prepared")]),
             sources, sources, sources, sources, sources, new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
         viewModel.RegisterPreparedRun("queue-item", run);
+        Assert.Equal("run-preview", store.GetRecentRuns().Single().RunId);
         viewModel.RefreshPreviewAsync().GetAwaiter().GetResult();
         var window = new MainWindow(viewModel);
         try
@@ -320,11 +336,101 @@ static void ProductionPreviewReadsPreparedArtifact()
             Assert.True(ReferenceEquals(viewModel.CurrentPreview.PageImage,
                 window.FindControl<Image>("PreparedArtifactPageImage")!.Source));
             Assert.Contains("immutable final PDF", viewModel.ProductionPreviewStatus);
+            viewModel.NavigateCommand.Execute("History");
+            Assert.Equal("Saved run history", viewModel.HistoryTitle);
+            Assert.Equal("Ready", viewModel.HistoryEntries.Single().Status);
+            viewModel.NavigateCommand.Execute("Templates");
+            Assert.Equal("Saved recipes", viewModel.TemplateTitle);
+            Assert.Contains("not applied", viewModel.Templates.Single().SettingsSummary);
             viewModel.InvalidatePreparedRun("queue-item");
             Assert.True(!viewModel.HasPreviewImage);
             Assert.Equal("FINAL PREVIEW UNAVAILABLE", viewModel.PreviewHeading);
         }
         finally { window.Close(); }
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+static void CorruptSavedRecipesRemainVisibleAsAnError()
+{
+    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-corrupt-recipe-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
+        store.SaveRecipe(new JobRecipe(1, "recipe-corrupt", "Saved packet", [new RecipeSource("source-1", "/tmp/a.pdf")],
+            new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter")));
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(root, "runs.db")}"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE recipes SET recipe_json = '{broken' WHERE recipe_id = 'recipe-corrupt';";
+            command.ExecuteNonQuery();
+        }
+        var sources = new ProductionPresentationSources(runStore: store);
+        var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
+            new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+        Assert.Empty(viewModel.Templates);
+        Assert.Equal("Recipes unavailable", viewModel.TemplateTitle);
+        Assert.Contains("damaged", viewModel.TemplateDescription);
+
+        store.DeleteRecipe("recipe-corrupt");
+        store.SaveRecipe(new JobRecipe(1, "recipe-bad-time", "Bad timestamp", [new RecipeSource("source-2", "/tmp/b.pdf")],
+            new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter")));
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(root, "runs.db")}"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE recipes SET saved_utc = 'not-a-timestamp' WHERE recipe_id = 'recipe-bad-time';";
+            command.ExecuteNonQuery();
+        }
+        var timestampErrorViewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
+            new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+        Assert.Empty(timestampErrorViewModel.Templates);
+        Assert.Equal("Recipes unavailable", timestampErrorViewModel.TemplateTitle);
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+static void CorruptSavedHistoryRemainsVisibleAsAnError()
+{
+    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-corrupt-history-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
+        var now = DateTimeOffset.UtcNow;
+        var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);
+        var item = new PreparedItem("item", new SourceSnapshot("snapshot", new string('a', 64), 1, now),
+            new RendererResult("renderer", "1", "source-artifact", new string('b', 64), 1, 1, new RendererCapabilities(1, ["application/pdf"])),
+            [new PageMapping(1, 1)], settings);
+        var run = PreparedRun.Create("run-corrupt", now, new string('c', 64), [item],
+            [new CompatibleSegment("segment", 0, [item.ItemId], "compat", settings)]);
+        store.CreateRun(run, "request-corrupt", new RetentionMetadata(now.AddDays(30), true));
+        store.SaveRecipe(new JobRecipe(1, "recipe-survives", "Valid recipe", [new RecipeSource("source", "/tmp/a.pdf")],
+            new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter")));
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(root, "runs.db")}"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE runs SET created_utc = 'not-a-timestamp' WHERE run_id = 'run-corrupt';";
+            command.ExecuteNonQuery();
+        }
+        var sources = new ProductionPresentationSources(runStore: store);
+        var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
+            new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+        Assert.Empty(viewModel.HistoryEntries);
+        Assert.Equal("History unavailable", viewModel.HistoryTitle);
+        Assert.Contains("damaged", viewModel.HistoryDescription);
+        Assert.Equal("Valid recipe", viewModel.Templates.Single().Name);
     }
     finally
     {
@@ -422,11 +528,13 @@ sealed class FakePreflightSource : IPreflightPresentationSource
 sealed class FakeHistorySource : IHistoryPresentationSource
 {
     public IReadOnlyList<HistoryEntrySnapshot> GetHistoryEntries() => [];
+    public string? HistoryReadError => null;
 }
 
 sealed class FakeTemplateSource : ITemplatePresentationSource
 {
     public IReadOnlyList<TemplateSnapshot> GetTemplates() => [];
+    public string? TemplateReadError => null;
 }
 
 static class Assert
