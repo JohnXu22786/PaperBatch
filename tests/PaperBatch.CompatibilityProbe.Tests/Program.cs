@@ -18,6 +18,11 @@ if (args.Length >= 2 && args[0] == "--renderer-worker-child")
     }
 }
 
+if (args.Length >= 1 && args[0] == "--resource-stress")
+{
+    return ResourceStressProfile.RunCommand(args);
+}
+
 if (args.Length == 6 && args[0] == "--source-cache-worker")
 {
     return SourceIntakeTests.RunCrossProcessCacheWorker(args[1], args[2], args[3], args[4], args[5]);
@@ -25,6 +30,7 @@ if (args.Length == 6 && args[0] == "--source-cache-worker")
 
 var tests = new List<(string Name, Action Run)>
 {
+    ("synthetic resource stress profile exercises bounded file and logical page counts", ResourceStressProfileSelfCheck),
     ("simulated evidence does not close G1", SimulatedEvidenceDoesNotCloseG1),
     ("artifact store persists stable PDF bytes and receipt", RendererTests.ArtifactStorePersistsStablePdfAndReceipt),
     ("artifact store rejects changed PDF bytes on readback", RendererTests.ArtifactStoreRejectsChangedPdfOnReadback),
@@ -257,6 +263,25 @@ foreach (var (name, run) in tests)
 }
 
 return failures == 0 ? 0 : 1;
+
+static void ResourceStressProfileSelfCheck()
+{
+    var report = ResourceStressProfile.Run(10, 100, TimeSpan.FromSeconds(30));
+    Assert.Equal("passed", report.Status);
+    Assert.Equal("simulation-only", report.EvidenceClass);
+    Assert.Equal(10, report.EnumeratedFiles);
+    Assert.Equal(100, report.PreparedLogicalPages);
+    Assert.Equal(0L, report.ArtifactBytes);
+    Assert.True(report.TemporaryFixturesRemoved);
+    Assert.True(report.SampledPeakManagedMemoryBytes > 0);
+    Assert.True(report.GeneratedFixtureBytes > 0);
+    Assert.Throws<ArgumentOutOfRangeException>(() => ResourceStressProfile.Run(1_001, 1_001, TimeSpan.FromSeconds(30)));
+    using var cancelled = new CancellationTokenSource();
+    cancelled.Cancel();
+    var cancelledReport = ResourceStressProfile.Run(10, 100, TimeSpan.FromSeconds(30), cancelled.Token);
+    Assert.Equal("cancelled", cancelledReport.Status);
+    Assert.True(cancelledReport.TemporaryFixturesRemoved);
+}
 
 static void SimulatedEvidenceDoesNotCloseG1()
 {
