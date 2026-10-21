@@ -148,12 +148,16 @@ internal sealed class ProductionPresentationSources :
         var seenPaths = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         var inputs = paths.Select(path => new SourceInput(path, IntentionalCopy: !seenPaths.Add(Path.GetFullPath(path)))).ToArray();
         var prepared = await _intake.PrepareAsync(inputs, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var queueItemIdBySnapshot = new Dictionary<string, string>(StringComparer.Ordinal);
         try
         {
             foreach (var existing in _queue) InvalidatePreparedRun(existing.Id);
             foreach (var source in prepared.Items)
             {
-                var id = source.Snapshot?.SnapshotId ?? Guid.NewGuid().ToString("N");
+                // Queue identity belongs to the row. A source snapshot can be shared or
+                // replaced independently and must never alias two intentional copies.
+                var id = Guid.NewGuid().ToString("N");
+                if (source.Snapshot is { } capturedSnapshot) queueItemIdBySnapshot[capturedSnapshot.SnapshotId] = id;
                 var title = Path.GetFileName(source.SourcePath);
                 var findings = source.Diagnostics.Select(diagnostic => new PreflightFindingSnapshot(
                     diagnostic.Code.ToString(), diagnostic.Severity.ToString(), diagnostic.Message)).ToList();
@@ -198,7 +202,7 @@ internal sealed class ProductionPresentationSources :
                     try { _cache.Release(snapshotId); }
                     catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or System.Security.SecurityException)
                     {
-                        if (_findings.TryGetValue(snapshotId, out var findings))
+                        if (queueItemIdBySnapshot.TryGetValue(snapshotId, out var queueItemId) && _findings.TryGetValue(queueItemId, out var findings))
                             findings.Add(new("Source cache", "Cleanup failed", "The temporary source snapshot could not be released."));
                     }
                 }

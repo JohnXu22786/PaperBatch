@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Collections.Immutable;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows.Input;
@@ -155,7 +156,13 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         PageSize? size = orientation == Orientation.Auto ? null : media == "A4"
             ? (orientation == Orientation.Landscape ? new PageSize(841.89, 595.28) : new PageSize(595.28, 841.89))
             : (orientation == Orientation.Landscape ? new PageSize(792, 612) : new PageSize(612, 792));
-        var ranges = ParsePageRange(PageRange);
+        ImmutableArray<PageRange> ranges;
+        try { ranges = ParsePageRange(PageRange); }
+        catch (InvalidOperationException exception)
+        {
+            OperationError = exception.Message;
+            return;
+        }
         var settings = new PrintSettings(RequestedCopies, _requestedColorMode, duplex, media, orientation, scaling);
         var options = new LayoutOptions(Copies: RequestedCopies, NUp: RequestedNUp switch { 2 => NUpMode.Two, 4 => NUpMode.Four, _ => NUpMode.One },
             Duplex: duplex != DuplexMode.Simplex, Fit: scaling == ScalingMode.ActualSize ? FitMode.ActualSize : FitMode.ShrinkToFit,

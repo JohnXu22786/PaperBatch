@@ -20,6 +20,7 @@ var tests = new (string Name, Action Run)[]
     ("queue ordering and removal are actionable and clear prepared previews", QueueEditsPreserveSelectionAndInvalidateRemovedPreview),
     ("language selection localizes desktop section labels", LanguageSelectionLocalizesSectionLabels),
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
+    ("intentional duplicate sources have independent queue row identities", IntentionalDuplicateQueueRowsRemainIndependent),
     ("cancelled renderer batch releases every captured snapshot", CancelledRendererBatchReleasesEverySnapshot),
     ("file picker reports all skipped and mixed local selections", FilePickerClassifiesSkippedSelections),
     ("headless shell identifies demo data and has no print action", HeadlessShellIsExplicitlyDemoOnly),
@@ -143,6 +144,36 @@ static void SourceIntakeErrorsRemainVisibleAndAppend()
     finally
     {
         if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
+    }
+}
+
+static void IntentionalDuplicateQueueRowsRemainIndependent()
+{
+    var root = Path.Combine(Path.GetTempPath(), "paperbatch-duplicate-queue-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var path = Path.Combine(root, "same.pdf");
+        File.WriteAllBytes(path, TestOnePagePdf());
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+        var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+        var renderer = new RendererCoordinator([
+            new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts))
+        ]);
+        var sources = new ProductionPresentationSources(new SourceIntakeService(cache), renderer, cache,
+            rendererAvailable: true, artifacts: artifacts);
+
+        var imported = sources.ImportAsync([path, path]).GetAwaiter().GetResult();
+
+        Assert.Equal(2, imported.Count);
+        Assert.True(imported[0].Id != imported[1].Id);
+        sources.Remove(imported[0].Id);
+        Assert.Equal(1, sources.GetQueueItems().Count);
+        Assert.Equal(imported[1].Id, sources.GetQueueItems()[0].Id);
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
 }
 
@@ -389,6 +420,11 @@ static void PreparationControlsForwardRequestedSettingsAndInvalidate()
     viewModel.OrientationIndex = 0;
     viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
     Assert.Null(source.Options!.SheetSize);
+    Assert.Equal(2, source.PrepareCalls);
+    viewModel.PageRange = "0-3";
+    viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
+    Assert.Equal(2, source.PrepareCalls);
+    Assert.Contains("1-5", viewModel.OperationError);
 }
 
 static void RecipeDeviceConflictCreatesNoRunOrFinalArtifact()
@@ -726,12 +762,14 @@ sealed class FakePreparationSource(IReadOnlyList<QueueItemSnapshot> items) : IQu
     public PrintSettings? Settings { get; private set; }
     public PaperBatch.Core.Layout.LayoutOptions? Options { get; private set; }
     public PaperBatch.Core.Recipes.JobRecipe? Recipe { get; private set; }
+    public int PrepareCalls { get; private set; }
     public List<string> InvalidatedIds { get; } = [];
     public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => items;
     public Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings,
         PaperBatch.Core.Layout.LayoutOptions layoutOptions, PaperBatch.Core.Recipes.JobRecipe? recipe = null,
         CancellationToken cancellationToken = default)
     {
+        PrepareCalls++;
         Settings = requestedSettings;
         Options = layoutOptions;
         Recipe = recipe;
