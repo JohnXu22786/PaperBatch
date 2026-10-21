@@ -43,6 +43,23 @@ jobs:
       - name: Run focused headless presentation tests
         run: dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
 
+      - name: Download and verify temporary PDFium fixture runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'pdfium-win-x64.tgz'
+          $extract = Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-test'
+          Invoke-WebRequest -Uri 'https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8111/pdfium-win-x64.tgz' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3452d11031050ec65e57f180215b57b9e6d465e3fbedafa8a77ad90885c7d23e') { throw 'Pinned PDFium archive digest mismatch.' }
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          tar -xzf $archive -C $extract
+          $dll = Get-ChildItem -Path $extract -Filter 'pdfium.dll' -File -Recurse | Select-Object -First 1
+          if ($null -eq $dll) { throw 'Pinned PDFium archive did not contain pdfium.dll.' }
+          if ((Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f') { throw 'Pinned PDFium DLL digest mismatch.' }
+          Add-Content $env:GITHUB_ENV "PAPERBATCH_PDFIUM_TEST_PATH=$($dll.FullName)"
+          Add-Content $env:GITHUB_ENV 'PAPERBATCH_PDFIUM_TEST_SHA256=a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f'
+
       - name: Install and verify pinned LibreOffice and PDFium integration runtimes
         if: runner.os == 'Linux'
         shell: bash
@@ -114,24 +131,8 @@ jobs:
           echo 'Validated LibreOffice 26.2.2.2 on Ubuntu x86_64 against a synthetic DOCX. The test verifies isolated-profile rendering, one-page PDFium inspection, immutable source bytes, renderer provenance and preservation of a separate LibreOffice process.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run managed test runner
+        id: managed-test-runner
         run: dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
-
-      - name: Download and verify temporary PDFium fixture runtime
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $archive = Join-Path $env:RUNNER_TEMP 'pdfium-win-x64.tgz'
-          $extract = Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-test'
-          Invoke-WebRequest -Uri 'https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8111/pdfium-win-x64.tgz' -OutFile $archive
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3452d11031050ec65e57f180215b57b9e6d465e3fbedafa8a77ad90885c7d23e') { throw 'Pinned PDFium archive digest mismatch.' }
-          New-Item -ItemType Directory -Force -Path $extract | Out-Null
-          tar -xzf $archive -C $extract
-          $dll = Get-ChildItem -Path $extract -Filter 'pdfium.dll' -File -Recurse | Select-Object -First 1
-          if ($null -eq $dll) { throw 'Pinned PDFium archive did not contain pdfium.dll.' }
-          if ((Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f') { throw 'Pinned PDFium DLL digest mismatch.' }
-          Add-Content $env:GITHUB_ENV "PAPERBATCH_PDFIUM_TEST_PATH=$($dll.FullName)"
-          Add-Content $env:GITHUB_ENV 'PAPERBATCH_PDFIUM_TEST_SHA256=a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f'
 
       - name: Verify PDFium vector composition on the pinned Windows runtime
         id: pdfiumverify
@@ -180,6 +181,56 @@ jobs:
           }
           exit $testExitCode
 
+      - name: Run PDFium proof fixture self-tests
+        run: dotnet run --project tests/PaperBatch.Pdfium.Windows.Tests/PaperBatch.Pdfium.Windows.Tests.csproj -p:NuGetAudit=false
+
+      - name: Expose Windows managed test failure details
+        if: failure() && runner.os == 'Windows' && steps.managed-test-runner.outcome == 'failure'
+        shell: pwsh
+        run: |
+          $testLog = Join-Path $PWD 'windows-managed-test-retry.log'
+          $testOutput = & dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false 2>&1
+          $testExitCode = $LASTEXITCODE
+          $testOutput | Set-Content -Path $testLog -Encoding utf8
+          @(
+            '### Windows managed test runner diagnostic retry'
+            '```text'
+            "Exit code: $testExitCode"
+            (Get-Content -Path $testLog)
+            '```'
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - name: Remove temporary Linux renderer runtimes
+        if: always() && runner.os == 'Linux'
+        run: |
+          rm -rf "$RUNNER_TEMP/paperbatch-libreoffice-26.2.2.2" "$RUNNER_TEMP/paperbatch-pdfium-linux"
+          rm -f "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz" "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz.asc" "$RUNNER_TEMP/tdf-release-key.asc" "$RUNNER_TEMP/tdf-release-key.gpg" "$RUNNER_TEMP/tdf-signature-status.txt" "$RUNNER_TEMP/pdfium-linux-x64.tgz"
+
+      - name: Compile Python sources
+        run: python -m compileall -q tools tests
+
+      # The unit suite uses fixtures; pinned-engine LibreOffice export stays opt-in/local.
+      - name: Run Python unit tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Capture Windows runner spooler and queue evidence
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        run: |
+          ./tools/capture_windows_print_runner.ps1
+          dotnet run --project src/PaperBatch.CompatibilityProbe/PaperBatch.CompatibilityProbe.csproj -p:NuGetAudit=false -- collect --include-local-queues --output windows-print-probe-report.json
+
+      - name: Upload Windows runner print evidence
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-print-runner-evidence
+          path: |
+            windows-print-runner-evidence.json
+            windows-print-probe-report.json
+            windows-managed-test-retry.log
+          if-no-files-found: warn
+
       - name: Upload bounded PDFium failure details
         if: failure() && runner.os == 'Windows' && steps.pdfiumverify.outcome == 'failure'
         uses: actions/upload-artifact@v4
@@ -198,15 +249,24 @@ jobs:
           Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification.txt')
           Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification-raw.txt')
 
-      - name: Remove temporary Linux renderer runtimes
-        if: always() && runner.os == 'Linux'
-        run: |
-          rm -rf "$RUNNER_TEMP/paperbatch-libreoffice-26.2.2.2" "$RUNNER_TEMP/paperbatch-pdfium-linux"
-          rm -f "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz" "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz.asc" "$RUNNER_TEMP/tdf-release-key.asc" "$RUNNER_TEMP/tdf-release-key.gpg" "$RUNNER_TEMP/tdf-signature-status.txt" "$RUNNER_TEMP/pdfium-linux-x64.tgz"
+  windows-pdfium-community-proof:
+    name: Windows hosted PDFium community proof
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
 
-      - name: Compile Python sources
-        run: python -m compileall -q tools tests
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
 
-      # The unit suite uses fixtures; pinned-engine LibreOffice export stays opt-in/local.
-      - name: Run Python unit tests
-        run: python -m unittest discover -s tests -p test_libreoffice_probe.py
+      - name: Verify pinned PDFium and run native fixtures
+        shell: pwsh
+        run: ./tools/run_windows_pdfium_community_proof.ps1
+
+      - name: Upload scoped PDFium compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-pdfium-community-proof
+          path: ${{ runner.temp }}/paperbatch-pdfium-proof/report.json
+          if-no-files-found: warn
