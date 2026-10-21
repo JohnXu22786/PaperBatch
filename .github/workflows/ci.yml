@@ -10,6 +10,57 @@ permissions:
   contents: read
 
 jobs:
+  windows-x64-lite-package:
+    name: Windows x64 lite packaging prototype
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish lite package and provenance manifest
+        shell: pwsh
+        run: ./tools/package_windows_x64.ps1
+
+      - name: Verify package manifest and archive
+        shell: pwsh
+        run: |
+          $manifestPath = 'artifacts/windows-x64-lite/package-manifest.json'
+          $manifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
+          if ($manifest.target -ne 'win-x64' -or -not $manifest.selfContained) { throw 'Unexpected package target.' }
+          if ($manifest.license -ne 'AGPL-3.0-only' -or $manifest.signed) { throw 'Package legal or signing metadata is incorrect.' }
+          if ($manifest.files.Count -eq 0) { throw 'Package manifest contains no files.' }
+          if ($manifest.dependencyLockFiles.Count -ne 2) { throw 'Expected desktop and core dependency lockfiles.' }
+          foreach ($lock in $manifest.dependencyLockFiles) {
+            if (-not (Test-Path -LiteralPath $lock.path -PathType Leaf)) { throw "Source lockfile missing: $($lock.path)" }
+            if ((Get-FileHash -LiteralPath $lock.path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $lock.sha256) { throw "Lockfile digest mismatch: $($lock.path)" }
+          }
+          foreach ($file in $manifest.files) {
+            $path = Join-Path 'artifacts/windows-x64-lite' $file.path
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Manifest file missing: $($file.path)" }
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $file.sha256) { throw "Manifest digest mismatch: $($file.path)" }
+          }
+          foreach ($notice in @('LICENSE', 'THIRD-PARTY-UI-NOTICES.md', 'THIRD-PARTY-CORE-NOTICES.md', 'DOTNET-THIRD-PARTY-NOTICES.txt')) {
+            if (-not (Test-Path -LiteralPath (Join-Path 'artifacts/windows-x64-lite' $notice) -PathType Leaf)) { throw "Package notice missing: $notice" }
+          }
+          $archive = 'artifacts/windows-x64-lite/PaperBatch-windows-x64-lite.zip'
+          $checksum = "$archive.sha256"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw 'Package archive missing.' }
+          if (-not (Test-Path -LiteralPath $checksum -PathType Leaf)) { throw 'Package archive checksum missing.' }
+          $expected = (Get-Content -Raw $checksum).Trim() -split '\s+'
+          if ($expected.Count -ne 2 -or $expected[1] -ne (Split-Path -Leaf $archive)) { throw 'Package archive checksum file is malformed.' }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected[0]) { throw 'Package archive digest mismatch.' }
+
+      - name: Upload unsigned development package
+        uses: actions/upload-artifact@v4
+        with:
+          name: paperbatch-windows-x64-lite
+          path: artifacts/windows-x64-lite/
+          if-no-files-found: error
+          retention-days: 14
+
   build-and-test:
     name: ${{ matrix.os }} / .NET 10, Avalonia, and Python
     runs-on: ${{ matrix.os }}
