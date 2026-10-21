@@ -23,11 +23,11 @@ public sealed record LayoutDocumentSettings(int? Copies = null, NUpMode? NUp = n
     PageSize? SheetSize = null, ImmutableArray<PageRange> Ranges = default);
 
 public sealed record LayoutDocument(string ItemId, ImmutableArray<PageSize> Pages, string Media, string? PrinterId = null,
-    string? TrayId = null, LayoutDocumentSettings? Settings = null)
+    string? TrayId = null, LayoutDocumentSettings? Settings = null, string? SourceName = null)
 {
     public LayoutDocument(string itemId, IEnumerable<PageSize> pages, string media, string? printerId = null,
-        string? trayId = null, LayoutDocumentSettings? settings = null)
-        : this(itemId, pages?.ToImmutableArray() ?? throw new ArgumentNullException(nameof(pages)), media, printerId, trayId, settings) { }
+        string? trayId = null, LayoutDocumentSettings? settings = null, string? sourceName = null)
+        : this(itemId, pages?.ToImmutableArray() ?? throw new ArgumentNullException(nameof(pages)), media, printerId, trayId, settings, sourceName) { }
 }
 
 public sealed record PageRange(int FirstPage, int LastPage);
@@ -133,9 +133,11 @@ public static class LayoutCompiler
             var ranges = !documentRanges.IsDefaultOrEmpty ? documentRanges : options.Ranges.IsDefaultOrEmpty ? [new PageRange(1, docs[d].Pages.Length)] : options.Ranges;
             foreach (var range in ranges)
             {
-                if (range is null) return Failed("InvalidRange", "A selected page range is outside its document.");
+                var sourceName = docs[d].SourceName ?? docs[d].ItemId;
+                if (range is null)
+                    return Failed("InvalidRange", $"The selected page range for {sourceName} is invalid; valid pages are 1-{docs[d].Pages.Length}.");
                 if (range.FirstPage < 1 || range.LastPage < range.FirstPage || range.LastPage > docs[d].Pages.Length)
-                    return Failed("InvalidRange", "A selected page range is outside its document.");
+                    return Failed("InvalidRange", $"Page range {range.FirstPage}-{range.LastPage} for {sourceName} is invalid; valid pages are 1-{docs[d].Pages.Length}.");
                 for (var p = range.FirstPage - 1; p < range.LastPage; p++) selected.Add((d, p));
             }
         }

@@ -195,6 +195,16 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
             return "不同文件的设备请求不一致。当前准备运行模型要求每个兼容分段使用单一设备配置，且此界面无法验证逐文件设备设置；未创建文件。";
         if (message.Contains("Enter a page range such as", StringComparison.Ordinal))
             return "请输入页码范围，例如 1-5；留空则包含所有页面。";
+        var pageRangeError = message.IndexOf(" is invalid; valid pages are 1-", StringComparison.Ordinal);
+        if (pageRangeError >= 0)
+        {
+            var context = message[..pageRangeError];
+            var validPages = message[(pageRangeError + " is invalid; valid pages are 1-".Length)..].TrimEnd('.');
+            var fileMarker = context.LastIndexOf(" for ", StringComparison.Ordinal);
+            return fileMarker >= 0
+                ? $"文件 {context[(fileMarker + 5)..]} 的页码范围 {context["Page range ".Length..fileMarker]} 无效；有效页码为 1-{validPages}。"
+                : $"文件 {context["The selected page range for ".Length..]} 的页码范围无效；有效页码为 1-{validPages}。";
+        }
         if (message.Contains("requested media is not supported", StringComparison.Ordinal))
             return "请求的纸张尺寸不受桌面布局控件支持；未创建文件。";
         if (message.Contains("recipe rules support only PDF, JPEG, and PNG", StringComparison.Ordinal))

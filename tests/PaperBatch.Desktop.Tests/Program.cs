@@ -533,6 +533,12 @@ static void PreparationErrorsFollowSelectedLanguage()
     Assert.Contains("源文件在队列预检后发生变化", viewModel.OperationError);
     Assert.Contains("未创建最终文件", viewModel.OperationError);
 
+    source.Diagnostics = ["Page range 3-4 for A.pdf is invalid; valid pages are 1-2."];
+    viewModel.PageRange = string.Empty;
+    viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
+    Assert.Contains("A.pdf 的页码范围 3-4 无效", viewModel.OperationError);
+    Assert.Contains("有效页码为 1-2", viewModel.OperationError);
+
     viewModel.PageRange = "bad";
     viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
     Assert.Contains("请输入页码范围", viewModel.OperationError);

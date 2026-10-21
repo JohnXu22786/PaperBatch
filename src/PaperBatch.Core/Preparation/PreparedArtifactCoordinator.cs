@@ -137,7 +137,7 @@ public sealed class PreparedArtifactCoordinator(
                 items.Add(new PreparedItem(itemId, snapshot, rendererResult, pageMap, sourceSettings));
                 layoutDocuments.Add(new LayoutDocument(itemId, pageSizes, sourceSettings.Media,
                     sourceSettings.PrinterId, sourceSettings.TrayId,
-                    perItemLayoutSettings is null ? null : perItemLayoutSettings[sourceIndex]));
+                    perItemLayoutSettings is null ? null : perItemLayoutSettings[sourceIndex], Path.GetFileName(source.SourcePath)));
                 compositionSources.Add(new PdfCompositionSource(itemId, sourceBuffer.ToArray(), StaticPageContentVerified: true));
             }
 
