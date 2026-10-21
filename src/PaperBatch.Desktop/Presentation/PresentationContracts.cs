@@ -1,3 +1,6 @@
+using Avalonia.Media.Imaging;
+using PaperBatch.Core.Domain;
+
 namespace PaperBatch.Desktop.Presentation;
 
 internal enum ShellSection
@@ -11,7 +14,8 @@ internal sealed record QueueItemSnapshot(string Id, string Title, string Details
 
 internal sealed record EffectiveSettingSnapshot(string Name, string Value, string Explanation);
 
-internal sealed record PreviewSnapshot(string ItemId, string Description, int PageNumber, int PageCount);
+internal sealed record PreviewSnapshot(string ItemId, string Description, int PageNumber, int PageCount,
+    Bitmap? PageImage = null, string? ArtifactId = null, string? ArtifactSha256 = null);
 
 internal sealed record PreflightFindingSnapshot(string Title, string Status, string Detail);
 
@@ -39,7 +43,14 @@ internal interface IEffectiveSettingsPresentationSource
 
 internal interface IFinalPreviewPresentationSource
 {
-    PreviewSnapshot GetPreview(string queueItemId);
+    Task<PreviewSnapshot> GetPreviewAsync(string queueItemId, CancellationToken cancellationToken = default);
+}
+
+internal interface IPreparedArtifactPresentationSource
+{
+    event Action<string>? PreparedArtifactChanged;
+    void RegisterPreparedRun(string queueItemId, PreparedRun run);
+    void InvalidatePreparedRun(string queueItemId);
 }
 
 internal interface IPreflightPresentationSource

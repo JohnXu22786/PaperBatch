@@ -49,14 +49,15 @@ internal static class PrintingTests
     internal static void CapabilityMutationStopsBeforeSubmission()
     {
         using var fixture = new Fixture();
-        var backend = new FakePrintBackend(Capabilities()) { CapabilitiesOnSecondRead = ChangedCapabilities() };
-        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1");
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities()) { CapabilitiesOnSecondRead = ChangedCapabilities() };
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1", fixture.Artifacts);
         var result = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "submit-key", FixedTime)
             .GetAwaiter().GetResult();
 
         Assert.Equal(PrintSubmissionStatus.Rejected, result.Status);
         Assert.Equal(0, backend.SubmissionCount);
         Assert.Equal(JobState.Ready, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+
     }
 
     internal static void SameRunIdWithMutatedPreparedRunIsRejectedBeforeCapabilityOrSubmission()
@@ -65,27 +66,40 @@ internal static class PrintingTests
         var mutatedSegment = fixture.PreparedRun.Segments[0] with { SegmentId = "different-segment" };
         var mutated = PreparedRun.Create(fixture.PreparedRun.RunId, fixture.PreparedRun.CreatedAtUtc,
             fixture.PreparedRun.SnapshotFingerprint, fixture.PreparedRun.Items, [mutatedSegment]);
-        var backend = new FakePrintBackend(Capabilities());
-        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "mutated-run-nonce");
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "mutated-run-nonce", fixture.Artifacts);
 
         Assert.Throws<InvalidOperationException>(() => coordinator.SubmitAsync(
             fixture.Job.JobId, mutated, "mutated-run-key", FixedTime).GetAwaiter().GetResult());
         Assert.Equal(0, backend.CapabilityReads);
         Assert.Equal(0, backend.SubmissionCount);
         Assert.Equal(JobState.Ready, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+
+        var fakeDigest = new string('b', 64);
+        var mutatedArtifact = fixture.PreparedRun.FinalArtifact! with
+        {
+            ArtifactId = "artifact_" + fakeDigest,
+            Sha256 = fakeDigest
+        };
+        var artifactMutated = PreparedRun.Create(fixture.PreparedRun.RunId, fixture.PreparedRun.CreatedAtUtc,
+            fixture.PreparedRun.SnapshotFingerprint, fixture.PreparedRun.Items, fixture.PreparedRun.Segments, mutatedArtifact);
+        Assert.Throws<InvalidOperationException>(() => coordinator.SubmitAsync(
+            fixture.Job.JobId, artifactMutated, "mutated-artifact-key", FixedTime).GetAwaiter().GetResult());
+        Assert.Equal(0, backend.CapabilityReads);
+        Assert.Equal(0, backend.SubmissionCount);
     }
 
     internal static void AmbiguousSubmissionIsNotRetriedAfterRestart()
     {
         using var fixture = new Fixture();
-        var backend = new FakePrintBackend(Capabilities()) { ThrowAfterSubmitSideEffect = true };
-        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1");
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities()) { ThrowAfterSubmitSideEffect = true };
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1", fixture.Artifacts);
         var first = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "submit-key", FixedTime)
             .GetAwaiter().GetResult();
         Assert.Equal(PrintSubmissionStatus.NeedsReviewUnknown, first.Status);
         Assert.Equal(1, backend.SubmissionCount);
 
-        var restarted = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-2");
+        var restarted = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-2", fixture.Artifacts);
         var replay = restarted.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "submit-key", FixedTime.AddMinutes(1))
             .GetAwaiter().GetResult();
         Assert.Equal(PrintSubmissionStatus.NeedsReviewUnknown, replay.Status);
@@ -93,8 +107,8 @@ internal static class PrintingTests
         Assert.Equal(JobState.NeedsReviewUnknown, fixture.Store.GetJob(fixture.Job.JobId)!.State);
 
         using var postEffectFixture = new Fixture();
-        var postEffectBackend = new FakePrintBackend(Capabilities()) { ThrowCapabilityAfterSubmit = true };
-        var postEffect = new WindowsPrintCoordinator(postEffectFixture.Store, postEffectBackend, static () => "post-effect")
+        var postEffectBackend = new TestOnlySimulatedPrintBackend(Capabilities()) { ThrowCapabilityAfterSubmit = true };
+        var postEffect = new WindowsPrintCoordinator(postEffectFixture.Store, postEffectBackend, static () => "post-effect", postEffectFixture.Artifacts)
             .SubmitAsync(postEffectFixture.Job.JobId, postEffectFixture.PreparedRun, "post-effect-key", FixedTime)
             .GetAwaiter().GetResult();
         Assert.Equal(PrintSubmissionStatus.NeedsReviewUnknown, postEffect.Status);
@@ -102,8 +116,8 @@ internal static class PrintingTests
 
         using var crashFixture = new Fixture();
         crashFixture.Store.BeginSubmission(crashFixture.Job.JobId, "crash-before-os", FixedTime);
-        var untouchedBackend = new FakePrintBackend(Capabilities());
-        var afterCrash = new WindowsPrintCoordinator(crashFixture.Store, untouchedBackend, static () => "unused-nonce");
+        var untouchedBackend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var afterCrash = new WindowsPrintCoordinator(crashFixture.Store, untouchedBackend, static () => "unused-nonce", crashFixture.Artifacts);
         var reconciled = afterCrash.SubmitAsync(crashFixture.Job.JobId, crashFixture.PreparedRun, "crash-before-os", FixedTime.AddMinutes(1))
             .GetAwaiter().GetResult();
         Assert.Equal(PrintSubmissionStatus.NeedsReviewUnknown, reconciled.Status);
@@ -112,8 +126,8 @@ internal static class PrintingTests
         Assert.Equal(JobState.NeedsReviewUnknown, crashFixture.Store.GetJob(crashFixture.Job.JobId)!.State);
 
         using var knownFailureFixture = new Fixture();
-        var knownFailureBackend = new FakePrintBackend(Capabilities()) { ThrowBeforeSubmit = true };
-        var knownFailure = new WindowsPrintCoordinator(knownFailureFixture.Store, knownFailureBackend, static () => "known-failure")
+        var knownFailureBackend = new TestOnlySimulatedPrintBackend(Capabilities()) { ThrowBeforeSubmit = true };
+        var knownFailure = new WindowsPrintCoordinator(knownFailureFixture.Store, knownFailureBackend, static () => "known-failure", knownFailureFixture.Artifacts)
             .SubmitAsync(knownFailureFixture.Job.JobId, knownFailureFixture.PreparedRun, "known-failure-key", FixedTime)
             .GetAwaiter().GetResult();
         Assert.Equal(PrintSubmissionStatus.FailedBeforeSubmit, knownFailure.Status);
@@ -123,11 +137,13 @@ internal static class PrintingTests
     internal static void StatusAndCancellationAreScopedToOwnedReceipt()
     {
         using var fixture = new Fixture();
-        var backend = new FakePrintBackend(Capabilities());
-        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1");
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1", fixture.Artifacts);
         var submitted = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "submit-key", FixedTime)
             .GetAwaiter().GetResult();
         Assert.Equal(PrintSubmissionStatus.Accepted, submitted.Status);
+        Assert.Equal(fixture.PreparedRun.FinalArtifact!.ArtifactId, backend.LastArtifactId);
+        Assert.True(RendererTests.OnePagePdf().SequenceEqual(backend.LastPdfBytes!));
         var persistedReceipt = fixture.Store.GetJob(fixture.Job.JobId)!.OsReceipt!;
         Assert.Equal("Test Driver", persistedReceipt.DriverName);
         Assert.Equal("PORT1", persistedReceipt.PortName);
@@ -147,11 +163,43 @@ internal static class PrintingTests
         Assert.Equal(JobState.CancelObserved, afterCancel.State);
     }
 
+    internal static void SubmissionRejectsLegacyRunWithoutFinalArtifact()
+    {
+        using var fixture = new Fixture();
+        var legacy = PreparedRun.Create(fixture.PreparedRun.RunId, fixture.PreparedRun.CreatedAtUtc,
+            fixture.PreparedRun.SnapshotFingerprint, fixture.PreparedRun.Items, fixture.PreparedRun.Segments);
+        // Persist the legacy run and create a matching job in a fresh store so stale-run checking passes.
+        using var legacyFixture = new Fixture(legacy);
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(legacyFixture.Store, backend, static () => "legacy", legacyFixture.Artifacts);
+
+        var result = coordinator.SubmitAsync(legacyFixture.Job.JobId, legacyFixture.PreparedRun, "legacy-submit", FixedTime)
+            .GetAwaiter().GetResult();
+
+        Assert.Equal(PrintSubmissionStatus.Rejected, result.Status);
+        Assert.Equal(0, backend.CapabilityReads);
+        Assert.Equal(0, backend.SubmissionCount);
+    }
+
+    internal static void SubmissionPassesTheExactPersistedFinalPdf()
+    {
+        using var fixture = new Fixture();
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "exact-artifact", fixture.Artifacts);
+
+        var result = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "exact-artifact-key", FixedTime)
+            .GetAwaiter().GetResult();
+
+        Assert.Equal(PrintSubmissionStatus.Accepted, result.Status);
+        Assert.Equal(fixture.PreparedRun.FinalArtifact!.ArtifactId, backend.LastArtifactId);
+        Assert.True(RendererTests.OnePagePdf().SequenceEqual(backend.LastPdfBytes!));
+    }
+
     internal static void OsCompletionDoesNotConfirmPaperOutput()
     {
         using var fixture = new Fixture();
-        var backend = new FakePrintBackend(Capabilities());
-        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1");
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1", fixture.Artifacts);
         coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "submit-key", FixedTime).GetAwaiter().GetResult();
         backend.LastStatus = PrintBackendJobStatus.ReportedComplete;
 
@@ -164,9 +212,9 @@ internal static class PrintingTests
     {
         using var firstFixture = new Fixture();
         using var secondFixture = new Fixture();
-        var backend = new FakePrintBackend(Capabilities());
-        var first = new WindowsPrintCoordinator(firstFixture.Store, backend, static () => "nonce-first");
-        var second = new WindowsPrintCoordinator(secondFixture.Store, backend, static () => "nonce-second");
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var first = new WindowsPrintCoordinator(firstFixture.Store, backend, static () => "nonce-first", firstFixture.Artifacts);
+        var second = new WindowsPrintCoordinator(secondFixture.Store, backend, static () => "nonce-second", secondFixture.Artifacts);
         Task.WaitAll(
             first.SubmitAsync(firstFixture.Job.JobId, firstFixture.PreparedRun, "key-first", FixedTime),
             second.SubmitAsync(secondFixture.Job.JobId, secondFixture.PreparedRun, "key-second", FixedTime));
@@ -185,8 +233,8 @@ internal static class PrintingTests
     internal static void CancellationRacePreservesOsStatus()
     {
         using var fixture = new Fixture();
-        var backend = new FakePrintBackend(Capabilities());
-        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1");
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1", fixture.Artifacts);
         coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "submit-key", FixedTime).GetAwaiter().GetResult();
         backend.OnCancel = () => fixture.Store.TransitionJob(fixture.Job.JobId, JobState.OsReportsComplete,
             "OS completion won the cancel race.", FixedTime.AddMinutes(2));
@@ -199,14 +247,14 @@ internal static class PrintingTests
     internal static void CancellationRetryAfterRestartUsesReceipt()
     {
         using var fixture = new Fixture();
-        var backend = new FakePrintBackend(Capabilities()) { CancelReturnsFalse = true };
-        var firstCoordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "cancel-retry-nonce");
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities()) { CancelReturnsFalse = true };
+        var firstCoordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "cancel-retry-nonce", fixture.Artifacts);
         firstCoordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "cancel-retry-submit", FixedTime).GetAwaiter().GetResult();
         var first = firstCoordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
         Assert.Equal(JobState.CancelRequested, first.State);
 
         backend.CancelReturnsFalse = false;
-        var restartedCoordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "unused-after-restart");
+        var restartedCoordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "unused-after-restart", fixture.Artifacts);
         var retried = restartedCoordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
         Assert.Equal(JobState.CancelObserved, retried.State);
         Assert.Equal(2, backend.CancelCount);
@@ -235,7 +283,7 @@ internal static class PrintingTests
     private static PrintSettings Settings() => new(1, ColorMode.Color, DuplexMode.LongEdge,
         "Letter", Orientation.Portrait, ScalingMode.ShrinkToFit, "queue-identity", "Tray1");
 
-    private sealed class FakePrintBackend(PrinterCapabilitySnapshot capabilities) : IWindowsPrintBackend
+    private sealed class TestOnlySimulatedPrintBackend(PrinterCapabilitySnapshot capabilities) : IWindowsPrintBackend
     {
         private int _capabilityReads;
         private int _submissionCount;
@@ -251,6 +299,8 @@ internal static class PrintingTests
         public string? LastQueueIdentity { get; private set; }
         public string? LastJobId { get; private set; }
         public string? LastRunNonce { get; private set; }
+        public string? LastArtifactId { get; private set; }
+        public byte[]? LastPdfBytes { get; private set; }
         public PrintBackendJobStatus LastStatus { get; set; } = PrintBackendJobStatus.Accepted;
         public Action? OnCancel { get; set; }
         public System.Collections.Concurrent.ConcurrentBag<OsJobReceipt> Receipts { get; } = [];
@@ -263,6 +313,8 @@ internal static class PrintingTests
             Interlocked.Increment(ref _submissionCount);
             LastQueueIdentity = submission.Options.QueueIdentity;
             LastRunNonce = submission.RunNonce;
+            LastArtifactId = submission.Artifact.ArtifactId;
+            using (var content = new MemoryStream()) { submission.PdfContent.CopyTo(content); LastPdfBytes = content.ToArray(); }
             if (ThrowBeforeSubmit) throw new PrintSubmissionException("native backend rejected before StartDoc", mayHaveReachedOs: false);
             if (ThrowCapabilityAfterSubmit) throw new PrintCapabilityException("capabilities changed inside submit");
             if (ThrowAfterSubmitSideEffect) throw new IOException("receipt channel interrupted after acceptance");
@@ -294,19 +346,24 @@ internal static class PrintingTests
     private sealed class Fixture : IDisposable
     {
         private readonly string _temporary = Path.Combine(Path.GetTempPath(), "paperbatch-print-test-" + Guid.NewGuid().ToString("N"));
-        public Fixture()
+        public Fixture(PreparedRun? runOverride = null)
         {
             Directory.CreateDirectory(_temporary);
             Store = new SqliteRunStore(Path.Combine(_temporary, "runs.db"));
             Store.Initialize();
+            Artifacts = new PaperBatch.Core.Rendering.RenderArtifactStore(Path.Combine(_temporary, "artifacts"));
+            var pdf = RendererTests.OnePagePdf();
+            var storedArtifact = Artifacts.PersistPdfAsync(new MemoryStream(pdf), "test-renderer", "1", new Dictionary<string, string>()).GetAwaiter().GetResult();
+            var finalArtifact = new FinalPdfArtifact(storedArtifact.Artifact.ArtifactId, storedArtifact.Artifact.Sha256, storedArtifact.Artifact.LengthBytes, 1);
             var item = new PreparedItem("item-1", new SourceSnapshot("source", Hash, 1, FixedTime),
                 new RendererResult("renderer", "1", "artifact", Hash, 1, 1, new RendererCapabilities(1, ["application/pdf"])),
                 [new PageMapping(1, 1)], Settings());
             var segment = new CompatibleSegment("segment-1", 0, [item.ItemId], "compat", Settings());
-            PreparedRun = PaperBatch.Core.Domain.PreparedRun.Create("run-1", FixedTime, Hash, [item], [segment]);
+            PreparedRun = runOverride ?? PaperBatch.Core.Domain.PreparedRun.Create("run-1", FixedTime, Hash, [item], [segment], finalArtifact);
             Job = Store.CreateRun(PreparedRun, "run-key", new RetentionMetadata(FixedTime.AddDays(1), true)).Jobs[0];
         }
         public SqliteRunStore Store { get; }
+        public PaperBatch.Core.Rendering.RenderArtifactStore Artifacts { get; }
         public PreparedRun PreparedRun { get; }
         public StoredJob Job { get; }
         public void Dispose() => Directory.Delete(_temporary, recursive: true);

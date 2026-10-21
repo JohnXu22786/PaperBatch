@@ -4,6 +4,8 @@ using Avalonia.Headless;
 using System.Text.Json;
 using PaperBatch.Desktop;
 using PaperBatch.Core.Intake;
+using PaperBatch.Core.Domain;
+using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Rendering;
 using PaperBatch.Desktop.Presentation;
 
@@ -16,6 +18,7 @@ var tests = new (string Name, Action Run)[]
     ("file picker reports all skipped and mixed local selections", FilePickerClassifiesSkippedSelections),
     ("headless shell identifies demo data and has no print action", HeadlessShellIsExplicitlyDemoOnly),
     ("production presentation exposes unavailable production capabilities without demo rows", ProductionPresentationIsExplicitlyUnavailable),
+    ("production preview raster comes from the persisted prepared artifact", ProductionPreviewReadsPreparedArtifact),
     ("presentation assembly keeps native backends behind shared core contracts", PresentationAssemblyReferencesCoreWithoutNativeImports)
 };
 
@@ -219,7 +222,7 @@ static void ProductionPresentationIsExplicitlyUnavailable()
 {
     var sources = new ProductionPresentationSources();
     Assert.Empty(sources.GetQueueItems());
-    Assert.Contains("unavailable", sources.GetPreview("missing").Description);
+            Assert.Contains("unavailable", sources.GetPreviewAsync("missing").GetAwaiter().GetResult().Description);
     Assert.Contains("No renderer", sources.GetFindings("missing").Single().Detail);
     Assert.Empty(sources.GetHistoryEntries());
     Assert.Empty(sources.GetTemplates());
@@ -233,7 +236,7 @@ static void ProductionPresentationIsExplicitlyUnavailable()
         Assert.Equal("QUEUE EMPTY", viewModel.QueueStateLabel);
         Assert.Contains("Source files are captured", window.FindControl<TextBlock>("QueueDescription")!.Text);
         Assert.Equal("FINAL PREVIEW UNAVAILABLE", window.FindControl<TextBlock>("PreviewHeading")!.Text);
-        Assert.Equal("No prepared artifact is available.", window.FindControl<TextBlock>("PreviewDescription")!.Text);
+        Assert.Equal("No prepared artifact preview is available.", window.FindControl<TextBlock>("PreviewDescription")!.Text);
         viewModel.NavigateCommand.Execute("History");
         Assert.Equal("Print history unavailable", window.FindControl<TextBlock>("HistoryTitle")!.Text);
         viewModel.NavigateCommand.Execute("Templates");
@@ -242,6 +245,53 @@ static void ProductionPresentationIsExplicitlyUnavailable()
     finally
     {
         window.Close();
+    }
+}
+
+static void ProductionPreviewReadsPreparedArtifact()
+{
+    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-preview-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+        var pdfBytes = MinimalPdf();
+        var stored = artifacts.PersistPdfAsync(new MemoryStream(pdfBytes), "test-renderer", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        var final = new FinalPdfArtifact(stored.Artifact.ArtifactId, stored.Artifact.Sha256, stored.Artifact.LengthBytes, 1);
+        var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);
+        var item = new PreparedItem("item", new SourceSnapshot("snapshot", new string('a', 64), 1, DateTimeOffset.UtcNow),
+            new RendererResult("renderer", "1", "source-artifact", new string('b', 64), 1, 1,
+                new RendererCapabilities(1, ["application/pdf"])),
+            [new PageMapping(1, 1)], settings);
+        var run = PreparedRun.Create("run-preview", DateTimeOffset.UtcNow, new string('c', 64), [item],
+            [new CompatibleSegment("segment", 0, [item.ItemId], "compat", settings)], final);
+        var preview = new FakeArtifactPreviewRenderer(pdfBytes);
+        var sources = new ProductionPresentationSources(artifacts: artifacts, previewRenderer: preview);
+        var viewModel = new DesktopShellViewModel(new FakeQueueSource([new QueueItemSnapshot("queue-item", "prepared.pdf", "Ready", "Prepared")]),
+            sources, sources, sources, sources, sources, new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+        viewModel.RegisterPreparedRun("queue-item", run);
+        viewModel.RefreshPreviewAsync().GetAwaiter().GetResult();
+        var window = new MainWindow(viewModel);
+        try
+        {
+            window.Show();
+            Assert.True(viewModel.HasPreviewImage);
+            Assert.Equal(final.ArtifactId, viewModel.CurrentPreview!.ArtifactId);
+            Assert.Equal(final.Sha256, viewModel.CurrentPreview.ArtifactSha256);
+            Assert.True(pdfBytes.SequenceEqual(preview.ObservedPdfBytes!));
+            Assert.True(ReferenceEquals(viewModel.CurrentPreview.PageImage,
+                window.FindControl<Image>("PreparedArtifactPageImage")!.Source));
+            Assert.Contains("immutable final PDF", viewModel.ProductionPreviewStatus);
+            viewModel.InvalidatePreparedRun("queue-item");
+            Assert.True(!viewModel.HasPreviewImage);
+            Assert.Equal("FINAL PREVIEW UNAVAILABLE", viewModel.PreviewHeading);
+        }
+        finally { window.Close(); }
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
 }
 
@@ -292,10 +342,11 @@ sealed class FakePreviewSource : IFinalPreviewPresentationSource
 {
     public string? LastRequestedId { get; private set; }
 
-    public PreviewSnapshot GetPreview(string queueItemId)
+    public Task<PreviewSnapshot> GetPreviewAsync(string queueItemId, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         LastRequestedId = queueItemId;
-        return new PreviewSnapshot(queueItemId, "Synthetic page-face illustration", 1, 4);
+        return Task.FromResult(new PreviewSnapshot(queueItemId, "Synthetic page-face illustration", 1, 4));
     }
 }
 
@@ -409,5 +460,23 @@ sealed class CancellingRendererAdapter(CancellationTokenSource cancellation) : I
     {
         cancellation.Cancel();
         return Task.FromResult(RenderResult.Unsupported("Cancellation cleanup fixture."));
+    }
+}
+
+sealed class FakeArtifactPreviewRenderer(byte[] expectedBytes) : IPdfArtifactPreviewRenderer
+{
+    public byte[]? ObservedPdfBytes { get; private set; }
+
+    public Task<PdfRasterPage> RenderPageAsync(Stream pdf, int pageNumber, int maximumDimension,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var content = new MemoryStream();
+        pdf.CopyTo(content);
+        ObservedPdfBytes = content.ToArray();
+        if (!ObservedPdfBytes.SequenceEqual(expectedBytes)) throw new InvalidDataException("Preview received different PDF bytes.");
+        Assert.Equal(1, pageNumber);
+        Assert.Equal(1600, maximumDimension);
+        return Task.FromResult(new PdfRasterPage(1, 1, 4, [0, 0, 0, 255]));
     }
 }

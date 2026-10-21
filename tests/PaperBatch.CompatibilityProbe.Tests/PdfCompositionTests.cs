@@ -394,7 +394,7 @@ internal static class PdfCompositionTests
     private static bool IsPdfDelimiter(byte value) =>
         value is 0 or 9 or 10 or 12 or 13 or 32 or (byte)'(' or (byte)')' or (byte)'<' or (byte)'>' or (byte)'[' or (byte)']' or (byte)'{' or (byte)'}' or (byte)'/' or (byte)'%';
 
-    private static byte[] TwoPagePdf()
+    internal static byte[] TwoPagePdf()
     {
         var objects = new[]
         {

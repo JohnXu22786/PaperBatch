@@ -19,6 +19,7 @@ public sealed class PdfiumPageCompositionAdapter : IPageCompositionAdapter
     private const long MaximumOutputBytes = 512L * 1024 * 1024;
     private readonly string _runtimePath;
     private readonly string _expectedSha256;
+    public string RuntimeSha256 => _expectedSha256;
     private static readonly object RuntimeGate = new();
     private static readonly string[] RequiredExports =
     [

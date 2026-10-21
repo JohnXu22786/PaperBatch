@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
 using PaperBatch.Core.Intake;
+using PaperBatch.Core.Layout;
 
 namespace PaperBatch.Core.Rendering;
 
@@ -46,6 +47,20 @@ public interface IRendererAdapter
     ValueTask<bool> CanRenderAsync(RenderRequest request, CancellationToken cancellationToken);
     /// <summary>Owns and cleans every process and handle it starts, including on cancellation.</summary>
     Task<RenderResult> RenderAsync(RenderRequest request, CancellationToken cancellationToken);
+}
+
+/// <summary>Reads page count and geometry from a reopened persisted PDF artifact.</summary>
+public interface IPdfPageMetadataInspector : IPdfArtifactInspector
+{
+    Task<IReadOnlyList<PageSize>> GetPageSizesAsync(Stream pdf, CancellationToken cancellationToken);
+}
+
+public sealed record PdfRasterPage(int Width, int Height, int Stride, byte[] BgraPixels);
+
+/// <summary>Renders only one verified PDF page into a bounded BGRA buffer for final preview.</summary>
+public interface IPdfArtifactPreviewRenderer
+{
+    Task<PdfRasterPage> RenderPageAsync(Stream pdf, int pageNumber, int maximumDimension, CancellationToken cancellationToken);
 }
 
 /// <summary>Runs a single selected adapter. It never retries through another renderer.</summary>

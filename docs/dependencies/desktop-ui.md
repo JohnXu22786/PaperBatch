@@ -29,3 +29,9 @@ License evidence:
 - [ANGLE BSD 3-Clause license](https://github.com/google/angle/blob/main/LICENSE)
 
 This inventory covers the UI and headless-test dependency graph only. It is not a shipping-binary inventory; future packaging must recheck the exact included assets and preserve their notices. It does not close the separate PDFium, office-suite, driver, or printer compatibility gates.
+
+## U6 prepared artifact boundary
+
+The production shell registers PDF pass-through and supported JPEG/PNG snapshot renderers. The shared preparation coordinator can compose only PDFium-inspected pages for which an injected verifier confirms static page content; it persists the final PDF in the private content-addressed artifact store and links its ID/hash to version-2 `PreparedRun` metadata. Version-1 saved runs remain readable but have no final artifact and are rejected for submission.
+
+The preparation result enters the presentation through `DesktopShellViewModel.RegisterPreparedRun(queueItemId, run)`, which registers the immutable run with the preview source. Re-preparation or removal calls `InvalidatePreparedRun`, clearing the current preview and disposing its prior bitmap. When `PAPERBATCH_PDFIUM_RUNTIME_PATH` and its matching `PAPERBATCH_PDFIUM_RUNTIME_SHA256` are explicitly configured, the desktop preview opens and revalidates that run's final artifact, rasterizes one bounded page, and displays the resulting image. Without both the persisted final artifact and configured runtime, preview stays explicitly unavailable. The CI-pinned PDFium runtime is test evidence only and is not registered in the application by default. Production print submission likewise remains unavailable until a real print backend and explicit settings flow are configured. Test backends receive the same verified final artifact stream and are simulation-only; OS/backend status never means physical pages were confirmed.

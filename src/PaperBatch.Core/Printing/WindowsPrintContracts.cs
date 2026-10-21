@@ -123,7 +123,9 @@ public sealed record WindowsPrintSubmission(
     WindowsPrintJobOptions Options,
     CompatibleSegment Segment,
     string RunNonce,
-    DateTimeOffset SubmittedAtUtc);
+    DateTimeOffset SubmittedAtUtc,
+    FinalPdfArtifact Artifact,
+    Stream PdfContent);
 
 /// <summary>All native calls are isolated here; implementations must own and dispose handles they open.</summary>
 public interface IWindowsPrintBackend

@@ -1,6 +1,7 @@
 using PaperBatch.Core.Domain;
 using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Serialization;
+using PaperBatch.Core.Rendering;
 
 namespace PaperBatch.Core.Printing;
 
@@ -8,7 +9,8 @@ namespace PaperBatch.Core.Printing;
 public sealed class WindowsPrintCoordinator(
     SqliteRunStore store,
     IWindowsPrintBackend backend,
-    Func<string>? nonceFactory = null)
+    Func<string>? nonceFactory = null,
+    RenderArtifactStore? artifacts = null)
 {
     private readonly Func<string> _nonceFactory = nonceFactory ?? (() => Guid.NewGuid().ToString("N"));
 
@@ -30,6 +32,14 @@ public sealed class WindowsPrintCoordinator(
             ?? throw new InvalidDataException("The requested print job has no persisted prepared run.");
         if (!string.Equals(PreparedRunJson.Serialize(persistedRun), PreparedRunJson.Serialize(preparedRun), StringComparison.Ordinal))
             throw new InvalidOperationException("The supplied prepared run does not match the persisted run.");
+        if (preparedRun.FinalArtifact is not { } finalArtifact || artifacts is null)
+            return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job,
+                "A persisted final PDF artifact and configured artifact store are required for submission.");
+        var storedArtifact = artifacts.GetReceipt(finalArtifact.ArtifactId).Artifact;
+        if (!string.Equals(storedArtifact.Sha256, finalArtifact.Sha256, StringComparison.Ordinal) ||
+            storedArtifact.LengthBytes != finalArtifact.LengthBytes)
+            throw new InvalidDataException("The final PDF artifact receipt does not match the prepared run.");
+        await using var pdfContent = artifacts.OpenRead(finalArtifact.ArtifactId);
         if (job.State != JobState.Ready)
         {
             var replay = store.BeginSubmission(jobId, idempotencyKey, atUtc);
@@ -105,8 +115,9 @@ public sealed class WindowsPrintCoordinator(
 
         try
         {
+            pdfContent.Position = 0;
             var receipt = await backend.SubmitAsync(
-                new WindowsPrintSubmission(options, segment, nonce, atUtc.ToUniversalTime()), cancellationToken).ConfigureAwait(false);
+                new WindowsPrintSubmission(options, segment, nonce, atUtc.ToUniversalTime(), finalArtifact, pdfContent), cancellationToken).ConfigureAwait(false);
             if (!string.Equals(receipt.QueueIdentity, queueIdentity, StringComparison.Ordinal) ||
                 !string.Equals(receipt.RunNonce, nonce, StringComparison.Ordinal) ||
                 (receipt.DriverName is not null && !string.Equals(receipt.DriverName, current.DriverName, StringComparison.Ordinal)) ||

@@ -23,8 +23,9 @@ internal sealed class DemoPresentationSources :
         new EffectiveSettingSnapshot("Scaling", "Shrink oversized · example", $"Demo selection: {queueItemId}.")
     ];
 
-    public PreviewSnapshot GetPreview(string queueItemId)
+    public Task<PreviewSnapshot> GetPreviewAsync(string queueItemId, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var (title, pageCount) = queueItemId switch
         {
             "sample-agenda" => ("Sample agenda", 4),
@@ -33,11 +34,11 @@ internal sealed class DemoPresentationSources :
             _ => throw new ArgumentOutOfRangeException(nameof(queueItemId), queueItemId, "No sample preview is available for this row.")
         };
 
-        return new PreviewSnapshot(
+        return Task.FromResult(new PreviewSnapshot(
             queueItemId,
             $"Synthetic illustration for {title} · no document content rendered",
             1,
-            pageCount);
+            pageCount));
     }
 
     public IReadOnlyList<PreflightFindingSnapshot> GetFindings(string queueItemId) =>

@@ -1,0 +1,184 @@
+using System.Security.Cryptography;
+using System.Text;
+using PaperBatch.Core.Domain;
+using PaperBatch.Core.Intake;
+using PaperBatch.Core.Layout;
+using PaperBatch.Core.Persistence;
+using PaperBatch.Core.Rendering;
+
+namespace PaperBatch.Core.Preparation;
+
+/// <summary>Confirms that a rendered PDF contains only static page content before PDFium page composition.</summary>
+public interface IStaticPdfContentInspector
+{
+    Task<bool> HasStaticPageContentAsync(Stream pdf, CancellationToken cancellationToken);
+}
+
+public sealed record PreparedArtifactResult(
+    PreparedRun? Run,
+    RunCreationResult? Persistence,
+    IReadOnlyList<string> Diagnostics,
+    bool IsCancelled)
+{
+    public bool Succeeded => Run is not null && Persistence is not null && !IsCancelled;
+}
+
+/// <summary>Builds and persists one immutable source-to-layout-to-final-PDF run.</summary>
+public sealed class PreparedArtifactCoordinator(
+    SourceIntakeService intake,
+    SourceSnapshotCache snapshots,
+    RendererCoordinator renderers,
+    IPdfPageMetadataInspector pageInspector,
+    IStaticPdfContentInspector staticContentInspector,
+    IPageCompositionAdapter composer,
+    RenderArtifactStore artifacts,
+    SqliteRunStore runs)
+{
+    private const long MaximumPreparedSourceBytes = 512L * 1024 * 1024;
+
+    public async Task<PreparedArtifactResult> PrepareAsync(
+        IEnumerable<SourceInput> inputs,
+        PrintSettings printSettings,
+        LayoutOptions layoutOptions,
+        string idempotencyKey,
+        RetentionMetadata retention,
+        DateTimeOffset createdAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(inputs);
+        ArgumentNullException.ThrowIfNull(printSettings);
+        ArgumentNullException.ThrowIfNull(layoutOptions);
+        ArgumentNullException.ThrowIfNull(retention);
+        var diagnostics = new List<string>();
+        var prepared = await intake.PrepareAsync(inputs, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var retainedSnapshots = prepared.Items.Where(item => item.Snapshot is not null)
+            .Select(item => item.Snapshot!.SnapshotId).Distinct(StringComparer.Ordinal).ToArray();
+        try
+        {
+            if (prepared.IsCancelled || cancellationToken.IsCancellationRequested)
+                return new(null, null, ["Preparation was cancelled; no prepared run was created."], IsCancelled: true);
+            if (prepared.Items.IsDefaultOrEmpty || prepared.Items.Any(item => !item.IsReady))
+            {
+                diagnostics.AddRange(prepared.Items.SelectMany(item => item.Diagnostics).Select(item => item.Message));
+                if (diagnostics.Count == 0) diagnostics.Add("Every selected source must pass intake preflight before preparation.");
+                return new(null, null, diagnostics, IsCancelled: false);
+            }
+            if (layoutOptions.Copies != 1)
+                return new(null, null, ["Set layout copies to one; print copies are carried by the selected driver settings."], IsCancelled: false);
+
+            var items = new List<PreparedItem>(prepared.Items.Length);
+            var layoutDocuments = new List<LayoutDocument>(prepared.Items.Length);
+            var compositionSources = new List<PdfCompositionSource>(prepared.Items.Length);
+            long sourceBytes = 0;
+            foreach (var source in prepared.Items)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var snapshot = source.Snapshot!;
+                var render = await renderers.RenderAsync(
+                    new RenderRequest(snapshot.SnapshotId, source.Format!.Value, RendererExecutionContext.BackgroundWorker),
+                    TimeSpan.FromMinutes(2), cancellationToken).ConfigureAwait(false);
+                if (render.Status != RenderStatus.Succeeded || render.Artifact is null)
+                    return new(null, null, [$"{Path.GetFileName(source.SourcePath)}: {render.Message ?? render.Status.ToString()}"],
+                        render.Status == RenderStatus.Cancelled);
+
+                var receipt = artifacts.GetReceipt(render.Artifact.ArtifactId);
+                if (receipt.Artifact.Sha256 != render.Artifact.Sha256 || receipt.Artifact.LengthBytes != render.Artifact.LengthBytes)
+                    throw new InvalidDataException("A renderer artifact receipt did not match its reported identity.");
+
+                using var renderedPdf = artifacts.OpenRead(render.Artifact.ArtifactId);
+                var pageSizes = await pageInspector.GetPageSizesAsync(renderedPdf, cancellationToken).ConfigureAwait(false);
+                if (pageSizes.Count == 0) throw new InvalidDataException("The rendered PDF has no pages.");
+                renderedPdf.Position = 0;
+                if (!await staticContentInspector.HasStaticPageContentAsync(renderedPdf, cancellationToken).ConfigureAwait(false))
+                    return new(null, null, ["PDF forms or interactive content are unsupported by the configured page compositor."], IsCancelled: false);
+
+                sourceBytes = checked(sourceBytes + renderedPdf.Length);
+                if (sourceBytes > MaximumPreparedSourceBytes)
+                    return new(null, null, ["Combined rendered PDF sources exceed the bounded preparation limit."], IsCancelled: false);
+                renderedPdf.Position = 0;
+                using var sourceBuffer = new MemoryStream(checked((int)renderedPdf.Length));
+                await renderedPdf.CopyToAsync(sourceBuffer, 64 * 1024, cancellationToken).ConfigureAwait(false);
+                var itemId = "item_" + Guid.NewGuid().ToString("N");
+                var artifactReceipt = receipt.Artifact;
+                var rendererResult = new RendererResult(receipt.EngineId, receipt.EngineVersion,
+                    artifactReceipt.ArtifactId, artifactReceipt.Sha256, artifactReceipt.LengthBytes, pageSizes.Count,
+                    new RendererCapabilities(1, ["application/pdf"]));
+                var pageMap = Enumerable.Range(1, pageSizes.Count).Select(page => new PageMapping(page, page)).ToArray();
+                items.Add(new PreparedItem(itemId, snapshot, rendererResult, pageMap, printSettings));
+                layoutDocuments.Add(new LayoutDocument(itemId, pageSizes, printSettings.Media,
+                    printSettings.PrinterId, printSettings.TrayId));
+                compositionSources.Add(new PdfCompositionSource(itemId, sourceBuffer.ToArray(), StaticPageContentVerified: true));
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var layout = LayoutCompiler.Compile(layoutDocuments, layoutOptions);
+            if (!layout.Succeeded)
+                return new(null, null, layout.Diagnostics.Select(diagnostic => diagnostic.Message).ToArray(), IsCancelled: false);
+            var segment = new CompatibleSegment("segment_0", 0, items.Select(item => item.ItemId),
+                "layout-v1", printSettings);
+            var finalId = "run_" + Guid.NewGuid().ToString("N");
+            var fingerprint = ComputeFingerprint(items, printSettings, layoutOptions);
+            using var composedPdf = new MemoryStream();
+            await composer.ComposePdfAsync(layout, compositionSources, composedPdf, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            composedPdf.Position = 0;
+            var finalReceipt = await artifacts.PersistPdfAsync(composedPdf, "pdfium-page-composition", composer is PdfiumPageCompositionAdapter pdfium
+                    ? pdfium.RuntimeSha256 : "injected",
+                new Dictionary<string, string>(StringComparer.Ordinal) { ["layout"] = "u4-v1" }, cancellationToken).ConfigureAwait(false);
+            using (var reopened = artifacts.OpenRead(finalReceipt.Artifact.ArtifactId))
+            {
+                var savedPageSizes = await pageInspector.GetPageSizesAsync(reopened, cancellationToken).ConfigureAwait(false);
+                if (savedPageSizes.Count != layout.Pages.Length)
+                    throw new InvalidDataException("The saved final PDF page count does not match the compiled layout.");
+            }
+            var finalArtifact = new FinalPdfArtifact(finalReceipt.Artifact.ArtifactId,
+                finalReceipt.Artifact.Sha256, finalReceipt.Artifact.LengthBytes, layout.Pages.Length);
+            var run = PreparedRun.Create(finalId, createdAtUtc, fingerprint, items, [segment], finalArtifact);
+            var persisted = runs.CreateRun(run, idempotencyKey, retention);
+            return new(run, persisted, diagnostics, IsCancelled: false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new(null, null, ["Preparation was cancelled; no prepared run was created."], IsCancelled: true);
+        }
+        finally
+        {
+            foreach (var snapshotId in retainedSnapshots)
+            {
+                try { snapshots.Release(snapshotId); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException) { }
+            }
+        }
+    }
+
+    private static string ComputeFingerprint(IEnumerable<PreparedItem> items, PrintSettings settings, LayoutOptions options)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        void Add(string value) => hash.AppendData(Encoding.UTF8.GetBytes(value + "\n"));
+        foreach (var item in items)
+        {
+            Add(item.Source.SnapshotId);
+            Add(item.Source.Sha256);
+            Add(item.Render.ArtifactId);
+            Add(item.Render.ArtifactSha256);
+        }
+        Add(System.Text.Json.JsonSerializer.Serialize(settings));
+        Add(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            options.Copies,
+            options.CopyOrder,
+            options.NUp,
+            options.Duplex,
+            options.SeparateFilesOnFront,
+            options.ReverseOrder,
+            options.Fit,
+            options.SheetSize,
+            Ranges = options.Ranges.IsDefault ? Array.Empty<PageRange>() : options.Ranges.ToArray(),
+            options.AddFrontCover,
+            options.AddSeparatorsBetweenFiles,
+            options.SeparatePacketsOnFront,
+            options.MaximumOutputPages
+        }));
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+}

@@ -232,6 +232,28 @@ internal static class CoreTests
         Assert.Equal(golden, PreparedRunJson.Serialize(PreparedRunJson.Parse(Encoding.UTF8.GetBytes(golden))));
     }
 
+    internal static void PreparedRunV2PersistsFinalArtifactAndReadsLegacyV1()
+    {
+        var legacy = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "prepared-run-v1.json")).Trim();
+        var legacyRun = PreparedRunJson.Parse(Encoding.UTF8.GetBytes(legacy));
+        Assert.True(legacyRun.FinalArtifact is null);
+        Assert.Equal(legacy, PreparedRunJson.Serialize(legacyRun));
+
+        var artifact = new FinalPdfArtifact("artifact_" + Hash, Hash, 2048, 4);
+        var run = PreparedRun.Create("run-with-final", FixedTime, Hash,
+            [CreateItem() with { ItemId = "item-1" }], [CreateSegment("item-1")], artifact);
+        var json = PreparedRunJson.Serialize(run);
+        using var parsed = JsonDocument.Parse(json);
+        Assert.Equal(2, parsed.RootElement.GetProperty("schemaVersion").GetInt32());
+        var restored = PreparedRunJson.Parse(Encoding.UTF8.GetBytes(json));
+        Assert.Equal(artifact, restored.FinalArtifact);
+        Assert.Equal(json, PreparedRunJson.Serialize(restored));
+
+        Assert.Throws<ArgumentException>(() => PreparedRun.Create("run-invalid-final", FixedTime, Hash,
+            [CreateItem() with { ItemId = "item-1" }], [CreateSegment("item-1")],
+            artifact with { Sha256 = "not-a-hash" }));
+    }
+
     internal static void PreparedRunJsonRejectsNullArrayEntries()
     {
         var json = PreparedRunJson.Serialize(CreateRun("null-entry-run", "null-entry-segment"));
