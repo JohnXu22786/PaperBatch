@@ -37,6 +37,8 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
     private readonly string _enginePath;
     private readonly string _engineSha256;
     private readonly string _programDirectory;
+    private readonly string _installationDirectory;
+    private readonly string _launcherPath;
 
     public LibreOfficeRendererAdapter(
         SourceSnapshotCache snapshots,
@@ -54,6 +56,9 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         _enginePath = Path.GetFullPath(directEnginePath);
         _engineSha256 = trustedEngineSha256.ToLowerInvariant();
         _programDirectory = Path.GetDirectoryName(_enginePath) ?? throw new ArgumentException("The direct engine must have a parent directory.", nameof(directEnginePath));
+        _installationDirectory = Directory.GetParent(_programDirectory)?.FullName ??
+            throw new ArgumentException("The direct engine must be inside a LibreOffice installation directory.", nameof(directEnginePath));
+        _launcherPath = Path.Combine(_programDirectory, "soffice");
     }
 
     public ValueTask<bool> CanRenderAsync(RenderRequest request, CancellationToken cancellationToken)
@@ -61,7 +66,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
         if (request.ExecutionContext != RendererExecutionContext.BackgroundWorker || !SupportedFormats.Contains(request.Format) ||
-            !OperatingSystem.IsLinux() || !File.Exists(_enginePath))
+            !OperatingSystem.IsLinux() || !File.Exists(_enginePath) || !File.Exists(_launcherPath))
             return ValueTask.FromResult(false);
 
         try
@@ -79,6 +84,8 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or CryptographicException or Win32Exception or NotSupportedException or System.Security.SecurityException)
         {
+            if (Environment.GetEnvironmentVariable("PAPERBATCH_LO_DIAGNOSTICS") == "1")
+                Console.Error.WriteLine($"LibreOffice runtime capability check rejected: {exception.GetType().Name}: {exception.Message}");
             return ValueTask.FromResult(false);
         }
     }
@@ -98,7 +105,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             WriteOwnerMarker(ownerMarker);
             markerCreated = true;
             var profileUri = LibreOfficeProfilePolicy.CreatePrivateProfile(operation);
-            var enginePath = await StagePinnedEngineAsync(operation, cancellationToken).ConfigureAwait(false);
+            _ = await StagePinnedEngineAsync(operation, cancellationToken).ConfigureAwait(false);
             var extension = ExtensionFor(request.Format);
             var sourcePath = Path.Combine(operation, "source" + extension);
             var pdfPath = Path.Combine(operation, "source.pdf");
@@ -110,10 +117,10 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
                 if (sourcePreflight.Status != SourcePreflightStatus.Ready)
                     return RenderResult.Failed("The source snapshot failed structural or encryption safety checks.");
             }
-            var version = await ReadVersionAsync(profileUri, enginePath, cancellationToken).ConfigureAwait(false);
+            var version = await ReadVersionAsync(profileUri, cancellationToken).ConfigureAwait(false);
             if (version is null) return RenderResult.Failed("LibreOffice did not provide a usable version receipt.");
 
-            var startInfo = CreateBaseStartInfo(profileUri, enginePath);
+            var startInfo = CreateBaseStartInfo(profileUri);
             startInfo.ArgumentList.Add("--convert-to");
             startInfo.ArgumentList.Add("pdf");
             startInfo.ArgumentList.Add("--outdir");
@@ -125,7 +132,11 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             if (result.Status == OwnedProcessStatus.Cancelled)
                 return new RenderResult(RenderStatus.Cancelled, null, "LibreOffice rendering was cancelled and stopped.");
             if (result.Status != OwnedProcessStatus.Exited || result.ExitCode != 0)
+            {
+                if (Environment.GetEnvironmentVariable("PAPERBATCH_LO_DIAGNOSTICS") == "1")
+                    Console.Error.WriteLine($"LibreOffice export failed: status={result.Status}, exit={result.ExitCode}, output={result.Output}");
                 return RenderResult.Failed("LibreOffice could not convert this source format.");
+            }
             cancellationToken.ThrowIfCancellationRequested();
 
             var outputInfo = new FileInfo(pdfPath);
@@ -169,9 +180,9 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         }
     }
 
-    private async Task<string?> ReadVersionAsync(Uri profileUri, string enginePath, CancellationToken cancellationToken)
+    private async Task<string?> ReadVersionAsync(Uri profileUri, CancellationToken cancellationToken)
     {
-        var startInfo = CreateBaseStartInfo(profileUri, enginePath);
+        var startInfo = CreateBaseStartInfo(profileUri);
         startInfo.ArgumentList.Add("--version");
         var result = await RunOwnedProcessAsync(startInfo, TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);
         if (result.Status != OwnedProcessStatus.Exited || result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.Output)) return null;
@@ -180,9 +191,9 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             line.StartsWith("LibreOfficeDev ", StringComparison.OrdinalIgnoreCase));
     }
 
-    private ProcessStartInfo CreateBaseStartInfo(Uri profileUri, string enginePath)
+    private ProcessStartInfo CreateBaseStartInfo(Uri profileUri)
     {
-        var info = new ProcessStartInfo(enginePath)
+        var info = new ProcessStartInfo(_launcherPath)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -210,11 +221,12 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
     private void VerifyRuntimeInstallationReadOnly()
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
-        var trustedRoot = Path.GetFullPath(_programDirectory).TrimEnd(Path.DirectorySeparatorChar);
+        var trustedRoot = Path.GetFullPath(_installationDirectory).TrimEnd(Path.DirectorySeparatorChar);
         EnsureTrustedPath(trustedRoot, trustedRoot);
         EnsureTrustedPath(_enginePath, trustedRoot);
+        EnsureTrustedPath(_launcherPath, trustedRoot);
         var checkedFiles = 0;
-        foreach (var library in Directory.EnumerateFiles(_programDirectory, "*.so*", SearchOption.AllDirectories))
+        foreach (var library in Directory.EnumerateFiles(_installationDirectory, "*.so*", SearchOption.AllDirectories))
         {
             if (++checkedFiles > 10_000) throw new IOException("The LibreOffice runtime contains too many shared-library entries.");
             EnsureTrustedPath(library, trustedRoot);
@@ -247,7 +259,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
                     metadata.UserId != uid && (metadata.Mode & sticky) != 0;
                 if (((metadata.Mode & userWrite) != 0 && metadata.UserId == uid) ||
                     (writableByOthers && !protectedStickyParent))
-                    throw new UnauthorizedAccessException("The LibreOffice executable or shared-library path is writable by the current user or another untrusted account.");
+                    throw new UnauthorizedAccessException($"The LibreOffice executable or shared-library path '{current.FullName}' is writable by the current user or another untrusted account (mode 0x{Convert.ToInt32(metadata.Mode):X}, owner UID {metadata.UserId}).");
             }
             // The installation root can itself be protected while an ancestor
             // remains replaceable. Walk to the filesystem root as well. A

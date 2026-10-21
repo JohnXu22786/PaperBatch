@@ -4,7 +4,9 @@ This follow-up adds a private persisted PDF artifact store, an exact-byte PDF
 pass-through adapter, a built-in one-page JPEG/PNG-to-PDF adapter, and an
 isolated LibreOffice command-line adapter. Production composition registers the
 PDF and built-in image adapters for background rendering. LibreOffice remains
-unregistered and unavailable until stable pinned-build CI validates it. PDF pass-through validates the cached
+unregistered and unavailable to production until the tested engine is included
+in the application's trusted offline runtime. CI pins LibreOffice 26.2.2.2 for
+an Ubuntu x86_64 adapter integration check. PDF pass-through validates the cached
 snapshot with source preflight checks, verifies the snapshot digest and length,
 stores the bytes under a content-derived ID, and verifies that ID again when
 opening the artifact. Pass-through does not claim that the document was
@@ -25,12 +27,15 @@ preview:
 JPEGs with EXIF rotation or mirroring, and TIFF with an explicit multi-page
 policy. Current built-in support is limited to 8-bit RGB/grayscale PNG without
 interlacing or alpha and JPEGs with no orientation change.
-2. Pin the Linux LibreOffice package/build in CI and exercise the adapter with
-sanitized synthetic documents. The adapter requires an explicit executable
-digest and a PDFium runtime; it reports unavailable on Windows in this unit.
-3. Exercise LibreOffice export with sanitized synthetic DOCX/ODT fixtures and
-record semantic, page-count, and rendered-output comparisons with bounded
-variance. Confirm the declared format table against the pinned build.
+2. Run the pinned LibreOffice 26.2.2.2 Linux x86_64 adapter test in CI against
+   a generated DOCX and a separately pinned PDFium library. It checks engine
+   identity, one-page output, PDF structure, artifact provenance,
+   source/snapshot immutability, temporary-operation cleanup, and that an
+   unrelated LibreOffice process remains alive. This does not measure layout
+   fidelity or qualify ODT, spreadsheet, or presentation formats.
+3. Extend the corpus across DOCX/ODT/spreadsheets/presentations and record
+   rendered-output comparisons with bounded variance. Confirm the declared
+   format table against the pinned build before advertising those formats.
 4. Add the preparation coordinator that assembles source snapshots, renderer
 receipts, page maps, and the PDF artifact into a persisted `PreparedRun`, then
 serves preview bytes from that exact artifact ID.

@@ -217,8 +217,19 @@ var tests = new List<(string Name, Action Run)>
     ("source intake prepares valid snapshots while retaining per-item errors", SourceIntakeTests.IntakePreparesSnapshotsAndKeepsPerItemErrors)
 };
 
-if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH")))
+if (OperatingSystem.IsWindows() && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH")))
     tests.Add(("PDFium vector composition preserves transformed N-up placement", PdfCompositionTests.NativeCompositionRendersTwoUpFixture));
+
+if (OperatingSystem.IsLinux())
+{
+    tests.Add(("LibreOffice version timeout stops its owned process", RendererTests.LibreOfficeVersionQueryStopsOnTimeout));
+    if (Environment.GetEnvironmentVariable("PAPERBATCH_REQUIRE_LIBREOFFICE_TEST") == "1")
+        tests.Add(("pinned stable LibreOffice renders an immutable synthetic DOCX", RendererTests.PinnedLibreOfficeRendersSyntheticDocx));
+    else
+        Console.WriteLine("SKIP pinned stable LibreOffice integration (CI exact-engine configuration required)");
+}
+else
+    Console.WriteLine("SKIP pinned stable LibreOffice integration (Linux exact-engine CI only)");
 
 var failures = 0;
 foreach (var (name, run) in tests)
@@ -1982,11 +1993,27 @@ static class Assert
         }
     }
 
+    public static void True(bool value, string message)
+    {
+        if (!value)
+        {
+            throw new InvalidOperationException(message);
+        }
+    }
+
     public static void False(bool value)
     {
         if (value)
         {
             throw new InvalidOperationException("Expected false.");
+        }
+    }
+
+    public static void False(bool value, string message)
+    {
+        if (value)
+        {
+            throw new InvalidOperationException(message);
         }
     }
 

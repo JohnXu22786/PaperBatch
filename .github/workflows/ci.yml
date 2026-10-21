@@ -60,6 +60,76 @@ jobs:
           Add-Content $env:GITHUB_ENV "PAPERBATCH_PDFIUM_TEST_PATH=$($dll.FullName)"
           Add-Content $env:GITHUB_ENV 'PAPERBATCH_PDFIUM_TEST_SHA256=a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f'
 
+      - name: Install and verify pinned LibreOffice and PDFium integration runtimes
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          lo_version='26.2.2.2'
+          lo_archive="LibreOffice_${lo_version}_Linux_x86-64_deb.tar.gz"
+          lo_base="https://downloadarchive.documentfoundation.org/libreoffice/old/${lo_version}/deb/x86_64/${lo_archive}"
+          lo_root="$RUNNER_TEMP/paperbatch-libreoffice-${lo_version}"
+          lo_archive_path="$RUNNER_TEMP/$lo_archive"
+          lo_signature_path="$lo_archive_path.asc"
+          lo_key_path="$RUNNER_TEMP/tdf-release-key.asc"
+          lo_keyring_path="$RUNNER_TEMP/tdf-release-key.gpg"
+          lo_status_path="$RUNNER_TEMP/tdf-signature-status.txt"
+          curl --fail --location --retry 3 "$lo_base" --output "$lo_archive_path"
+          curl --fail --location --retry 3 "$lo_base.asc" --output "$lo_signature_path"
+          printf '%s  %s\n' 'aa2815afe97e45dc02e446c43e24232f1d78941aee1081c95d871e05d74062e8' "$lo_archive_path" | sha256sum --check --status
+          sudo apt-get update
+          sudo apt-get install --yes gpgv
+          curl --fail --location --retry 3 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xF434A1EFAFEEAEA3' --output "$lo_key_path"
+          gpg --batch --show-keys --with-colons "$lo_key_path" | grep -F 'fpr:::::::::C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3:'
+          gpg --batch --dearmor --output "$lo_keyring_path" "$lo_key_path"
+          gpgv --status-fd=1 --keyring "$lo_keyring_path" "$lo_signature_path" "$lo_archive_path" | tee "$lo_status_path"
+          grep -F '[GNUPG:] VALIDSIG C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3 ' "$lo_status_path"
+          mkdir -p "$lo_root"
+          tar -xzf "$lo_archive_path" --directory "$lo_root"
+          lo_debs="$lo_root/LibreOffice_26.2.2.2_Linux_x86-64_deb/DEBS"
+          sudo apt-get install --yes \
+            "$lo_debs"/libobasis26.2-core_*.deb \
+            "$lo_debs"/libobasis26.2-ooofonts_*.deb \
+            "$lo_debs"/libobasis26.2-images_*.deb \
+            "$lo_debs"/libobasis26.2-writer_*.deb \
+            "$lo_debs"/libobasis26.2-base_*.deb \
+            "$lo_debs"/libobasis26.2-en-us_*.deb \
+            "$lo_debs"/libreoffice26.2_*.deb \
+            "$lo_debs"/libreoffice26.2-ure_*.deb \
+            "$lo_debs"/libreoffice26.2-writer_*.deb \
+            "$lo_debs"/libreoffice26.2-base_*.deb \
+            "$lo_debs"/libreoffice26.2-en-us_*.deb
+          # GitHub's hosted runner exposes /opt as world-writable; keep the
+          # installed engine's ancestor protected for the adapter trust check.
+          sudo chmod go-w /opt
+          lo_engine='/opt/libreoffice26.2/program/soffice.bin'
+          test -x "$lo_engine"
+          lo_version_output="$(LD_LIBRARY_PATH=/opt/libreoffice26.2/program URE_BOOTSTRAP=file:///opt/libreoffice26.2/program/fundamentalrc "$lo_engine" --version)"
+          [[ "$lo_version_output" == 'LibreOffice 26.2.2.2'* ]]
+          [[ "$(sha256sum "$lo_engine" | cut -d ' ' -f 1)" == 'bcfd617b90f741cd9aa778e70d6aa317ec6c8971e238f602f3f69ea0ad210c0a' ]]
+          pdfium_archive="$RUNNER_TEMP/pdfium-linux-x64.tgz"
+          pdfium_root="$RUNNER_TEMP/paperbatch-pdfium-linux"
+          curl --fail --location --retry 3 'https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8111/pdfium-linux-x64.tgz' --output "$pdfium_archive"
+          [[ "$(sha256sum "$pdfium_archive" | cut -d ' ' -f 1)" == 'bdc60126399f39fe768566a18d4be055a7b3681bc9e248e8a6656b4f6cae0aa2' ]]
+          mkdir -p "$pdfium_root"
+          tar -xzf "$pdfium_archive" --directory "$pdfium_root"
+          pdfium_library="$pdfium_root/lib/libpdfium.so"
+          test -f "$pdfium_library"
+          [[ "$(sha256sum "$pdfium_library" | cut -d ' ' -f 1)" == 'dca41ec4a2496ea7378b144cc4bad2d9e050692aaac75b9cc22411c1835f7f6e' ]]
+          {
+            echo 'PAPERBATCH_REQUIRE_LIBREOFFICE_TEST=1'
+            echo 'PAPERBATCH_LO_DIAGNOSTICS=1'
+            echo "PAPERBATCH_LO_ENGINE_PATH=$lo_engine"
+            echo "PAPERBATCH_LO_LAUNCHER_PATH=$(dirname "$lo_engine")/soffice"
+            echo 'PAPERBATCH_LO_EXPECTED_VERSION=LibreOffice 26.2.2.2'
+            echo 'PAPERBATCH_LO_ENGINE_SHA256=bcfd617b90f741cd9aa778e70d6aa317ec6c8971e238f602f3f69ea0ad210c0a'
+            echo "PAPERBATCH_PDFIUM_TEST_PATH=$pdfium_library"
+            echo 'PAPERBATCH_PDFIUM_TEST_SHA256=dca41ec4a2496ea7378b144cc4bad2d9e050692aaac75b9cc22411c1835f7f6e'
+          } >> "$GITHUB_ENV"
+          echo '## Pinned native renderer evidence' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Validated LibreOffice 26.2.2.2 on Ubuntu x86_64 against a synthetic DOCX. The test verifies isolated-profile rendering, one-page PDFium inspection, immutable source bytes, renderer provenance and preservation of a separate LibreOffice process.' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run managed test runner
         id: managed-test-runner
         run: dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
@@ -129,6 +199,12 @@ jobs:
             (Get-Content -Path $testLog)
             '```'
           ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - name: Remove temporary Linux renderer runtimes
+        if: always() && runner.os == 'Linux'
+        run: |
+          rm -rf "$RUNNER_TEMP/paperbatch-libreoffice-26.2.2.2" "$RUNNER_TEMP/paperbatch-pdfium-linux"
+          rm -f "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz" "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz.asc" "$RUNNER_TEMP/tdf-release-key.asc" "$RUNNER_TEMP/tdf-release-key.gpg" "$RUNNER_TEMP/tdf-signature-status.txt" "$RUNNER_TEMP/pdfium-linux-x64.tgz"
 
       - name: Compile Python sources
         run: python -m compileall -q tools tests
