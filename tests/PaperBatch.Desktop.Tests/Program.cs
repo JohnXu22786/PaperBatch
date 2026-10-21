@@ -483,9 +483,7 @@ static void RecipeDuplexRequestChangesCompiledLayout()
     try
     {
         var firstPath = Path.Combine(root, "first.pdf");
-        var secondPath = Path.Combine(root, "second.pdf");
         File.WriteAllBytes(firstPath, TestOnePagePdf());
-        File.WriteAllBytes(secondPath, TestOnePagePdf());
         var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
         var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
         var renderer = new RendererCoordinator([new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts))]);
@@ -497,10 +495,10 @@ static void RecipeDuplexRequestChangesCompiledLayout()
             new ConflictTestInspector(), composer, artifacts, store);
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
             artifacts: artifacts, runStore: store, preparation: coordinator);
-        sources.ImportAsync([firstPath, secondPath]).GetAwaiter().GetResult();
+        sources.ImportAsync([firstPath, firstPath]).GetAwaiter().GetResult();
         var recipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "r", "duplex",
             [new RecipeSource("first", firstPath) { Override = new RecipeSettingsOverride(DuplexMode: DuplexMode.LongEdge) },
-             new RecipeSource("second", secondPath)],
+             new RecipeSource("second", firstPath) { Override = new RecipeSettingsOverride(Copies: 2) }],
             new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter"))
         {
             Rules = [new RecipeSettingRule("duplex-rule", "*.pdf", "pdf", new RecipeSettingsOverride(DuplexMode: DuplexMode.LongEdge))]
@@ -515,10 +513,11 @@ static void RecipeDuplexRequestChangesCompiledLayout()
         }
         catch (LayoutCapturedException) { }
 
-        Assert.Equal(2, composer.CompiledPageCount);
-        Assert.True(composer.CompiledSides.SequenceEqual([PageSide.Front, PageSide.Back]));
+        Assert.Equal(3, composer.CompiledPageCount);
+        Assert.True(composer.CompiledSides.SequenceEqual([PageSide.Front, PageSide.Back, PageSide.Front]));
         Assert.Equal(0, store.GetRecentRuns().Length);
         Assert.True(sources.ResolutionSummaries[0].Contains("duplex mode/双面模式=LongEdge (file override/单文件覆盖)", StringComparison.Ordinal));
+        Assert.True(sources.ResolutionSummaries[1].Contains("copies/份数=2 (file override/单文件覆盖)", StringComparison.Ordinal));
         Assert.True(sources.ResolutionSummaries[1].Contains("duplex mode/双面模式=LongEdge (rule/规则 duplex-rule)", StringComparison.Ordinal));
         Assert.True(sources.ResolutionSummaries[0].Contains("orientation/方向=Auto (batch/recipe defaults/批次或配方默认值)", StringComparison.Ordinal));
         var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,

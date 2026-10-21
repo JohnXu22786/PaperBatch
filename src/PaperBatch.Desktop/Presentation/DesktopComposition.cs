@@ -230,6 +230,15 @@ internal sealed class ProductionPresentationSources :
         if (recipe is not null)
         {
             var resolved = new List<PaperBatch.Core.Recipes.ResolvedRecipeSettings>(paths.Length);
+            var recipeSourcesByPath = new Dictionary<string, Queue<PaperBatch.Core.Recipes.RecipeSource>>(
+                OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            foreach (var source in recipe.Sources)
+            {
+                var sourcePath = Path.GetFullPath(source.Location);
+                if (!recipeSourcesByPath.TryGetValue(sourcePath, out var occurrences))
+                    recipeSourcesByPath[sourcePath] = occurrences = new Queue<PaperBatch.Core.Recipes.RecipeSource>();
+                occurrences.Enqueue(source);
+            }
             for (var index = 0; index < paths.Length; index++)
             {
                 var path = paths[index].Path;
@@ -240,10 +249,10 @@ internal sealed class ProductionPresentationSources :
                 };
                 if (type is null)
                     return new(null, null, [$"{Path.GetFileName(path)}: recipe rules support only PDF, JPEG, and PNG sources."], false);
-                var recipeSource = recipe.Sources.FirstOrDefault(source =>
-                    string.Equals(Path.GetFullPath(source.Location), Path.GetFullPath(path),
-                        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
-                    ?? new PaperBatch.Core.Recipes.RecipeSource("queue-" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), path);
+                var normalizedPath = Path.GetFullPath(path);
+                var recipeSource = recipeSourcesByPath.TryGetValue(normalizedPath, out var occurrences) && occurrences.Count > 0
+                    ? occurrences.Dequeue()
+                    : new PaperBatch.Core.Recipes.RecipeSource("queue-" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), path);
                 var batchDefaults = new PaperBatch.Core.Recipes.RecipePrintSettings(requestedSettings.Copies,
                     requestedSettings.ColorMode, requestedSettings.DuplexMode, requestedSettings.Orientation,
                     requestedSettings.ScalingMode, requestedSettings.Media, requestedSettings.PrinterId, requestedSettings.TrayId);
