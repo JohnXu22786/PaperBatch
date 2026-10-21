@@ -37,7 +37,7 @@ The `source` field is `environment`, `native`, or `simulation`. G1 accepts only 
 | Microsoft Office coexistence | `unavailable` | No Microsoft Office executable or licensed Windows test image was present, so a controlled session could not be started. The collector does not attach to or terminate a user's Office process. |
 | WPS coexistence | `unavailable` | No WPS executable or licensed Windows test image was present, so a controlled session could not be started. The collector does not attach to or terminate a user's WPS process. |
 | LibreOffice coexistence | `not-run` | LibreOfficeDev was installed and its isolated export succeeded, but no controlled coexistence session was supplied. The export probe does not attach to an already open suite. |
-| Windows GDI/Winspool backend | `unavailable` | Host is Linux; `winspool.drv` and GDI are not available. |
+| Windows GDI/Winspool backend | `not-run` | The Linux probe host cannot load `winspool.drv` or GDI. A production adapter is implemented; hosted Windows CI exercises read-only queue capability calls only and does not start a print job. |
 | Print queue/driver inventory | `unavailable` | No `lpstat` or `lp` command and no Windows queue/driver API. When available, queue and driver labels are inventory only; they do not verify a usable route. |
 | GDI queue/driver/port route | `unavailable` | Windows GDI/Winspool and physical printer drivers are absent. A future native route check must submit a scoped test job and verify its selected queue/driver/port; inventory alone cannot close G1. |
 | Native GDI job ID | `unavailable` | Windows GDI/Winspool is absent on the Linux host; no native job was submitted. The protocol simulator emits `SIM-0001`, clearly labeled `simulation`. |
