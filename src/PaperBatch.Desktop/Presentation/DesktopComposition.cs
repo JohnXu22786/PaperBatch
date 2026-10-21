@@ -142,7 +142,7 @@ internal sealed class ProductionPresentationSources :
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var snapshot = await _printerCapabilityReader.GetCapabilitiesAsync(queue.QueueIdentity, cancellationToken).ConfigureAwait(false);
+                var snapshot = await _printerCapabilityReader.GetCapabilitiesAsync(queue, cancellationToken).ConfigureAwait(false);
                 var englishLines = snapshot.Options.OrderBy(pair => pair.Key).Select(pair =>
                     $"{OptionName(pair.Key, chinese: false)}: {OptionState(pair.Value.State, chinese: false)}" +
                     FormatCapabilityValues(pair.Value.Values, chinese: false) +

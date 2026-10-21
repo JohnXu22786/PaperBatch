@@ -41,6 +41,14 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
         cancellationToken.ThrowIfCancellationRequested();
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("GDI/Winspool printing requires Windows.");
         var baseSnapshot = WindowsPrintCapabilityEnumerator.GetCapabilities(queueIdentity);
+        return GetCapabilitiesAsync(baseSnapshot, cancellationToken);
+    }
+
+    public Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(PrinterCapabilitySnapshot baseSnapshot, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(baseSnapshot);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("GDI/Winspool printing requires Windows.");
         var options = baseSnapshot.Options.ToBuilder();
         var paperIds = MapIds(baseSnapshot, PrintOption.Media, DcPaperIds, 2);
         var trayIds = MapIds(baseSnapshot, PrintOption.Tray, DcBinIds, 2);

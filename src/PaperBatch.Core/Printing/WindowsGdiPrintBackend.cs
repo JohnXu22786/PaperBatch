@@ -75,6 +75,8 @@ public sealed class PinnedPdfiumWindowsPrintRasterizer : IWindowsPrintPdfRasteri
 public interface IWindowsGdiNativeAdapter
 {
     Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(string queueIdentity, CancellationToken cancellationToken = default);
+    Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(PrinterCapabilitySnapshot enumeratedQueue, CancellationToken cancellationToken = default) =>
+        GetCapabilitiesAsync(enumeratedQueue.QueueIdentity, cancellationToken);
     Task<IWindowsGdiDocument> StartDocAsync(
         WindowsPrintSubmission submission, IReadOnlyList<WindowsPrintRasterPage> pages,
         CancellationToken cancellationToken = default);
