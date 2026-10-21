@@ -28,6 +28,7 @@ var tests = new (string Name, Action Run)[]
     ("production preview raster comes from the persisted prepared artifact", ProductionPreviewReadsPreparedArtifact),
     ("source changes after queue preflight stop before final rendering or persistence", ChangedSourceAfterPreflightCreatesNoPreparedArtifact),
     ("preparation controls forward requested layout settings and invalidate previews", PreparationControlsForwardRequestedSettingsAndInvalidate),
+    ("preparation errors follow the selected language", PreparationErrorsFollowSelectedLanguage),
     ("recipe device-profile conflicts do not persist or compose an artifact", RecipeDeviceConflictCreatesNoRunOrFinalArtifact),
     ("recipe duplex requests change compiled physical-face layout while remaining unvalidated", RecipeDuplexRequestChangesCompiledLayout),
     ("corrupt saved recipes leave production shell available with an error state", CorruptSavedRecipesRemainVisibleAsAnError),
@@ -521,6 +522,22 @@ static void RecipeDeviceConflictCreatesNoRunOrFinalArtifact()
     }
 }
 
+static void PreparationErrorsFollowSelectedLanguage()
+{
+    var source = new FakePreparationSource([new QueueItemSnapshot("a", "A.pdf", "ready", "Ready")]);
+    source.Diagnostics = ["A.pdf changed after queue preflight. Reimport the source before preparing; no final artifact was created."];
+    var viewModel = new DesktopShellViewModel(source, new FakeSettingsSource(), source,
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource());
+    viewModel.SetLanguage("zh-CN");
+    viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
+    Assert.Contains("源文件在队列预检后发生变化", viewModel.OperationError);
+    Assert.Contains("未创建最终文件", viewModel.OperationError);
+
+    viewModel.PageRange = "bad";
+    viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
+    Assert.Contains("请输入页码范围", viewModel.OperationError);
+}
+
 static void RecipeDuplexRequestChangesCompiledLayout()
 {
     var root = Path.Combine(Path.GetTempPath(), "paperbatch-recipe-duplex-" + Guid.NewGuid().ToString("N"));
@@ -809,6 +826,7 @@ sealed class FakePreparationSource(IReadOnlyList<QueueItemSnapshot> items) : IQu
     public PrintSettings? Settings { get; private set; }
     public PaperBatch.Core.Layout.LayoutOptions? Options { get; private set; }
     public PaperBatch.Core.Recipes.JobRecipe? Recipe { get; private set; }
+    public IReadOnlyList<string> Diagnostics { get; set; } = ["test capture"];
     public int PrepareCalls { get; private set; }
     public List<string> InvalidatedIds { get; } = [];
     public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => items;
@@ -820,7 +838,7 @@ sealed class FakePreparationSource(IReadOnlyList<QueueItemSnapshot> items) : IQu
         Settings = requestedSettings;
         Options = layoutOptions;
         Recipe = recipe;
-        return Task.FromResult(new PreparedArtifactResult(null, null, ["test capture"], false));
+        return Task.FromResult(new PreparedArtifactResult(null, null, Diagnostics, false));
     }
     public void RegisterPreparedRun(string queueItemId, PreparedRun run) { }
     public void InvalidatePreparedRun(string queueItemId) => InvalidatedIds.Add(queueItemId);

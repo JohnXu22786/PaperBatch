@@ -160,7 +160,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         try { ranges = ParsePageRange(PageRange); }
         catch (InvalidOperationException exception)
         {
-            OperationError = exception.Message;
+            OperationError = LocalizePreparationError(exception.Message);
             return;
         }
         var settings = new PrintSettings(RequestedCopies, _requestedColorMode, duplex, media, orientation, scaling);
@@ -168,7 +168,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
             Duplex: duplex != DuplexMode.Simplex, Fit: scaling == ScalingMode.ActualSize ? FitMode.ActualSize : FitMode.ShrinkToFit,
             SheetSize: size, Ranges: ranges);
         var result = await source.PrepareQueueAsync(settings, options, _activeRecipe, cancellationToken).ConfigureAwait(true);
-        OperationError = result.Succeeded ? null : string.Join(" ", result.Diagnostics);
+        OperationError = result.Succeeded ? null : LocalizePreparationError(string.Join(" ", result.Diagnostics));
         if (result.Succeeded) await RefreshSelectedItemAsync().ConfigureAwait(true);
         OnPropertyChanged(nameof(PrepareLabel));
         OnPropertyChanged(nameof(PreparationResolutionNote));
@@ -184,6 +184,22 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
             throw new InvalidOperationException("Enter a page range such as 1-5, or leave it blank to include every page.");
         var end = parts.Length == 2 ? int.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture) : first;
         return [new PageRange(first, end)];
+    }
+
+    private string LocalizePreparationError(string message)
+    {
+        if (!IsChinese) return message;
+        if (message.Contains("changed after queue preflight", StringComparison.Ordinal))
+            return "源文件在队列预检后发生变化。请重新导入后再准备；未创建最终文件。";
+        if (message.Contains("Per-file device requests resolve differently", StringComparison.Ordinal))
+            return "不同文件的设备请求不一致。当前准备运行模型要求每个兼容分段使用单一设备配置，且此界面无法验证逐文件设备设置；未创建文件。";
+        if (message.Contains("Enter a page range such as", StringComparison.Ordinal))
+            return "请输入页码范围，例如 1-5；留空则包含所有页面。";
+        if (message.Contains("requested media is not supported", StringComparison.Ordinal))
+            return "请求的纸张尺寸不受桌面布局控件支持；未创建文件。";
+        if (message.Contains("recipe rules support only PDF, JPEG, and PNG", StringComparison.Ordinal))
+            return "配方规则仅支持 PDF、JPEG 和 PNG 文件。";
+        return "准备失败。请检查来源、预检状态和请求设置后重试。详细信息：" + message;
     }
 
     private void InvalidatePreparedQueue()
