@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
+using System.Text.Json;
 using PaperBatch.Desktop;
 using PaperBatch.Core.Intake;
 using PaperBatch.Core.Rendering;
@@ -11,6 +12,7 @@ var tests = new (string Name, Action Run)[]
     ("selection refreshes preview, settings, and preflight from presentation sources", SelectionRefreshesPresentationSnapshots),
     ("navigation changes the active section", NavigationChangesTheActiveSection),
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
+    ("cancelled renderer batch releases every captured snapshot", CancelledRendererBatchReleasesEverySnapshot),
     ("file picker reports all skipped and mixed local selections", FilePickerClassifiesSkippedSelections),
     ("headless shell identifies demo data and has no print action", HeadlessShellIsExplicitlyDemoOnly),
     ("production presentation exposes unavailable production capabilities without demo rows", ProductionPresentationIsExplicitlyUnavailable),
@@ -92,6 +94,65 @@ static void SourceIntakeErrorsRemainVisibleAndAppend()
     {
         if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
     }
+}
+
+static void CancelledRendererBatchReleasesEverySnapshot()
+{
+    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-tests", Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    var cacheRoot = Path.Combine(root, "cache");
+    var firstPath = Path.Combine(root, "first.pdf");
+    var secondPath = Path.Combine(root, "second.pdf");
+    File.WriteAllBytes(firstPath, MinimalPdf());
+    File.WriteAllBytes(secondPath, MinimalPdf());
+    var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = cacheRoot });
+    using var cancellation = new CancellationTokenSource();
+    var renderer = new RendererCoordinator([new CancellingRendererAdapter(cancellation)]);
+    var sources = new ProductionPresentationSources(new SourceIntakeService(cache), renderer, cache, rendererAvailable: true);
+    try
+    {
+        Assert.Throws<OperationCanceledException>(() => sources.ImportAsync([firstPath, secondPath], cancellation.Token)
+            .GetAwaiter().GetResult());
+        var metadata = Directory.EnumerateDirectories(cacheRoot, "snap_*", SearchOption.TopDirectoryOnly)
+            .Select(directory => JsonDocument.Parse(File.ReadAllBytes(Path.Combine(directory, "metadata.json"))))
+            .ToArray();
+        Assert.Equal(2, metadata.Length);
+        Assert.True(metadata.All(document => !document.RootElement.GetProperty("Retained").GetBoolean()));
+        foreach (var document in metadata) document.Dispose();
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+static byte[] MinimalPdf()
+{
+    var objects = new[]
+    {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /ProcSet [/PDF] >> /Contents 4 0 R >>",
+        "<< /Length 0 >>\nstream\n\nendstream"
+    };
+    using var output = new MemoryStream();
+    var header = System.Text.Encoding.ASCII.GetBytes("%PDF-1.7\n");
+    output.Write(header);
+    var offsets = new List<long> { 0 };
+    foreach (var item in objects)
+    {
+        var objectNumber = offsets.Count;
+        offsets.Add(output.Position);
+        var bytes = System.Text.Encoding.ASCII.GetBytes($"{objectNumber} 0 obj\n{item}\nendobj\n");
+        output.Write(bytes);
+    }
+    var xref = output.Position;
+    using var writer = new StreamWriter(output, System.Text.Encoding.ASCII, 1024, leaveOpen: true);
+    writer.Write("xref\n0 5\n0000000000 65535 f \n");
+    foreach (var offset in offsets.Skip(1)) writer.Write(offset.ToString("D10", System.Globalization.CultureInfo.InvariantCulture) + " 00000 n \n");
+    writer.Write($"trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+    writer.Flush();
+    return output.ToArray();
 }
 
 static void FilePickerClassifiesSkippedSelections()
@@ -312,11 +373,41 @@ static class Assert
         }
     }
 
+    public static void Throws<TException>(Action action) where TException : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (TException)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidOperationException($"Expected {typeof(TException).Name}, got {exception.GetType().Name}.", exception);
+        }
+        throw new InvalidOperationException($"Expected {typeof(TException).Name}, but no exception was thrown.");
+    }
+
     public static void Equal<T>(T expected, T actual)
     {
         if (!EqualityComparer<T>.Default.Equals(expected, actual))
         {
             throw new InvalidOperationException($"Expected '{expected}', got '{actual}'.");
         }
+    }
+}
+
+
+sealed class CancellingRendererAdapter(CancellationTokenSource cancellation) : IRendererAdapter
+{
+    public ValueTask<bool> CanRenderAsync(RenderRequest request, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(request.Format == SourceFormat.Pdf && request.ExecutionContext == RendererExecutionContext.BackgroundWorker);
+
+    public Task<RenderResult> RenderAsync(RenderRequest request, CancellationToken cancellationToken)
+    {
+        cancellation.Cancel();
+        return Task.FromResult(RenderResult.Unsupported("Cancellation cleanup fixture."));
     }
 }
