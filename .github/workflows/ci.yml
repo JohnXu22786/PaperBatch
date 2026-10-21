@@ -45,7 +45,13 @@ jobs:
           foreach ($notice in @('LICENSE', 'THIRD-PARTY-UI-NOTICES.md', 'THIRD-PARTY-CORE-NOTICES.md', 'DOTNET-THIRD-PARTY-NOTICES.txt')) {
             if (-not (Test-Path -LiteralPath (Join-Path 'artifacts/windows-x64-lite' $notice) -PathType Leaf)) { throw "Package notice missing: $notice" }
           }
-          if (-not (Test-Path 'artifacts/windows-x64-lite/PaperBatch-windows-x64-lite.zip')) { throw 'Package archive missing.' }
+          $archive = 'artifacts/windows-x64-lite/PaperBatch-windows-x64-lite.zip'
+          $checksum = "$archive.sha256"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw 'Package archive missing.' }
+          if (-not (Test-Path -LiteralPath $checksum -PathType Leaf)) { throw 'Package archive checksum missing.' }
+          $expected = (Get-Content -Raw $checksum).Trim() -split '\s+'
+          if ($expected.Count -ne 2 -or $expected[1] -ne (Split-Path -Leaf $archive)) { throw 'Package archive checksum file is malformed.' }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected[0]) { throw 'Package archive digest mismatch.' }
 
       - name: Upload unsigned development package
         uses: actions/upload-artifact@v4
