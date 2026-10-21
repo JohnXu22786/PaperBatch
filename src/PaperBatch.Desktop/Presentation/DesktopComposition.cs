@@ -517,8 +517,19 @@ internal sealed class ProductionPresentationSources :
             requestedSettings = sourceSettings[0];
         }
         else _resolutionSummaries = [];
+        // System.Text.Json cannot enumerate default ImmutableArray values. Make the
+        // wire representation explicit for both batch and per-document page ranges.
+        var wireLayoutOptions = layoutOptions with
+        {
+            Ranges = layoutOptions.Ranges.IsDefault ? [] : layoutOptions.Ranges
+        };
+        var wirePerItemLayoutSettings = perItemLayoutSettings?.Select(item => item with
+        {
+            Ranges = item.Ranges.IsDefault ? [] : item.Ranges
+        }).ToArray();
         var requestPayload = new { inputs = paths, sourceSha256 = paths.Select(input => input.ExpectedSha256).ToArray(),
-            requestedSettings, layoutOptions, perItemPrintSettings, perItemLayoutSettings };
+            requestedSettings, layoutOptions = wireLayoutOptions, perItemPrintSettings,
+            perItemLayoutSettings = wirePerItemLayoutSettings };
         var requestBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(requestPayload);
         var idempotencyKey = Convert.ToHexString(SHA256.HashData(requestBytes)).ToLowerInvariant();
         var response = await SendCoordinatorRequestAsync("desktop.prepare", idempotencyKey,
