@@ -146,9 +146,11 @@ public sealed class PreparedArtifactCoordinator(
             if (!layout.Succeeded)
                 return new(null, null, layout.Diagnostics.Select(diagnostic => diagnostic.Message).ToArray(), IsCancelled: false);
             var segments = new List<CompatibleSegment>();
-            foreach (var group in items.GroupAdjacentBy(item => item.PrintSettings))
+            var segmentedItems = items.Select((item, index) => (Item: item,
+                LayoutSettings: perItemLayoutSettings is null ? null : perItemLayoutSettings[index]));
+            foreach (var group in segmentedItems.GroupAdjacentBy(entry => (entry.Item.PrintSettings, entry.LayoutSettings)))
                 segments.Add(new CompatibleSegment("segment_" + segments.Count.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    segments.Count, group.Select(item => item.ItemId), "layout-v1", group[0].PrintSettings));
+                    segments.Count, group.Select(entry => entry.Item.ItemId), "layout-v1", group[0].Item.PrintSettings));
             var finalId = "run_" + Guid.NewGuid().ToString("N");
             var fingerprint = ComputeFingerprint(items, printSettings, layoutOptions, perItemLayoutSettings);
             using var composedPdf = new MemoryStream();

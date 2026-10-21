@@ -8,12 +8,11 @@ internal static class LayoutTests
         Assert.Equal("NoDocuments", LayoutCompiler.Compile([], new()).Diagnostics[0].Code);
         Assert.Equal("InvalidRange", LayoutCompiler.Compile([Doc("a", 2)], new(Ranges: [new(0, 1)])).Diagnostics[0].Code);
         var perDocumentRange = LayoutCompiler.Compile([
-            new LayoutDocument("first", [new PageSize(612, 792)], "Letter", settings: new LayoutDocumentSettings(Ranges: [new(1, 2)]), sourceName: "first.pdf"),
+            new LayoutDocument("first", [new PageSize(612, 792)], "Letter", settings: new LayoutDocumentSettings(Ranges: [new(1, 1)]), sourceName: "first.pdf"),
             new LayoutDocument("second", [new PageSize(612, 792), new PageSize(612, 792)], "Letter", settings: new LayoutDocumentSettings(Ranges: [new(1, 3)]), sourceName: "second.pdf")
         ], new());
         Assert.Equal("InvalidRange", perDocumentRange.Diagnostics[0].Code);
-        Assert.Contains("second.pdf", perDocumentRange.Diagnostics[0].Message);
-        Assert.Contains("valid pages are 1-2", perDocumentRange.Diagnostics[0].Message);
+        Assert.Contains("Page range 1-3 for second.pdf is invalid; valid pages are 1-2.", perDocumentRange.Diagnostics[0].Message);
         Assert.Equal("InvalidRange", LayoutCompiler.Compile([Doc("a", 2)], new(Ranges: new PageRange[] { null! }.ToImmutableArray())).Diagnostics[0].Code);
         Assert.Equal("InvalidPageSize", LayoutCompiler.Compile([new LayoutDocument("a", new PageSize[] { null! }, "Letter")], new()).Diagnostics[0].Code);
         Assert.Equal("InvalidDocument", LayoutCompiler.Compile([new LayoutDocument("empty", Array.Empty<PageSize>(), "Letter")], new()).Diagnostics[0].Code);
