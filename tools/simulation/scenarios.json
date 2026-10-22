@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "outcomes": ["passed", "failed", "blocked", "unsupported", "not_run"],
+  "lanes": {
+    "linux": {
+      "scenarioId": "ipp.fake_loopback_endpoint.linux_runner_python_http_client.smoke",
+      "client": "python_stdlib_http_client_on_linux_runner",
+      "evidenceLimit": "Synthetic loopback request/response contract only; does not invoke CUPS, PaperBatch, a printer, or paper output."
+    },
+    "windows": {
+      "scenarioId": "ipp.fake_loopback_endpoint.windows_runner_python_http_client.smoke",
+      "client": "python_stdlib_http_client_on_windows_runner",
+      "evidenceLimit": "Synthetic loopback request/response contract only; does not invoke Winspool, PaperBatch, a printer, or paper output."
+    },
+    "macos": {
+      "scenarioId": "ipp.fake_loopback_endpoint.macos_runner_python_http_client.smoke",
+      "client": "python_stdlib_http_client_on_macos_runner",
+      "evidenceLimit": "Synthetic loopback request/response contract only; does not invoke macOS CUPS or PaperBatch. Protocol interoperability is not PaperBatch macOS support and does not prove physical output."
+    }
+  },
+  "nativeOfficeWps": {
+    "scenarioId": "office_wps.native_runner.provisioning_stub",
+    "outcome": "blocked",
+    "reason": "No trusted licensed disposable Office/WPS runner is provisioned for this unit."
+  }
+}
