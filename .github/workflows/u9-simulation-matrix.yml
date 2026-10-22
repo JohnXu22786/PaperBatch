@@ -1,0 +1,92 @@
+name: U9 simulation matrix
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-synthetic-smoke:
+    name: Linux synthetic IPP smoke
+    runs-on: ubuntu-24.04
+    outputs:
+      report: ${{ steps.run.outputs.report }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Run Linux runner HTTP scenario
+        id: run
+        run: python tools/simulation_matrix.py --lane linux --output simulation-report.json --publish-output
+
+  windows-synthetic-smoke:
+    name: Windows synthetic IPP smoke
+    runs-on: windows-2022
+    outputs:
+      report: ${{ steps.run.outputs.report }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Run Windows runner HTTP scenario
+        id: run
+        run: python tools/simulation_matrix.py --lane windows --output simulation-report.json --publish-output
+
+  macos-synthetic-smoke:
+    name: macOS synthetic IPP smoke
+    runs-on: macos-14
+    outputs:
+      report: ${{ steps.run.outputs.report }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Run macOS runner HTTP scenario
+        id: run
+        run: python tools/simulation_matrix.py --lane macos --output simulation-report.json --publish-output
+
+  aggregate-simulation-evidence:
+    name: Record lane outcomes and report availability
+    if: always()
+    needs: [linux-synthetic-smoke, windows-synthetic-smoke, macos-synthetic-smoke]
+    runs-on: ubuntu-24.04
+    env:
+      U9_LINUX_REPORT: ${{ needs.linux-synthetic-smoke.outputs.report }}
+      U9_LINUX_RESULT: ${{ needs.linux-synthetic-smoke.result }}
+      U9_WINDOWS_REPORT: ${{ needs.windows-synthetic-smoke.outputs.report }}
+      U9_WINDOWS_RESULT: ${{ needs.windows-synthetic-smoke.result }}
+      U9_MACOS_REPORT: ${{ needs.macos-synthetic-smoke.outputs.report }}
+      U9_MACOS_RESULT: ${{ needs.macos-synthetic-smoke.result }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Aggregate passed, unavailable, and blocked outcomes
+        run: python tools/simulation_matrix.py --aggregate --output simulation-report.json
+      - name: Upload bounded aggregate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: u9-simulation-aggregate
+          path: simulation-report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  simulation-unit-tests:
+    name: Scenario report contract tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Run focused report and loopback tests
+        run: python -m unittest tests.test_simulation_matrix

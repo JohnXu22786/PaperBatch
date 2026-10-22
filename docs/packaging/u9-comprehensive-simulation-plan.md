@@ -1,0 +1,69 @@
+# Approved U9 comprehensive simulation plan (2026-10-23)
+
+## Authority and user direction
+The user explicitly requested: “把plan写下来成文件，然后开始执行”. This approves recording the expanded plan and executing it through PLAN2AUTO. Preserve prior U9 scope and keep U10 real-user trials deferred. Do not make paid commitments or assert simulated evidence as physical/native evidence.
+
+## Baseline
+Latest clean main: `8d9760b6b4ecf32de89dad908254dfdad8952c18`. Existing U9 matrix marks Q2/Q3/Q5 partial. Windows hosted package session uses same package bytes for two trees; Linux Docker lab covers one CUPS/IPPEve protocol endpoint; product backend is Windows GDI/Winspool. Existing synthetic LibreOffice and pinned PDFium evidence remains available.
+
+## Goal
+Write this full plan to `docs/packaging/u9-comprehensive-simulation-plan.md`, then execute the ordered units below as separate PLAN2AUTO units. Revalidate plan after each merge; skip only work already demonstrably satisfied. Keep source repo public AGPL-3.0-only and owner-only. No Office/WPS/Windows license, printer, driver, signing certificate, cloud resource, or CI quota purchase. Use already licensed/available resources only. Keep U10 out of scope.
+
+## Test environments and security
+1. GitHub-hosted Windows Server 2022/2025 runners (only labels currently available and within included quota): package/build, app-data isolation, CLI/headless process, read-only Winspool inventory, injectable virtual spooler contract. They are not Windows client-clean-PC evidence.
+2. Ubuntu 22.04/24.04 runners if available within included quota: native CUPS client and Docker CUPS/IPPEve receiver with exact pins, loopback/network isolation, no host queue/path/device mounts.
+3. macOS 14/15 runner only if currently offered and within included quota: macOS CUPS/IPP client protocol interoperability to isolated loopback receiver. This is protocol testing, not PaperBatch macOS support; do not install or access real printers.
+4. Optional licensed Office/WPS lane: isolated Windows 11 VM snapshot(s) only if already legitimately licensed and accessible. Separate Office-only, WPS-only and coexistence snapshots; pin exact build/channel/edition/bitness and activation state; reset user profile/data between runs. Prefer real interactive desktop/UI session for actual software tests. Do not automate Microsoft Office through unsupported unattended server-side COM. Never put license credentials in repo or logs.
+5. Public-repository safety: self-hosted Office/WPS runner is never eligible for `pull_request`/fork code. It must require trusted default-branch/manual dispatch, verify checkout is protected `main`, use a dedicated ephemeral/snapshotted runner, have no repository secrets, and use minimum/allowlisted network. If no safe licensed VM exists, run stubs in ordinary CI and report the native suite as blocked; do not purchase or imply it passed.
+6. All simulation fixtures are synthetic; logs are bounded/redacted. Test results distinguish passed, failed, blocked, unsupported and not run. No default-printer mutation or actual physical print job.
+
+## Validation matrix
+
+### A. Product workflow and documents
+- Batch selection/order, supported PDF/JPEG/PNG/OOXML inputs, duplicate/unsupported/corrupt/encrypted inputs, page ranges, copies/collation, orientation/media/duplex/N-up, covers/separators, page count and split boundaries; use deterministic fixture manifests and output hashes/structural checks.
+- Source immutability, bounded conversion, profile/process ownership, timeout/cancel, no silent fallback, no first-run download, runtime digest mismatch rejection.
+- Existing 90-file LibreOffice corpus and pinned PDFium proof remain regression evidence. Add focused gaps only; never call these human fidelity or Office/WPS compatibility.
+- Office/WPS actual lane: launch/open/export/close/restart for representative DOCX/XLSX/PPTX samples; save-as-PDF output structure, application process ownership, version/build and profile isolation; Office-only, WPS-only, then coexistence. UI/interactive observations count only for exact VM snapshot/software builds. Also simulate missing engine, hung process, malformed export, crash and user-owned process protection with fake executables in ordinary CI.
+
+### B. IPP endpoint/client matrix
+- Shared contract suite against: (i) pinned OpenPrinting CUPS `ippeveprinter`; (ii) isolated CUPS daemon/virtual queue where safely available; (iii) deterministic fake IPP endpoint exposing capability/error profiles.
+- Clients/runners: Linux native CUPS commands/API and raw IPP tools; Windows product GDI/Winspool adapter contract with injectable fake spooler, plus Windows IPP class queue only if safely available at runtime; macOS system CUPS client against loopback endpoint when runner/quota allows. Do not claim unsupported app platforms from protocol-only tests.
+- Cover URI/discovery where testable, IPP 1.1/2.0/2.1/2.2 profiles, Get-Printer-Attributes, document formats, media/resolution/color/duplex/trays, unknown/contradictory capability values, job submit/query/cancel, auth challenge/rejection, TLS valid/expired/name mismatch, busy/offline/out-of-paper, malformed response, timeout, disconnect, partial upload, stale job ID/reuse, server restart, duplicate request and recovery query.
+- Assert endpoint/client-specific differences are reported explicitly. IPP success, receiver acceptance or spooler `completed` never means physical pages.
+
+### C. Windows package/session/upgrade
+- Verify lock hashes, SBOM/license notices, package file set/hashes/size, archive sidecars, rooted/traversal/duplicate/case-collision/ADS/device/reparse paths, symlink, tamper, extraction, no unapproved executables, clean temp extraction and no writes beyond approved roots.
+- Separate app data/cache/temp in an ephemeral runner; run package doctor/help/startup and process exit with outbound access blocked; snapshot default printer and relevant registry associations before/after; inspect bounded filesystem/network observations.
+- Compare two real source revisions/packages (current previous baseline and candidate), not duplicate copies. Seed old schema/recipe/job-state fixtures; upgrade/rollback/reopen; inject migration failure and assert atomicity/data preservation/no automatic resubmission.
+- Do not invent a supported installer/updater contract. If a previous released package or safe isolated migration route does not exist, test the available schema migration semantics and retain a precise partial marker.
+
+### D. Failure, security and resource bounds
+- Kill coordinator/worker at durable intent, before OS acceptance, after acceptance/before receipt, during cancellation and after restart; verify accepted/rejected/unknown state handling and no ambiguous auto-resubmit.
+- Exercise disk-full/quota, permissions/locks, corrupted DB/PDF/cache, missing queue, JobId reuse, worker crash, low memory, concurrent submit/cancel, timeouts and cleanup with fixed ceilings. Add malicious archive/document resource bombs, path traversal, duplicate entries and sensitive-data redaction.
+- Record test load, thresholds, host and reason; do not imply power-loss or arbitrary fleet scale.
+
+### E. Evidence, package and release boundary
+- Each run emits a machine-readable report keyed to commit, runner/image, pinned tool/software versions and scenario IDs; retain only synthetic/redacted artifacts with a bounded retention period.
+- Compare direct/transitive locked dependency inventories and package notices; produce SPDX/CycloneDX only if exact metadata is verified, otherwise report unknowns rather than guess.
+- Produce a final limited-beta decision listing pass/fail/blocked/partial. Full offline package requires verified redistribution rights/hashes. Public signed release requires signing/provenance prerequisites. No release/tag or paid purchase unless already covered by authorized gates.
+
+## Ordered PLAN2AUTO execution units
+1. `u9_simulation_matrix_ci`: add this plan file and a machine-readable scenario manifest/report conventions; add safe CI matrix scaffolding for Linux/Windows/macOS protocol lanes and the gated trusted-only Office/WPS lane. No Office/WPS runner should execute fork PRs. Acceptance: YAML validation, a small representative scenario per available OS, explicit unavailable/quota reasons; docs match runnable CI.
+2. `u9_package_session_coverage`: harden Windows clean-session/package observation, process/network/default printer/registry checks and inventory adversarial cases. Acceptance: exact package verifier plus hosted Windows run; no prohibited host mutations.
+3. `u9_upgrade_migration_simulation`: compare prior baseline and candidate package trees, old schema/recipe/job fixtures, atomic migration failure and rollback/no-resubmit. Acceptance: actual distinct artifacts and state assertions; truthful partial only if no safe previous lifecycle can be exercised.
+4. `u9_ipp_cross_platform_matrix`: shared client/server contract suite across Linux CUPS, Windows fake/native-safe spooler/IPP capabilities, macOS CUPS protocol lane; extend endpoint variants and scenario reports. Acceptance: available CI jobs run all applicable cases and accurately label protocol vs OS integration.
+5. `u9_office_wps_lab`: implement safe scripted interactive test harness and trusted-only runner contract for exact licensed Office/WPS VM snapshots; ordinary CI covers stubs. Acceptance: run real lane only if qualifying existing license/VM is available; otherwise record a specific blocked result and leave all native compatibility claims open; no paid purchase.
+6. `u9_document_pipeline_simulation`: fill synthetic corpus/layout/engine failure gaps, source immutability, runtime path/hash, no fallback, metrics. Acceptance: all fixture result manifests deterministic, existing LO/PDFium suites green.
+7. `u9_fault_security_stress`: lifecycle crash/restart/cancel/idempotency, resource quotas, malicious inputs, privacy/log and concurrency. Acceptance: deterministic bounded fault matrix, no ambiguous automatic resubmit.
+8. `u9_final_evidence_beta_boundary`: consolidate CI artifacts, license inventory, per-domain limits and limited-beta decision; reconcile release checklist. Acceptance: complete exact-commit report, all available CI green, two consecutive independent full-diff reviews per final PR, no U10, no unsupported public-release claims.
+
+Units are dispatched in the stated order; each gets an isolated linked worktree/branch, Coding worker, two clean full-diff review rounds and exact push+PR CI. Merge one PR at a time through PLAN2AUTO. Do not stop for routine fixes or runner variability; use CI and retries for concrete transient failures. Stop for user input only if a required new paid resource/licence, public signing/release commitment, material product-design decision, or inaccessible user-owned licensed VM is necessary.
+
+## Unit 1 delivery status: simulation manifest and hosted smoke lanes
+
+This status describes the Unit 1 workflow added with this plan. The approved matrix above remains the roadmap; its future scenarios are not claims of completed evidence.
+
+- `.github/workflows/u9-simulation-matrix.yml` runs the synthetic contract smoke on `ubuntu-24.04`, `windows-2022`, and `macos-14` for pull requests, pushes to `main`, and manual dispatch. The scenario IDs distinguish the fake loopback endpoint and OS runner; every lane explicitly names its actual client as Python standard-library HTTP. These checks do not invoke PaperBatch, CUPS, Winspool, a real printer, or paper output. macOS protocol-lane naming does not indicate PaperBatch macOS support.
+- Each runner report includes the commit, OS, runner name, runner image/version when exposed, Python version, scenario ID, outcome vocabulary, assertion evidence, and an explicit evidence limit. The always-run aggregator records each hosted job result and reconciles it with the scenario outcome; a scenario marked passed cannot remain passed if its hosted job failed, and the aggregate CI check fails on failed/cancelled hosted jobs or malformed lane reports. Skipped lanes become `unsupported`, and lanes without a usable report become `not_run` with the observed job result and an availability/quota diagnostic. The aggregate preserves available per-runner provenance and is retained as a bounded 14-day CI artifact.
+- The ordinary hosted workflow emits `blocked` for the native Office/WPS runner stub because no licensed disposable runner is provisioned. This is not an Office/WPS test. No self-hosted runner job is enabled. Any future native job must be isolated to trusted protected-main or manual dispatch, validate the exact protected `main` checkout, use a disposable/snapshotted runner, receive no repository secrets, and use minimum allowlisted network; it must never run fork or `pull_request` code.
+- OS jobs run only when GitHub provides the configured hosted runner and quota. A skipped or unavailable job has no passed result; report that condition as `unsupported` or `not_run` when consolidating evidence.
