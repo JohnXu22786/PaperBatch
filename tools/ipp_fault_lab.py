@@ -240,12 +240,44 @@ def _single_print_job_request(document: bytes, printer_uri: str, request_id: int
     return ipp_message
 
 
+def _response_job_id(ipp_response: bytes) -> int | None:
+    if len(ipp_response) < 9:
+        return None
+    offset = 8
+    while offset < len(ipp_response):
+        value_tag = ipp_response[offset]
+        offset += 1
+        if value_tag == 0x03:
+            break
+        if value_tag <= 0x0F:
+            continue
+        if offset + 2 > len(ipp_response):
+            return None
+        name_length = int.from_bytes(ipp_response[offset : offset + 2], "big")
+        offset += 2
+        if offset + name_length + 2 > len(ipp_response):
+            return None
+        name = ipp_response[offset : offset + name_length]
+        offset += name_length
+        value_length = int.from_bytes(ipp_response[offset : offset + 2], "big")
+        offset += 2
+        if offset + value_length > len(ipp_response):
+            return None
+        value = ipp_response[offset : offset + value_length]
+        offset += value_length
+        if name == b"job-id" and value_tag == 0x21 and value_length == 4:
+            return int.from_bytes(value, "big")
+    return None
+
+
 def _attempt_single_print_job(
     proxy_port: int,
     receiver_port: int,
     document: bytes,
     timeout_seconds: int,
     request_id: int = 1,
+    diagnostics: list[str] | None = None,
+    job_ids: list[int] | None = None,
 ) -> bool:
     """Send one Print-Job over a raw socket so transport faults cannot trigger a library retry."""
     printer_uri = f"ipp://localhost:{receiver_port}/ipp/print"
@@ -262,15 +294,29 @@ def _attempt_single_print_job(
         with socket.create_connection(("127.0.0.1", proxy_port), timeout=_remaining_until(deadline)) as client:
             _send_until(client, header + ipp_body, deadline)
             _, status_code, response_body = _read_http_response(client, deadline=deadline)
-    except (OSError, ValueError, TimeoutError):
+    except (OSError, ValueError, TimeoutError) as error:
+        if diagnostics is not None:
+            diagnostics.append(f"request {request_id}: {type(error).__name__}")
         return False
+    if diagnostics is not None:
+        ipp_status = int.from_bytes(response_body[2:4], "big") if len(response_body) >= 4 else None
+        response_id = int.from_bytes(response_body[4:8], "big") if len(response_body) >= 8 else None
+        diagnostics.append(f"request {request_id}: HTTP {status_code}, IPP status {ipp_status}, response id {response_id}")
     if status_code != 200 or len(response_body) < 8:
         return False
-    return (
+    accepted = (
         response_body[:2] == b"\x02\x00"
         and int.from_bytes(response_body[2:4], "big") == 0
         and int.from_bytes(response_body[4:8], "big") == request_id
     )
+    if accepted and job_ids is not None:
+        job_id = _response_job_id(response_body)
+        if job_id is None:
+            if diagnostics is not None:
+                diagnostics.append(f"request {request_id}: accepted response omitted job-id")
+            return False
+        job_ids.append(job_id)
+    return accepted
 
 
 def _reset_socket(connection: socket.socket) -> None:
@@ -631,10 +677,23 @@ class LabRun:
             ) as proxy:
                 self.add_trace("proxy-ready", "one-shot bounded forwarding")
                 if self.scenario == "duplicate-submit":
-                    first = _attempt_single_print_job(proxy.port, receiver.port, synthetic_document, self.timeout_seconds, request_id=1001)
-                    second = _attempt_single_print_job(proxy.port, receiver.port, synthetic_document, self.timeout_seconds, request_id=1002)
+                    diagnostics: list[str] = []
+                    first_job_ids: list[int] = []
+                    first = _attempt_single_print_job(proxy.port, receiver.port, synthetic_document, self.timeout_seconds, request_id=1001, diagnostics=diagnostics, job_ids=first_job_ids)
+                    if first:
+                        deadline = time.monotonic() + self.timeout_seconds
+                        completed = False
+                        while time.monotonic() < deadline:
+                            state = self._run_ipptool(proxy.port, receiver.port, "query-job.test", first_job_ids[0])
+                            if state[0] == 0 and re.search(rb"job-state\s+\(enum\)\s*=\s*completed", state[1], re.IGNORECASE):
+                                completed = True
+                                break
+                            time.sleep(0.1)
+                        if not completed:
+                            raise RuntimeError("receiver did not complete the first duplicate-submit job before the bounded deadline")
+                    second = _attempt_single_print_job(proxy.port, receiver.port, synthetic_document, self.timeout_seconds, request_id=1002, diagnostics=diagnostics)
                     if not first or not second or proxy.counts["printJobRequests"] != 2:
-                        raise RuntimeError(f"duplicate submission fixture did not deliver two requests (first={first}, second={second}, counts={proxy.counts})")
+                        raise RuntimeError(f"duplicate submission fixture did not deliver two requests (first={first}, second={second}, counts={proxy.counts}, responses={diagnostics})")
                     self.add_trace("duplicate-delivered", "Print-Job")
                     return {
                         "simulationOnly": True,
