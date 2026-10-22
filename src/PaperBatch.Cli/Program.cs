@@ -4,6 +4,7 @@ using System.Text;
 using PaperBatch.Core.Recipes;
 using PaperBatch.Core.Watch;
 using PaperBatch.Core.Ipc;
+using PaperBatch.Core.Properties;
 
 if (CoordinatorProcessLauncher.IsHostMode(args))
 {
@@ -88,7 +89,7 @@ public sealed class PaperBatchCli
         Func<string, Stream>? openRecipeRead = null, Func<string, Stream>? createRecipeFile = null)
     {
         _coordinator = coordinator;
-        _recipeStoreDirectory = Path.GetFullPath(recipeStoreDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PaperBatch", "recipes"));
+        _recipeStoreDirectory = Path.GetFullPath(recipeStoreDirectory ?? Path.Combine(AppDataPaths.LocalApplicationData, "PaperBatch", "recipes"));
         _diagnosticSource = diagnosticSource;
         _openRecipeRead = openRecipeRead ?? (path => new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 16 * 1024, FileOptions.SequentialScan));
         _createRecipeFile = createRecipeFile ?? (path => new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None));

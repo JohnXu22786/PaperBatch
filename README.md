@@ -4,7 +4,7 @@ PaperBatch is an AGPL-3.0 project for preparing and printing ordered batches of 
 
 ## Windows x64 packaging prototype
 
-The current prototype builds an unsigned, self-contained Windows x64 lite shell package in CI. It intentionally excludes Office/WPS, LibreOffice, PDFium, fonts, and printer drivers; see [the packaging notes](docs/packaging/windows-x64-lite-prototype.md) for build steps, manifests, and limitations. It is not a full offline renderer or a stable/beta release.
+CI builds an unsigned, self-contained Windows x64 lite beta candidate. It intentionally excludes Office/WPS, LibreOffice, PDFium, fonts, and printer drivers; see [the packaging notes](docs/packaging/windows-x64-lite-prototype.md) and the [U9 qualification matrix](docs/packaging/u9-simulation-qualification.md) for build steps, manifests, simulation results, and limitations. It is not a signed or production release.
 
 ## U0 compatibility probe
 
@@ -88,3 +88,19 @@ The resettable Linux-side IPP Everywhere receiver and network-fault proxy use a 
 `PdfiumPageCompositionAdapter` consumes a successful immutable layout compilation and caller-provided source PDF bytes. It imports selected source pages into a private in-memory document, moves vector page objects into output faces using the compiled scale, rotation and target bounds, and verifies the serialized PDF can be reopened with the expected page count and dimensions. Blank faces, covers and separators are emitted as empty output pages. The adapter does not alter source files.
 
 The adapter accepts only an explicit PDFium runtime path and expected SHA-256 digest. It checks the digest and required exports before loading the library; the production shell does not search for or download a runtime. `PreparedArtifactCoordinator` uses the configured PDFium inspector to reject source PDFs with forms or annotations before composition. The lower-level adapter still requires the caller to mark each source `StaticPageContentVerified`; it does not independently inspect annotations or prove that assertion. Interactive forms and annotations are unsupported. The CI integration test uses a temporary, digest-pinned community build of PDFium `chromium/8111` and removes it after the run. That weekly build is unaffiliated with Google and Foxit and is not an independently attested upstream binary. The hosted Windows integration test has exercised this adapter against its digest-pinned community runtime; that result does not qualify a production PDFium distribution, settle product packaging or release selection, or establish general PDF compatibility. Those items remain open pending U9/G1 work.
+
+## U9 beta candidate
+
+The Windows x64 lite package is an **unsigned development beta candidate**, not an installer or production release. Download the `paperbatch-windows-x64-lite` artifact from a reviewed CI run, extract it into a user-writable folder, and launch `PaperBatch.Desktop.exe`. Check the source revision, package manifest, archive digest, and included notices first. Do not run elevated unless a separately reviewed task requires it.
+
+The package includes the self-contained .NET runtime and excludes LibreOffice, Microsoft Office, WPS Office, PDFium, printer drivers, and fonts. PDF preparation and preview that require PDFium remain unavailable until a separately obtained runtime is configured with both `PAPERBATCH_PDFIUM_RUNTIME_PATH` and the matching `PAPERBATCH_PDFIUM_RUNTIME_SHA256`. PaperBatch does not download or silently substitute that runtime. With PDFium configured, explicitly select a supported queue before printing; Windows spooler completion is not proof of physical pages.
+
+See the [U9 simulation qualification matrix](docs/packaging/u9-simulation-qualification.md), [beta compatibility limits](docs/compatibility/u9-beta-compatibility.md), and [beta release checklist](docs/packaging/beta-release-checklist.md). Hosted Windows/Linux tests, synthetic documents, pinned renderer runs, and CUPS/IPP simulations do not establish clean consumer-PC installation, Microsoft Office/WPS interoperability, OEM-driver compatibility, physical output, or user adoption. U10 real-user trial remains deferred; G1, G3 physical, and G4 real-use evidence remain open.
+
+## Data, backup, and troubleshooting
+
+Application state and recipes live under the current user's application data directory. Source documents are read as inputs and are not moved or deleted by scan/preparation flows. Back up user data before replacing package files. There is no supported installer, automatic updater, or general historical rollback contract; switching extracted package directories is not a supported upgrade. For an unavailable PDF operation, check the configured runtime path and independently trusted digest. For unsupported Office/WPS files, follow the review-required result rather than invoking automatic conversion. For uncertain submission status, inspect the persisted job and selected queue before deciding whether a retry is safe.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for locked restore and test commands, synthetic fixture requirements, privacy limits, and contribution guidance. Dependency inventories live under [docs/dependencies](docs/dependencies/). The package carries its AGPL-3.0-only license and runtime/dependency notices; this metadata is not legal advice or a binary-level SBOM.

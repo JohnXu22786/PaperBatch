@@ -19,7 +19,7 @@ case "$mode" in
 esac
 
 image=paperbatch-ipp-lab:local
-docker build --pull --platform linux/amd64 \
+docker build --pull --network host --platform linux/amd64 \
     --file "$repo_root/tools/ipp-lab/Dockerfile" \
     --tag "$image" \
     "$repo_root"

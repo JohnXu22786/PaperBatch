@@ -20,6 +20,10 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
       - name: Publish lite package and provenance manifest
         shell: pwsh
         run: ./tools/package_windows_x64.ps1
@@ -52,6 +56,16 @@ jobs:
           $expected = (Get-Content -Raw $checksum).Trim() -split '\s+'
           if ($expected.Count -ne 2 -or $expected[1] -ne (Split-Path -Leaf $archive)) { throw 'Package archive checksum file is malformed.' }
           if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected[0]) { throw 'Package archive digest mismatch.' }
+
+      - name: Verify archive paths, payload, extraction, and tamper rejection
+        shell: pwsh
+        run: |
+          python -m unittest tests.test_package_verifier
+          python tools/verify_windows_package.py artifacts/windows-x64-lite artifacts/windows-x64-lite/PaperBatch-windows-x64-lite.zip
+
+      - name: Simulate isolated startup, offline behavior, and package tree rollback
+        shell: pwsh
+        run: ./tools/simulate_windows_package_session.ps1 -PackageDirectory artifacts/windows-x64-lite -PackageArchive artifacts/windows-x64-lite/PaperBatch-windows-x64-lite.zip
 
       - name: Upload unsigned development package
         uses: actions/upload-artifact@v4
@@ -410,3 +424,11 @@ jobs:
           name: windows-pdfium-community-proof
           path: ${{ runner.temp }}/paperbatch-pdfium-proof/report.json
           if-no-files-found: warn
+
+  ipp-protocol-fault-lab:
+    name: Linux CUPS and IPP protocol simulation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run pinned CUPS/IPP fault lab
+        run: tools/run_ipp_fault_lab.sh test

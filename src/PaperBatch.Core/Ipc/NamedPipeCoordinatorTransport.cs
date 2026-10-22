@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Collections.Concurrent;
+using PaperBatch.Core.Properties;
 
 namespace PaperBatch.Core.Ipc;
 
@@ -261,7 +262,7 @@ public sealed class CoordinatorInstanceLease : IDisposable
     public static CoordinatorInstanceLease? TryAcquire(string applicationName = "PaperBatch")
     {
         var pipeName = NamedPipeLocalCoordinatorTransport.CreateCurrentUserPipeName(applicationName);
-        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PaperBatch", "CoordinatorLocks");
+        var root = Path.Combine(AppDataPaths.LocalApplicationData, "PaperBatch", "CoordinatorLocks");
         if (string.IsNullOrWhiteSpace(root)) throw new IOException("The current user's local application data directory is unavailable.");
         if (!OperatingSystem.IsWindows())
         {

@@ -39,8 +39,12 @@ package and its CI do not establish clean-PC installation, Office/WPS
 compatibility, a verified printer route, or physical output.
 
 The binary is unsigned. No paid signing certificate or signing service is
-used. This is a CI verification artifact, not a stable or beta release. No
-installer, upgrade, migration, or rollback behavior is claimed.
+used. This is an unsigned development beta candidate, not a signed or production
+release. No installer or automatic updater is provided. CI includes a
+same-build package-directory swap simulation; it does not establish historical
+version migration or a supported rollback contract. See
+[u9-simulation-qualification.md](u9-simulation-qualification.md) for the full
+qualification matrix and remaining gaps.
 
 The UI and core dependency license inventories in `docs/dependencies/` are
 metadata reviews for the locked NuGet graphs; the package also carries the

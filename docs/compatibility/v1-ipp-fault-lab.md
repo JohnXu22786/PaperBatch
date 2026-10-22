@@ -37,11 +37,15 @@ All faults apply once to the first `Print-Job`. They are deterministic and bound
 | `delayed-response` | Forward the job, read the receiver response, then hold it beyond the client timeout. | `uncertain-timeout` |
 | `connection-reset` | Forward the job and reset the client connection after the receiver responds. | `uncertain-transport` |
 | `unavailable-503` | Return HTTP 503 without forwarding the request. The client cannot prove server-side non-acceptance from the response alone. | `uncertain-http` |
+| `auth-rejected` | Return HTTP 401 with a synthetic Basic challenge before forwarding the request; credentials are never supplied or recorded. | `rejected-auth` |
+| `receiver-restart` | Forward the job and receive the receiver response, restart the receiver process on the same loopback port, then reset the client response. A health query is issued after restart. | `uncertain-transport` |
 | `malformed-ipp` | Forward the job, then replace the IPP response body with a malformed one-byte response. | `uncertain-protocol` |
 | `partial-upload` | Forward only half of the bounded IPP request body and reset the upstream connection. | `uncertain-transport` |
 
-For each fault the JSON result records one `Print-Job` request, the expected uncertain classification, and a successful subsequent `Get-Printer-Attributes` recovery query. The health query shows the protocol endpoint can respond again; it does not determine whether an uncertain print job completed. Results omit client addresses, hostnames, local usernames, raw request/response bodies, and full command output.
+| `duplicate-submit` | Send the same synthetic PDF twice as two independent `Print-Job` requests and record both receiver acceptances. | `duplicate-accepted` |
+
+For each fault the JSON result records one attempted `Print-Job`, its expected classification, and a successful subsequent `Get-Printer-Attributes` recovery query. The auth-rejected case is a synthetic HTTP challenge, not validation of credentials or an authenticated IPP server. The health query shows the protocol endpoint can respond again; it does not determine whether an uncertain print job completed. Results omit client addresses, hostnames, local usernames, raw request/response bodies, and full command output.
 
 ## Evidence limits
 
-The receiver and proxy validate IPP/HTTP request and response behavior only. They do not exercise a Windows print pipeline, a native or OEM driver, Office/WPS automation, actual queue routing, device state, or paper output. A successful protocol response is not proof of rendering fidelity, page count, physical output, or user-visible print completion. Treat every result as protocol-emulation evidence and keep G1 open until its native and physical requirements are met.
+The receiver and proxy validate IPP/HTTP request and response behavior only. The restart case demonstrates receiver recovery but not durable job persistence across process restart. The duplicate case demonstrates that two independent requests can be accepted; it does not prove application retry behavior or protocol-level idempotency. Partial physical completion cannot be established by this protocol lab. They do not exercise a Windows print pipeline, a native or OEM driver, Office/WPS automation, actual queue routing, device state, or paper output. A successful protocol response is not proof of rendering fidelity, page count, physical output, or user-visible print completion. Treat every result as protocol-emulation evidence and keep G1 open until its native and physical requirements are met.

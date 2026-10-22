@@ -36,10 +36,12 @@ FAULT_CLASSIFICATIONS = {
     "delayed-response": "uncertain-timeout",
     "connection-reset": "uncertain-transport",
     "unavailable-503": "uncertain-http",
+    "auth-rejected": "rejected-auth",
+    "receiver-restart": "uncertain-transport",
     "malformed-ipp": "uncertain-protocol",
     "partial-upload": "uncertain-transport",
 }
-SCENARIOS = ("success", *FAULT_CLASSIFICATIONS)
+SCENARIOS = ("success", "duplicate-submit", *FAULT_CLASSIFICATIONS)
 OPERATION_NAMES = {
     0x0002: "Print-Job",
     0x0005: "Create-Job",
@@ -224,18 +226,48 @@ def _ipp_attribute(value_tag: int, name: str, value: bytes) -> bytes:
     )
 
 
-def _single_print_job_request(document: bytes, printer_uri: str) -> bytes:
+def _single_print_job_request(document: bytes, printer_uri: str, request_id: int = 1) -> bytes:
     operation_attributes = b"\x01"
     operation_attributes += _ipp_attribute(0x47, "attributes-charset", b"utf-8")
     operation_attributes += _ipp_attribute(0x48, "attributes-natural-language", b"en")
     operation_attributes += _ipp_attribute(0x45, "printer-uri", printer_uri.encode("ascii"))
     operation_attributes += _ipp_attribute(0x42, "requesting-user-name", b"paperbatch-lab")
-    operation_attributes += _ipp_attribute(0x42, "job-name", b"paperbatch-synthetic-print")
+    operation_attributes += _ipp_attribute(0x42, "job-name", f"paperbatch-synthetic-print-{request_id}".encode("ascii"))
     operation_attributes += _ipp_attribute(0x49, "document-format", b"application/pdf")
-    ipp_message = b"\x02\x00\x00\x02\x00\x00\x00\x01" + operation_attributes + b"\x03" + document
+    ipp_message = b"\x02\x00\x00\x02" + struct.pack(">I", request_id) + operation_attributes + b"\x03" + document
     if len(ipp_message) > MAX_REQUEST_BYTES:
         raise ValueError("IPP request body exceeds the configured limit")
     return ipp_message
+
+
+def _response_job_id(ipp_response: bytes) -> int | None:
+    if len(ipp_response) < 9:
+        return None
+    offset = 8
+    while offset < len(ipp_response):
+        value_tag = ipp_response[offset]
+        offset += 1
+        if value_tag == 0x03:
+            break
+        if value_tag <= 0x0F:
+            continue
+        if offset + 2 > len(ipp_response):
+            return None
+        name_length = int.from_bytes(ipp_response[offset : offset + 2], "big")
+        offset += 2
+        if offset + name_length + 2 > len(ipp_response):
+            return None
+        name = ipp_response[offset : offset + name_length]
+        offset += name_length
+        value_length = int.from_bytes(ipp_response[offset : offset + 2], "big")
+        offset += 2
+        if offset + value_length > len(ipp_response):
+            return None
+        value = ipp_response[offset : offset + value_length]
+        offset += value_length
+        if name == b"job-id" and value_tag == 0x21 and value_length == 4:
+            return int.from_bytes(value, "big")
+    return None
 
 
 def _attempt_single_print_job(
@@ -243,10 +275,13 @@ def _attempt_single_print_job(
     receiver_port: int,
     document: bytes,
     timeout_seconds: int,
+    request_id: int = 1,
+    diagnostics: list[str] | None = None,
+    job_ids: list[int] | None = None,
 ) -> bool:
     """Send one Print-Job over a raw socket so transport faults cannot trigger a library retry."""
     printer_uri = f"ipp://localhost:{receiver_port}/ipp/print"
-    ipp_body = _single_print_job_request(document, printer_uri)
+    ipp_body = _single_print_job_request(document, printer_uri, request_id)
     header = (
         f"POST /ipp/print HTTP/1.1\r\n"
         f"Host: 127.0.0.1:{proxy_port}\r\n"
@@ -259,15 +294,29 @@ def _attempt_single_print_job(
         with socket.create_connection(("127.0.0.1", proxy_port), timeout=_remaining_until(deadline)) as client:
             _send_until(client, header + ipp_body, deadline)
             _, status_code, response_body = _read_http_response(client, deadline=deadline)
-    except (OSError, ValueError, TimeoutError):
+    except (OSError, ValueError, TimeoutError) as error:
+        if diagnostics is not None:
+            diagnostics.append(f"request {request_id}: {type(error).__name__}")
         return False
+    if diagnostics is not None:
+        ipp_status = int.from_bytes(response_body[2:4], "big") if len(response_body) >= 4 else None
+        response_id = int.from_bytes(response_body[4:8], "big") if len(response_body) >= 8 else None
+        diagnostics.append(f"request {request_id}: HTTP {status_code}, IPP status {ipp_status}, response id {response_id}")
     if status_code != 200 or len(response_body) < 8:
         return False
-    return (
+    accepted = (
         response_body[:2] == b"\x02\x00"
         and int.from_bytes(response_body[2:4], "big") == 0
-        and int.from_bytes(response_body[4:8], "big") == 1
+        and int.from_bytes(response_body[4:8], "big") == request_id
     )
+    if accepted and job_ids is not None:
+        job_id = _response_job_id(response_body)
+        if job_id is None:
+            if diagnostics is not None:
+                diagnostics.append(f"request {request_id}: accepted response omitted job-id")
+            return False
+        job_ids.append(job_id)
+    return accepted
 
 
 def _reset_socket(connection: socket.socket) -> None:
@@ -288,6 +337,7 @@ class FaultProxy:
         scenario: str,
         timeout_seconds: int,
         trace_callback: Callable[[str, str], None],
+        restart_receiver: Callable[[], None] | None = None,
     ) -> None:
         self.upstream_port = upstream_port
         self.scenario = scenario
@@ -295,6 +345,7 @@ class FaultProxy:
         self._lock = threading.Lock()
         self._fault_applied = False
         self._trace_callback = trace_callback
+        self._restart_receiver = restart_receiver
         self._counts: collections.Counter[str] = collections.Counter()
         self._server = self._create_server()
         self.port = int(self._server.server_address[1])
@@ -357,6 +408,17 @@ class FaultProxy:
                 return
 
             self._trace("fault-applied", self.scenario)
+            if self.scenario == "auth-rejected":
+                _send_until(
+                    downstream,
+                    b"HTTP/1.1 401 Unauthorized\r\n"
+                    b"WWW-Authenticate: Basic realm=\"PaperBatch simulation\"\r\n"
+                    b"Content-Length: 0\r\n"
+                    b"Connection: close\r\n\r\n",
+                    deadline,
+                )
+                return
+
             if self.scenario == "unavailable-503":
                 _send_until(
                     downstream,
@@ -387,6 +449,11 @@ class FaultProxy:
                 _reset_socket(downstream)
             elif self.scenario == "malformed-ipp":
                 downstream.sendall(_http_response(response_header, b"\x00"))
+            elif self.scenario == "receiver-restart":
+                if self._restart_receiver is None:
+                    raise RuntimeError("receiver restart callback is unavailable")
+                self._restart_receiver()
+                _reset_socket(downstream)
             else:
                 raise ValueError("unsupported fault scenario")
         except (BrokenPipeError, ConnectionResetError, OSError, ValueError, TimeoutError):
@@ -470,6 +537,20 @@ class IppReceiver:
                 time.sleep(0.05)
         self.__exit__(None, None, None)
         raise RuntimeError("ippeveprinter did not become ready")
+
+    def restart(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+                self.process.wait(timeout=2)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.process.wait(timeout=2)
+        self.process = None
+        self.__enter__()
 
     def __exit__(self, *_: object) -> None:
         if self.process is not None and self.process.poll() is None:
@@ -592,8 +673,37 @@ class LabRun:
                 self.scenario,
                 self.timeout_seconds,
                 self.add_trace,
+                receiver.restart,
             ) as proxy:
                 self.add_trace("proxy-ready", "one-shot bounded forwarding")
+                if self.scenario == "duplicate-submit":
+                    diagnostics: list[str] = []
+                    first_job_ids: list[int] = []
+                    first = _attempt_single_print_job(proxy.port, receiver.port, synthetic_document, self.timeout_seconds, request_id=1001, diagnostics=diagnostics, job_ids=first_job_ids)
+                    if first:
+                        deadline = time.monotonic() + self.timeout_seconds
+                        completed = False
+                        while time.monotonic() < deadline:
+                            state = self._run_ipptool(proxy.port, receiver.port, "query-job.test", first_job_ids[0])
+                            if state[0] == 0 and re.search(rb"job-state\s+\(enum\)\s*=\s*completed", state[1], re.IGNORECASE):
+                                completed = True
+                                break
+                            time.sleep(0.1)
+                        if not completed:
+                            raise RuntimeError("receiver did not complete the first duplicate-submit job before the bounded deadline")
+                    second = _attempt_single_print_job(proxy.port, receiver.port, synthetic_document, self.timeout_seconds, request_id=1002, diagnostics=diagnostics)
+                    if not first or not second or proxy.counts["printJobRequests"] != 2:
+                        raise RuntimeError(f"duplicate submission fixture did not deliver two requests (first={first}, second={second}, counts={proxy.counts}, responses={diagnostics})")
+                    self.add_trace("duplicate-delivered", "Print-Job")
+                    return {
+                        "simulationOnly": True,
+                        "evidenceClass": "protocol-emulation",
+                        "scenario": self.scenario,
+                        "classification": "duplicate-accepted",
+                        "counts": proxy.counts,
+                        "trace": self.trace,
+                    }
+
                 if self.scenario == "success":
                     result = self._run_ipptool(proxy.port, receiver.port, "submit-only.test")
                     if result[0] != 0:
