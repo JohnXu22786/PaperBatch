@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Collections.Immutable;
 using PaperBatch.Core.Recipes;
+using PaperBatch.Core.Properties;
 
 namespace PaperBatch.Core.Ipc;
 
@@ -112,7 +113,7 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
 
     public ProductionCoordinatorRequestHandler(string? dataRoot = null)
     {
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var appData = AppDataPaths.LocalApplicationData;
         if (string.IsNullOrWhiteSpace(dataRoot) && string.IsNullOrWhiteSpace(appData)) throw new InvalidOperationException("Local application data is unavailable.");
         var root = Path.GetFullPath(dataRoot ?? Path.Combine(appData, "PaperBatch"));
         Directory.CreateDirectory(root);

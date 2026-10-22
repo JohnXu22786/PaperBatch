@@ -41,14 +41,16 @@ LibreOffice, Microsoft Office, WPS Office, PDFium, printer drivers, or fonts.
 Consequently it is not an offline full renderer and does not claim Office/WPS
 compatibility, installation on a clean PC, or physical printing support. PDF
 preview and preparation features needing PDFium remain unavailable unless the
-user separately configures an explicitly trusted runtime. The current app also
-has no production print backend.
+user separately configures an explicitly trusted runtime. Printing uses the
+Windows GDI/Winspool backend only after an explicit runtime and queue selection;
+spooler status does not prove pages were physically printed.
 
 The application and source are licensed under AGPL-3.0-only; see LICENSE.
 Third-party dependency versions and license evidence are in
 THIRD-PARTY-UI-NOTICES.md, THIRD-PARTY-CORE-NOTICES.md, and
 DOTNET-THIRD-PARTY-NOTICES.txt. Package provenance and per-file SHA-256 values are in
-package-manifest.json. This unsigned development artifact is not a release.
+package-manifest.json. This unsigned development beta candidate is not a signed or production release.
+No installer, automatic upgrade, migration, or rollback contract is provided.
 '@ | Set-Content -LiteralPath (Join-Path $outputPath 'README-package.txt') -Encoding utf8
 
 $files = Get-ChildItem -LiteralPath $outputPath -File -Recurse |

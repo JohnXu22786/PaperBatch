@@ -36,10 +36,12 @@ FAULT_CLASSIFICATIONS = {
     "delayed-response": "uncertain-timeout",
     "connection-reset": "uncertain-transport",
     "unavailable-503": "uncertain-http",
+    "auth-rejected": "rejected-auth",
+    "receiver-restart": "uncertain-transport",
     "malformed-ipp": "uncertain-protocol",
     "partial-upload": "uncertain-transport",
 }
-SCENARIOS = ("success", *FAULT_CLASSIFICATIONS)
+SCENARIOS = ("success", "duplicate-submit", *FAULT_CLASSIFICATIONS)
 OPERATION_NAMES = {
     0x0002: "Print-Job",
     0x0005: "Create-Job",
@@ -288,6 +290,7 @@ class FaultProxy:
         scenario: str,
         timeout_seconds: int,
         trace_callback: Callable[[str, str], None],
+        restart_receiver: Callable[[], None] | None = None,
     ) -> None:
         self.upstream_port = upstream_port
         self.scenario = scenario
@@ -295,6 +298,7 @@ class FaultProxy:
         self._lock = threading.Lock()
         self._fault_applied = False
         self._trace_callback = trace_callback
+        self._restart_receiver = restart_receiver
         self._counts: collections.Counter[str] = collections.Counter()
         self._server = self._create_server()
         self.port = int(self._server.server_address[1])
@@ -357,6 +361,17 @@ class FaultProxy:
                 return
 
             self._trace("fault-applied", self.scenario)
+            if self.scenario == "auth-rejected":
+                _send_until(
+                    downstream,
+                    b"HTTP/1.1 401 Unauthorized\r\n"
+                    b"WWW-Authenticate: Basic realm=\"PaperBatch simulation\"\r\n"
+                    b"Content-Length: 0\r\n"
+                    b"Connection: close\r\n\r\n",
+                    deadline,
+                )
+                return
+
             if self.scenario == "unavailable-503":
                 _send_until(
                     downstream,
@@ -387,6 +402,11 @@ class FaultProxy:
                 _reset_socket(downstream)
             elif self.scenario == "malformed-ipp":
                 downstream.sendall(_http_response(response_header, b"\x00"))
+            elif self.scenario == "receiver-restart":
+                if self._restart_receiver is None:
+                    raise RuntimeError("receiver restart callback is unavailable")
+                self._restart_receiver()
+                _reset_socket(downstream)
             else:
                 raise ValueError("unsupported fault scenario")
         except (BrokenPipeError, ConnectionResetError, OSError, ValueError, TimeoutError):
@@ -470,6 +490,20 @@ class IppReceiver:
                 time.sleep(0.05)
         self.__exit__(None, None, None)
         raise RuntimeError("ippeveprinter did not become ready")
+
+    def restart(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+                self.process.wait(timeout=2)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.process.wait(timeout=2)
+        self.process = None
+        self.__enter__()
 
     def __exit__(self, *_: object) -> None:
         if self.process is not None and self.process.poll() is None:
@@ -592,8 +626,24 @@ class LabRun:
                 self.scenario,
                 self.timeout_seconds,
                 self.add_trace,
+                receiver.restart,
             ) as proxy:
                 self.add_trace("proxy-ready", "one-shot bounded forwarding")
+                if self.scenario == "duplicate-submit":
+                    first = _attempt_single_print_job(proxy.port, receiver.port, synthetic_document, self.timeout_seconds)
+                    second = _attempt_single_print_job(proxy.port, receiver.port, synthetic_document, self.timeout_seconds)
+                    if not first or not second or proxy.counts["printJobRequests"] != 2:
+                        raise RuntimeError("duplicate submission fixture did not deliver two requests")
+                    self.add_trace("duplicate-delivered", "Print-Job")
+                    return {
+                        "simulationOnly": True,
+                        "evidenceClass": "protocol-emulation",
+                        "scenario": self.scenario,
+                        "classification": "duplicate-accepted",
+                        "counts": proxy.counts,
+                        "trace": self.trace,
+                    }
+
                 if self.scenario == "success":
                     result = self._run_ipptool(proxy.port, receiver.port, "submit-only.test")
                     if result[0] != 0:

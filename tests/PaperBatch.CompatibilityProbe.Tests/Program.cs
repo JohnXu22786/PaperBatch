@@ -43,6 +43,7 @@ if (args.Length == 6 && args[0] == "--source-cache-worker")
 
 var tests = new List<(string Name, Action Run)>
 {
+    ("app data override isolates the resolved PaperBatch local data root", CoreTests.AppDataPathHonorsExplicitOverride),
     ("synthetic resource stress profile exercises bounded file and logical page counts", ResourceStressProfileSelfCheck),
     ("simulated evidence does not close G1", SimulatedEvidenceDoesNotCloseG1),
     ("artifact store persists stable PDF bytes and receipt", RendererTests.ArtifactStorePersistsStablePdfAndReceipt),

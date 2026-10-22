@@ -7,6 +7,7 @@ using System.ComponentModel;
 using System.Runtime.Versioning;
 using Microsoft.Win32.SafeHandles;
 using PaperBatch.Core.Domain;
+using PaperBatch.Core.Properties;
 
 namespace PaperBatch.Core.Intake;
 
@@ -30,7 +31,7 @@ public interface ISourceFileAccess
 public sealed record SourceSnapshotCacheOptions
 {
     public string RootPath { get; init; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PaperBatch", "SourceCache");
+        AppDataPaths.LocalApplicationData, "PaperBatch", "SourceCache");
     public long MaximumBytes { get; init; } = 10L * 1024 * 1024 * 1024;
     public long MaximumSourceBytes { get; init; } = 512L * 1024 * 1024;
     public int MaximumSnapshots { get; init; } = 10_000;

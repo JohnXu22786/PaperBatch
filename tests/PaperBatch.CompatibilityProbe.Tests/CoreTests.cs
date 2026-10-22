@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using PaperBatch.Core.Domain;
+using PaperBatch.Core.Properties;
 using PaperBatch.Core.Ipc;
 using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Recipes;
@@ -11,6 +12,23 @@ using PaperBatch.Core.Serialization;
 
 internal static class CoreTests
 {
+    internal static void AppDataPathHonorsExplicitOverride()
+    {
+        var variable = AppDataPaths.LocalApplicationDataOverrideVariable;
+        var previous = Environment.GetEnvironmentVariable(variable);
+        var expected = Path.Combine(Path.GetTempPath(), "paperbatch-appdata-override-test");
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, expected);
+            if (AppDataPaths.LocalApplicationData != Path.GetFullPath(expected))
+                throw new InvalidOperationException("The explicit PaperBatch app-data override was not resolved.");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, previous);
+        }
+    }
+
     private static readonly DateTimeOffset FixedTime = new(2026, 10, 18, 12, 30, 0, TimeSpan.Zero);
     private const string Hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 

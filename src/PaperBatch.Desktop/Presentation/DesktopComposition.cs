@@ -14,6 +14,7 @@ using PaperBatch.Core.Preparation;
 using PaperBatch.Core.Recipes;
 using PaperBatch.Core.Rendering;
 using PaperBatch.Core.Serialization;
+using PaperBatch.Core.Properties;
 using PaperBatch.Core.Ipc;
 
 namespace PaperBatch.Desktop.Presentation;
@@ -39,7 +40,7 @@ internal static class DesktopComposition
 
     private static DesktopShellViewModel CreateAvailableServices()
     {
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var appData = AppDataPaths.LocalApplicationData;
         if (string.IsNullOrWhiteSpace(appData))
             throw new InvalidOperationException("The platform did not provide a local application data directory.");
 

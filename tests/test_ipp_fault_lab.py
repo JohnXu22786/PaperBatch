@@ -30,6 +30,8 @@ class IPPFaultLabTests(unittest.TestCase):
             "delayed-response": "uncertain-timeout",
             "connection-reset": "uncertain-transport",
             "unavailable-503": "uncertain-http",
+            "auth-rejected": "rejected-auth",
+            "receiver-restart": "uncertain-transport",
             "malformed-ipp": "uncertain-protocol",
             "partial-upload": "uncertain-transport",
         }
@@ -45,6 +47,12 @@ class IPPFaultLabTests(unittest.TestCase):
                 self.assertTrue(result["recovery"]["printerQueryAccepted"])
                 self.assertNotIn("hostname", json.dumps(result).lower())
                 self.assertLessEqual(len(result["trace"]), ipp_fault_lab.MAX_TRACE_EVENTS)
+
+    def test_duplicate_submission_is_reported_as_two_receiver_acceptances(self):
+        result = ipp_fault_lab.run_scenario("duplicate-submit", timeout_seconds=1)
+        self.assertTrue(result["simulationOnly"])
+        self.assertEqual(result["classification"], "duplicate-accepted")
+        self.assertEqual(result["counts"]["printJobRequests"], 2)
 
     def test_request_size_and_timeout_limits_are_enforced(self):
         oversized_document = b"x" * (ipp_fault_lab.MAX_DOCUMENT_BYTES + 1)
@@ -80,6 +88,17 @@ class IPPFaultLabTests(unittest.TestCase):
                 ipp_fault_lab._read_http_request(connection)
 
         self.assertEqual(connection.timeouts, [ipp_fault_lab.MAX_TIMEOUT_SECONDS + 1.0])
+
+
+class IPPProxyUnitTests(unittest.TestCase):
+    def test_auth_challenge_rejects_before_forwarding(self):
+        trace = []
+        with ipp_fault_lab.FaultProxy(9, "auth-rejected", 1, lambda phase, operation: trace.append((phase, operation))) as proxy:
+            accepted = ipp_fault_lab._attempt_single_print_job(proxy.port, 9, b"%PDF-1.4\nsynthetic\n", 1)
+            self.assertFalse(accepted)
+            self.assertTrue(proxy.fault_applied)
+            self.assertEqual(proxy.counts["printJobRequests"], 1)
+            self.assertIn(("fault-applied", "auth-rejected"), trace)
 
 
 if __name__ == "__main__":
