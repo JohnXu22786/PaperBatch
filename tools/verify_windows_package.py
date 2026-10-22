@@ -26,7 +26,8 @@ def safe_path(value: object) -> str:
         fail(f"unsafe package path: {value!r}")
     return p.as_posix()
 
-def validate(root: Path) -> dict:
+def validate(root: Path, excluded_outputs: set[str] | None = None) -> dict:
+    excluded_outputs = excluded_outputs or set()
     manifest_path = root / "package-manifest.json"
     m = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     if not isinstance(m, dict) or set(m) != REQUIRED:
@@ -57,7 +58,11 @@ def validate(root: Path) -> dict:
         data = path.read_bytes()
         if len(data) != row["size"] or hashlib.sha256(data).hexdigest() != row["sha256"]:
             fail(f"manifest size or digest mismatch: {name}")
-    actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file() and p != manifest_path}
+    actual = {
+        p.relative_to(root).as_posix()
+        for p in root.rglob("*")
+        if p.is_file() and p != manifest_path and p.relative_to(root).as_posix() not in excluded_outputs
+    }
     if actual != seen:
         fail(f"package file set differs from manifest (extra={sorted(actual-seen)}, missing={sorted(seen-actual)})")
     for lock in m["dependencyLockFiles"]:
@@ -78,10 +83,11 @@ def validate(root: Path) -> dict:
         fail("required license and package notice files missing")
     return m
 
-def verify_archive(archive: Path, expected_root: Path) -> None:
+def verify_archive(archive: Path, expected_root: Path, excluded_outputs: set[str] | None = None) -> None:
+    excluded_outputs = excluded_outputs or set()
     expected = {}
     for path in expected_root.rglob("*"):
-        if path.is_file():
+        if path.is_file() and path.relative_to(expected_root).as_posix() not in excluded_outputs:
             digest = hashlib.sha256()
             size = 0
             with path.open("rb") as stream:
@@ -139,9 +145,15 @@ def main() -> int:
     ap.add_argument("package_dir", type=Path)
     ap.add_argument("archive", type=Path)
     args = ap.parse_args()
-    validate(args.package_dir)
-    verify_archive(args.archive, args.package_dir)
     sidecar = Path(str(args.archive) + ".sha256")
+    package_outputs: set[str] = set()
+    try:
+        package_outputs.add(args.archive.resolve().relative_to(args.package_dir.resolve()).as_posix())
+        package_outputs.add(sidecar.resolve().relative_to(args.package_dir.resolve()).as_posix())
+    except ValueError:
+        pass
+    validate(args.package_dir, package_outputs)
+    verify_archive(args.archive, args.package_dir, package_outputs)
     fields = sidecar.read_text(encoding="ascii").split()
     if len(fields) != 2 or fields[1] != args.archive.name or hashlib.sha256(args.archive.read_bytes()).hexdigest() != fields[0]:
         fail("archive SHA-256 sidecar mismatch")

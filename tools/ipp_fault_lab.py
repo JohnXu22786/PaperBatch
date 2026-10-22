@@ -226,15 +226,15 @@ def _ipp_attribute(value_tag: int, name: str, value: bytes) -> bytes:
     )
 
 
-def _single_print_job_request(document: bytes, printer_uri: str) -> bytes:
+def _single_print_job_request(document: bytes, printer_uri: str, request_id: int = 1) -> bytes:
     operation_attributes = b"\x01"
     operation_attributes += _ipp_attribute(0x47, "attributes-charset", b"utf-8")
     operation_attributes += _ipp_attribute(0x48, "attributes-natural-language", b"en")
     operation_attributes += _ipp_attribute(0x45, "printer-uri", printer_uri.encode("ascii"))
     operation_attributes += _ipp_attribute(0x42, "requesting-user-name", b"paperbatch-lab")
-    operation_attributes += _ipp_attribute(0x42, "job-name", b"paperbatch-synthetic-print")
+    operation_attributes += _ipp_attribute(0x42, "job-name", f"paperbatch-synthetic-print-{request_id}".encode("ascii"))
     operation_attributes += _ipp_attribute(0x49, "document-format", b"application/pdf")
-    ipp_message = b"\x02\x00\x00\x02\x00\x00\x00\x01" + operation_attributes + b"\x03" + document
+    ipp_message = b"\x02\x00\x00\x02" + struct.pack(">I", request_id) + operation_attributes + b"\x03" + document
     if len(ipp_message) > MAX_REQUEST_BYTES:
         raise ValueError("IPP request body exceeds the configured limit")
     return ipp_message
@@ -245,10 +245,11 @@ def _attempt_single_print_job(
     receiver_port: int,
     document: bytes,
     timeout_seconds: int,
+    request_id: int = 1,
 ) -> bool:
     """Send one Print-Job over a raw socket so transport faults cannot trigger a library retry."""
     printer_uri = f"ipp://localhost:{receiver_port}/ipp/print"
-    ipp_body = _single_print_job_request(document, printer_uri)
+    ipp_body = _single_print_job_request(document, printer_uri, request_id)
     header = (
         f"POST /ipp/print HTTP/1.1\r\n"
         f"Host: 127.0.0.1:{proxy_port}\r\n"
@@ -268,7 +269,7 @@ def _attempt_single_print_job(
     return (
         response_body[:2] == b"\x02\x00"
         and int.from_bytes(response_body[2:4], "big") == 0
-        and int.from_bytes(response_body[4:8], "big") == 1
+        and int.from_bytes(response_body[4:8], "big") == request_id
     )
 
 
@@ -630,10 +631,10 @@ class LabRun:
             ) as proxy:
                 self.add_trace("proxy-ready", "one-shot bounded forwarding")
                 if self.scenario == "duplicate-submit":
-                    first = _attempt_single_print_job(proxy.port, receiver.port, synthetic_document, self.timeout_seconds)
-                    second = _attempt_single_print_job(proxy.port, receiver.port, synthetic_document, self.timeout_seconds)
+                    first = _attempt_single_print_job(proxy.port, receiver.port, synthetic_document, self.timeout_seconds, request_id=1001)
+                    second = _attempt_single_print_job(proxy.port, receiver.port, synthetic_document, self.timeout_seconds, request_id=1002)
                     if not first or not second or proxy.counts["printJobRequests"] != 2:
-                        raise RuntimeError("duplicate submission fixture did not deliver two requests")
+                        raise RuntimeError(f"duplicate submission fixture did not deliver two requests (first={first}, second={second}, counts={proxy.counts})")
                     self.add_trace("duplicate-delivered", "Print-Job")
                     return {
                         "simulationOnly": True,

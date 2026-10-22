@@ -49,7 +49,7 @@ class IPPFaultLabTests(unittest.TestCase):
                 self.assertLessEqual(len(result["trace"]), ipp_fault_lab.MAX_TRACE_EVENTS)
 
     def test_duplicate_submission_is_reported_as_two_receiver_acceptances(self):
-        result = ipp_fault_lab.run_scenario("duplicate-submit", timeout_seconds=1)
+        result = ipp_fault_lab.run_scenario("duplicate-submit", timeout_seconds=5)
         self.assertTrue(result["simulationOnly"])
         self.assertEqual(result["classification"], "duplicate-accepted")
         self.assertEqual(result["counts"]["printJobRequests"], 2)

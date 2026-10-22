@@ -33,12 +33,21 @@ class PackageVerifierTests(unittest.TestCase):
     def test_manifest_and_archive_validate_and_extract_exactly(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'package'; root.mkdir(); self.fixture(root)
-            archive = Path(temp) / 'package.zip'
+            archive = root / 'PaperBatch-windows-x64-lite.zip'
             with zipfile.ZipFile(archive, 'w') as z:
                 for p in root.rglob('*'):
-                    if p.is_file(): z.write(p, p.relative_to(root).as_posix())
-            validate(root)
-            verify_archive(archive, root)
+                    if p.is_file() and p != archive: z.write(p, p.relative_to(root).as_posix())
+            (root / 'PaperBatch-windows-x64-lite.zip.sha256').write_text('0' * 64 + '  PaperBatch-windows-x64-lite.zip')
+            outputs = {archive.name, archive.name + '.sha256'}
+            validate(root, outputs)
+            verify_archive(archive, root, outputs)
+
+    def test_unknown_extra_output_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.fixture(root)
+            (root / 'extra.zip').write_bytes(b'not an approved package output')
+            with self.assertRaisesRegex(ValueError, 'file set differs'):
+                validate(root, {'PaperBatch-windows-x64-lite.zip', 'PaperBatch-windows-x64-lite.zip.sha256'})
 
     def test_manifest_traversal_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
