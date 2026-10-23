@@ -90,3 +90,15 @@ jobs:
           python-version: '3.12'
       - name: Run focused report and loopback tests
         run: python -m unittest tests.test_simulation_matrix
+
+  office-wps-contract-stubs:
+    name: Office/WPS trusted-runner and harness stub tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Run fail-closed contract and interactive harness stubs
+        run: python -m unittest tests.test_office_wps_harness

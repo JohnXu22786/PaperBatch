@@ -311,7 +311,9 @@ def native_runner_stub() -> dict:
         "scenarioId": config["scenarioId"],
         "outcome": config["outcome"],
         "simulationOnly": True,
-        "evidenceLimit": config["reason"] + " The runner contract requires trusted protected-main/manual dispatch, exact main checkout validation, a disposable snapshot, no repository secrets, and minimum allowlisted network. No native Office/WPS compatibility was tested.",
+        "requiredSnapshotProfiles": config["requiredSnapshotProfiles"],
+        "compatibilityClaimsOpen": config["compatibilityClaimsOpen"],
+        "evidenceLimit": config["reason"] + " The runner contract requires trusted protected-main/manual dispatch, exact main checkout and VM/build metadata validation, a disposable licensed snapshot, no repository secrets, and an exact minimum network allowlist. No native Office/WPS compatibility was tested.",
     }
 
 
