@@ -132,6 +132,37 @@ internal static class CoreTests
         Assert.Equal("ok", ReadScalar(databasePath, "PRAGMA quick_check;"));
     }
 
+    internal static void SqliteMigrationFailureRollsBackWithoutResubmittingLegacyJobs()
+    {
+        using var temporary = new TemporaryDirectory();
+        var databasePath = Path.Combine(temporary.Path, "legacy-v1.db");
+        CreateLegacyV1Database(databasePath);
+        ExecuteSql(databasePath, """
+            INSERT INTO jobs (job_id, run_id, segment_index, state, created_utc, updated_utc)
+            VALUES ('legacy-job', 'legacy-run', 0, 'Ready', '2026-10-17T12:00:00.0000000+00:00', '2026-10-17T12:00:00.0000000+00:00');
+            INSERT INTO job_transitions (job_id, from_state, to_state, at_utc, reason)
+            VALUES ('legacy-job', NULL, 'Ready', '2026-10-17T12:00:00.0000000+00:00', 'legacy fixture');
+            CREATE TABLE recipes (fixture_blocker TEXT);
+            """);
+
+        var store = new SqliteRunStore(databasePath);
+        Assert.Throws<SqliteException>(() => store.Initialize());
+        Assert.Equal(1, ReadUserVersion(databasePath));
+        Assert.Equal("0", ReadScalar(databasePath, "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name = 'retain_while_unresolved';"));
+        Assert.Equal("0", ReadScalar(databasePath, "SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'submission_key';"));
+        Assert.Equal("legacy-run", ReadScalar(databasePath, "SELECT run_id FROM runs WHERE run_id = 'legacy-run';"));
+        Assert.Equal("Ready", ReadScalar(databasePath, "SELECT state FROM jobs WHERE job_id = 'legacy-job';"));
+        Assert.Equal("0", ReadScalar(databasePath, "SELECT COUNT(*) FROM job_transitions WHERE job_id = 'legacy-job' AND to_state = 'Submitting';"));
+
+        ExecuteSql(databasePath, "DROP TABLE recipes;");
+        store.Initialize();
+        Assert.Equal(SqliteRunStore.CurrentSchemaVersion, ReadUserVersion(databasePath));
+        Assert.Equal("legacy-run", store.GetRun("legacy-run")!.RunId);
+        Assert.Equal(JobState.Ready, store.GetJob("legacy-job")!.State);
+        Assert.Equal("0", ReadScalar(databasePath, "SELECT COUNT(*) FROM job_transitions WHERE job_id = 'legacy-job' AND to_state = 'Submitting';"));
+        Assert.Equal("ok", ReadScalar(databasePath, "PRAGMA quick_check;"));
+    }
+
     internal static void SqliteHistoryAndRecipesPersist()
     {
         using var temporary = new TemporaryDirectory();
