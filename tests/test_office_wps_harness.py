@@ -22,6 +22,7 @@ class StubAdapter:
 
     def abort_run(self, timeout_seconds):
         self.calls.append(("abort_run", timeout_seconds))
+        self.live.clear()
 
     def reset_profile(self, profile_dir):
         self.calls.append(("reset", Path(profile_dir), Path(profile_dir).is_dir()))
@@ -142,6 +143,58 @@ class OfficeWpsHarnessTests(unittest.TestCase):
                 self.assertFalse(result["compatibilityClaim"])
                 self.assertEqual(created, [])
 
+    def test_malformed_contract_shapes_fail_closed_before_adapter_creation(self):
+        expectation, context, snapshot = contract_inputs()
+        for expectation_changes, snapshot_changes in (
+            ({"product_builds": None}, {}),
+            ({"product_builds": ["office"]}, {}),
+            ({"image_digest": None}, {}),
+            ({"snapshot_profile": []}, {}),
+            ({}, {"image_digest": None}),
+            ({}, {"software_builds": None}),
+            ({}, {"network_allowlist": ["license.example.test"]}),
+        ):
+            with self.subTest(expectation_changes=expectation_changes, snapshot_changes=snapshot_changes):
+                created = []
+                malformed_expectation = lab.RunnerExpectation(**{**expectation.__dict__, **expectation_changes})
+                malformed_snapshot = lab.RunnerSnapshot(**{**snapshot.__dict__, **snapshot_changes})
+                result = lab.run_interactive_harness(
+                    context=context,
+                    expectation=malformed_expectation,
+                    snapshot=malformed_snapshot,
+                    adapter_factory=lambda: created.append(StubAdapter()),
+                    fixture_id="u9.office_wps.synthetic_docx_smoke",
+                )
+                self.assertEqual(result["outcome"], "blocked")
+                self.assertEqual(created, [])
+
+    def test_blocking_adapter_factory_is_bounded_before_any_profile_or_launch(self):
+        expectation, context, snapshot = contract_inputs()
+        started = threading.Event()
+        release = threading.Event()
+        created = []
+
+        def blocking_factory():
+            started.set()
+            release.wait()
+            adapter = StubAdapter()
+            created.append(adapter)
+            return adapter
+
+        result = lab.run_interactive_harness(
+            context=context,
+            expectation=expectation,
+            snapshot=snapshot,
+            adapter_factory=blocking_factory,
+            fixture_id="u9.office_wps.synthetic_docx_smoke",
+            timeout_seconds=1,
+        )
+        self.assertTrue(started.is_set())
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["reasonCode"], "step_timeout")
+        self.assertEqual(created, [])
+        release.set()
+
     def test_snapshot_build_license_secret_and_network_mismatches_fail_closed(self):
         expectation, context, snapshot = contract_inputs()
         for changes in (
@@ -245,6 +298,64 @@ class OfficeWpsHarnessTests(unittest.TestCase):
         self.assertFalse(adapter.live)
         self.assertEqual([call[0] for call in adapter.calls].count("cancel"), 1)
 
+    def test_adapter_cancellation_during_launch_aborts_before_profile_cleanup(self):
+        expectation, context, snapshot = contract_inputs()
+
+        class CancelledLaunchAdapter(StubAdapter):
+            def launch(self, product, profile_dir, timeout_seconds, cancel_event):
+                self.next_pid += 1
+                self.live.add(self.next_pid)
+                raise lab.Cancelled
+
+            def abort_run(self, timeout_seconds):
+                super().abort_run(timeout_seconds)
+                self.live.clear()
+
+        adapter = CancelledLaunchAdapter()
+        result = lab.run_interactive_harness(
+            context=context,
+            expectation=expectation,
+            snapshot=snapshot,
+            adapter_factory=lambda: adapter,
+            fixture_id="u9.office_wps.synthetic_docx_smoke",
+        )
+        self.assertEqual(result["outcome"], "not_run")
+        self.assertEqual(result["reasonCode"], "cancelled")
+        self.assertIn("abort_run", [call[0] for call in adapter.calls])
+        self.assertFalse(adapter.live)
+        reset_calls = [call for call in adapter.calls if call[0] == "reset"]
+        self.assertEqual(len(reset_calls), 2)
+        self.assertFalse(reset_calls[0][1].exists())
+
+    def test_adapter_error_during_launch_aborts_before_profile_cleanup(self):
+        expectation, context, snapshot = contract_inputs()
+
+        class FailedLaunchAdapter(StubAdapter):
+            def launch(self, product, profile_dir, timeout_seconds, cancel_event):
+                self.next_pid += 1
+                self.live.add(self.next_pid)
+                raise RuntimeError("launch failed after starting process")
+
+            def abort_run(self, timeout_seconds):
+                super().abort_run(timeout_seconds)
+                self.live.clear()
+
+        adapter = FailedLaunchAdapter()
+        result = lab.run_interactive_harness(
+            context=context,
+            expectation=expectation,
+            snapshot=snapshot,
+            adapter_factory=lambda: adapter,
+            fixture_id="u9.office_wps.synthetic_docx_smoke",
+        )
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["reasonCode"], "adapter_error")
+        self.assertIn("abort_run", [call[0] for call in adapter.calls])
+        self.assertFalse(adapter.live)
+        reset_calls = [call for call in adapter.calls if call[0] == "reset"]
+        self.assertEqual(len(reset_calls), 2)
+        self.assertFalse(reset_calls[0][1].exists())
+
     def test_watchdog_aborts_an_adapter_that_blocks_past_its_deadline(self):
         expectation, context, snapshot = contract_inputs()
 
@@ -318,7 +429,7 @@ class OfficeWpsHarnessTests(unittest.TestCase):
         adapter.live.clear()
         shutil.rmtree(profile_dir.parent)
 
-    def test_failed_process_termination_preserves_profile(self):
+    def test_failed_process_cleanup_invokes_run_abort_before_profile_cleanup(self):
         expectation, context, snapshot = contract_inputs()
 
         class UnclosableAdapter(StubAdapter):
@@ -338,11 +449,67 @@ class OfficeWpsHarnessTests(unittest.TestCase):
         )
         profile_dir = next(call[1] for call in adapter.calls if call[0] == "reset")
         self.assertEqual(result["outcome"], "failed")
+        self.assertFalse(adapter.live)
+        self.assertIn("abort_run", [call[0] for call in adapter.calls])
+        self.assertFalse(adapter.live)
+        reset_calls = [call for call in adapter.calls if call[0] == "reset"]
+        self.assertEqual(len(reset_calls), 2)
+        self.assertFalse(profile_dir.exists())
+
+    def test_unconfirmed_termination_overrides_unsupported_and_preserves_profile(self):
+        expectation, context, snapshot = contract_inputs()
+
+        class UnstoppableUnsupportedAdapter(StubAdapter):
+            def cancel(self, process):
+                raise RuntimeError("cancel failed")
+
+            def close(self, process, timeout_seconds):
+                raise RuntimeError("close failed")
+
+            def abort_run(self, timeout_seconds):
+                raise RuntimeError("run abort failed")
+
+        adapter = UnstoppableUnsupportedAdapter(unsupported_on="export")
+        result = lab.run_interactive_harness(
+            context=context,
+            expectation=expectation,
+            snapshot=snapshot,
+            adapter_factory=lambda: adapter,
+            fixture_id="u9.office_wps.synthetic_docx_smoke",
+        )
+        profile_dir = next(call[1] for call in adapter.calls if call[0] == "reset")
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["reasonCode"], "process_quiescence_unconfirmed")
         self.assertTrue(adapter.live)
-        self.assertEqual(len([call for call in adapter.calls if call[0] == "reset"]), 1)
         self.assertTrue(profile_dir.is_dir())
         adapter.live.clear()
         shutil.rmtree(profile_dir.parent)
+
+    def test_run_directory_removal_failure_overrides_unsupported(self):
+        expectation, context, snapshot = contract_inputs()
+        adapter = StubAdapter(unsupported_on="launch")
+        original_rmtree = lab.shutil.rmtree
+        run_dirs = []
+
+        def fail_run_directory_removal(path):
+            run_dirs.append(Path(path))
+            raise OSError("cleanup failed")
+
+        lab.shutil.rmtree = fail_run_directory_removal
+        try:
+            result = lab.run_interactive_harness(
+                context=context,
+                expectation=expectation,
+                snapshot=snapshot,
+                adapter_factory=lambda: adapter,
+                fixture_id="u9.office_wps.synthetic_docx_smoke",
+            )
+        finally:
+            lab.shutil.rmtree = original_rmtree
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["reasonCode"], "profile_reset_failed")
+        self.assertEqual(len(run_dirs), 1)
+        original_rmtree(run_dirs[0])
 
     def test_ownership_is_rechecked_after_operator_wait_before_close(self):
         expectation, context, snapshot = contract_inputs()
@@ -353,6 +520,10 @@ class OfficeWpsHarnessTests(unittest.TestCase):
                 if step == "close":
                     self.lose_ownership = True
 
+            def abort_run(self, timeout_seconds):
+                super().abort_run(timeout_seconds)
+                self.live.clear()
+
         adapter = ReusedPidAdapter()
         result = lab.run_interactive_harness(
             context=context,
@@ -361,12 +532,13 @@ class OfficeWpsHarnessTests(unittest.TestCase):
             adapter_factory=lambda: adapter,
             fixture_id="u9.office_wps.synthetic_docx_smoke",
         )
-        profile_dir = next(call[1] for call in adapter.calls if call[0] == "reset")
         self.assertEqual(result["reasonCode"], "process_ownership_lost")
         self.assertNotIn("close", [call[0] for call in adapter.calls])
-        self.assertTrue(profile_dir.is_dir())
-        adapter.live.clear()
-        shutil.rmtree(profile_dir.parent)
+        self.assertIn("abort_run", [call[0] for call in adapter.calls])
+        self.assertFalse(adapter.live)
+        reset_calls = [call for call in adapter.calls if call[0] == "reset"]
+        self.assertEqual(len(reset_calls), 2)
+        self.assertFalse(reset_calls[0][1].exists())
 
     def test_failed_final_profile_reset_preserves_the_run_directory(self):
         expectation, context, snapshot = contract_inputs()
@@ -428,6 +600,12 @@ class OfficeWpsHarnessTests(unittest.TestCase):
     def test_lost_process_ownership_fails_without_touching_unowned_process_profile(self):
         expectation, context, snapshot = contract_inputs()
         adapter = StubAdapter(lose_ownership=True)
+
+        def abort_and_stop(timeout_seconds):
+            adapter.calls.append(("abort_run", timeout_seconds))
+            adapter.live.clear()
+
+        adapter.abort_run = abort_and_stop
         result = lab.run_interactive_harness(
             context=context,
             expectation=expectation,
@@ -437,13 +615,12 @@ class OfficeWpsHarnessTests(unittest.TestCase):
         )
         self.assertEqual(result["outcome"], "failed")
         self.assertEqual(result["reasonCode"], "process_ownership_lost")
+        self.assertIn("abort_run", [item[0] for item in adapter.calls])
         reset_calls = [item for item in adapter.calls if item[0] == "reset"]
-        self.assertEqual(len(reset_calls), 1)
-        self.assertEqual([item[2] for item in reset_calls], [True])
+        self.assertEqual(len(reset_calls), 2)
+        self.assertEqual([item[2] for item in reset_calls], [True, True])
         self.assertNotIn("cancel", [item[0] for item in adapter.calls])
-        self.assertTrue(reset_calls[0][1].is_dir())
-        adapter.live.clear()
-        shutil.rmtree(reset_calls[0][1].parent)
+        self.assertFalse(reset_calls[0][1].exists())
 
     def test_cancel_is_not_reported_as_compatibility_failure_or_pass(self):
         expectation, context, snapshot = contract_inputs()
@@ -478,7 +655,8 @@ class OfficeWpsHarnessTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "not_run")
         self.assertEqual(result["reasonCode"], "cancelled")
         self.assertEqual(result["steps"], ["launch"])
-        self.assertIn("cancel", [item[0] for item in adapter.calls])
+        self.assertIn("abort_run", [item[0] for item in adapter.calls])
+        self.assertFalse(adapter.live)
 
     def test_step_timeout_is_redacted_and_triggers_cleanup(self):
         expectation, context, snapshot = contract_inputs()
@@ -495,6 +673,7 @@ class OfficeWpsHarnessTests(unittest.TestCase):
         self.assertEqual(result["steps"], ["launch"])
         self.assertNotIn("TimeoutError", str(result))
         self.assertIn("cancel", [item[0] for item in adapter.calls])
+        self.assertFalse(adapter.live)
 
     def test_missing_interactive_desktop_is_unsupported(self):
         expectation, context, snapshot = contract_inputs()

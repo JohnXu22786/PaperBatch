@@ -27,6 +27,7 @@ SAFE_REASON_CODES = {
     "fixture_not_allowlisted", "cancelled", "harness_error", "process_ownership_lost",
     "export_outside_run_directory", "export_too_large", "invalid_export",
     "process_close_timeout", "script_completed", "step_timeout", "adapter_error",
+    "process_quiescence_unconfirmed",
     "profile_reset_failed", "report_bound_exceeded", "interactive_session_unavailable",
 }
 MAX_REPORT_BYTES = 2048
@@ -100,6 +101,13 @@ class Cancelled(Exception):
     """The operator or coordinator cancelled the current scripted run."""
 
 
+class RunAbortConfirmed(Exception):
+    """Run-wide abort stopped the adapter before cleanup proceeds."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+
 class Unsupported(Exception):
     """The runner cannot provide the required authorized interactive desktop."""
 
@@ -145,6 +153,44 @@ def authorize_native_lane(
 ) -> GateResult:
     """Allow only the exact trusted protected-main checkout and VM image."""
     if context is None or expectation is None or snapshot is None:
+        return GateResult(False, "contract_metadata_missing")
+    if not isinstance(expectation, RunnerExpectation) or not isinstance(context, RunnerContext) or not isinstance(snapshot, RunnerSnapshot):
+        return GateResult(False, "contract_metadata_missing")
+    if (
+        not all(type(value) is str for value in (
+            expectation.repository, expectation.workflow_ref, expectation.default_ref,
+            expectation.main_sha, expectation.snapshot_profile, expectation.snapshot_id,
+        ))
+        or type(expectation.product_builds) is not dict
+        or any(type(key) is not str or type(value) is not str for key, value in expectation.product_builds.items())
+        or type(expectation.network_allowlist) is not tuple
+        or any(type(value) is not str for value in expectation.network_allowlist)
+    ):
+        return GateResult(False, "invalid_expected_snapshot_contract")
+    if (
+        not all(type(value) is str for value in (
+            context.event_name, context.repository, context.ref,
+            context.checkout_sha, context.main_sha, context.workflow_ref,
+        ))
+        or type(context.ref_protected) is not bool
+        or type(context.is_fork) is not bool
+    ):
+        return GateResult(False, "contract_metadata_missing")
+    if (
+        not all(type(value) is str for value in (
+            snapshot.snapshot_profile, snapshot.snapshot_id, snapshot.image_digest,
+        ))
+        or type(snapshot.software_builds) is not dict
+        or any(type(key) is not str or type(value) is not str for key, value in snapshot.software_builds.items())
+        or type(snapshot.network_allowlist) is not tuple
+        or any(type(value) is not str for value in snapshot.network_allowlist)
+        or type(snapshot.repository_secrets) is not tuple
+        or any(type(value) is not str for value in snapshot.repository_secrets)
+        or type(snapshot.ephemeral) is not bool
+        or type(snapshot.licensed) is not bool
+        or type(snapshot.profile_isolated) is not bool
+        or type(snapshot.profile_reset) is not bool
+    ):
         return GateResult(False, "contract_metadata_missing")
     profile_products = {
         "office_only": {"office"},
@@ -248,7 +294,7 @@ def run_interactive_harness(
     run_dir: Path | None = None
 
     try:
-        adapter = adapter_factory()
+        adapter = _bounded_factory_call(adapter_factory, timeout_seconds, cancel_event)
         run_dir = Path(tempfile.mkdtemp(prefix="u9-office-wps-"))
         profile_dir = run_dir / "profile"
         profile_dir.mkdir()
@@ -260,7 +306,7 @@ def run_interactive_harness(
         _operator_step(adapter, "launch", timeout_seconds, cancel_event)
         steps.append("launch")
         process = _bounded_call(adapter, adapter.launch, product, profile_dir, timeout_seconds, cancel_event,
-                            timeout_seconds=timeout_seconds, cancel_event=cancel_event)
+                            timeout_seconds=timeout_seconds, cancel_event=cancel_event, abort_on_error=True)
         process_owned = True
         _check_owned(adapter, process, timeout_seconds, cancel_event)
 
@@ -310,7 +356,7 @@ def run_interactive_harness(
         _operator_step(adapter, "restart", timeout_seconds, cancel_event)
         steps.append("restart")
         process = _bounded_call(adapter, adapter.launch, product, profile_dir, timeout_seconds, cancel_event,
-                            timeout_seconds=timeout_seconds, cancel_event=cancel_event)
+                            timeout_seconds=timeout_seconds, cancel_event=cancel_event, abort_on_error=True)
         process_owned = True
         _check_owned(adapter, process, timeout_seconds, cancel_event)
         _operator_step(adapter, "close", timeout_seconds, cancel_event)
@@ -323,6 +369,13 @@ def run_interactive_harness(
         process = None
         process_owned = False
         outcome, reason_code = "passed", "script_completed"
+    except RunAbortConfirmed as abort:
+        process_owned = False
+        run_quiescent = True
+        if abort.reason == "cancelled":
+            outcome, reason_code = "not_run", "cancelled"
+        else:
+            outcome, reason_code = "failed", "step_timeout"
     except Cancelled:
         outcome, reason_code = "not_run", "cancelled"
     except Unsupported:
@@ -331,8 +384,10 @@ def run_interactive_harness(
         outcome, reason_code = "failed", "step_timeout"
     except ProcessOwnershipLost:
         process_owned = False
-        run_quiescent = False
         outcome, reason_code = "failed", "process_ownership_lost"
+        run_quiescent = adapter is not None and _abort_adapter(adapter)
+        if not run_quiescent:
+            reason_code = "process_quiescence_unconfirmed"
     except UncleanAdapter:
         run_quiescent = False
         outcome, reason_code = "failed", "adapter_error"
@@ -349,26 +404,44 @@ def run_interactive_harness(
                               timeout_seconds=timeout_seconds, cancel_event=threading.Event())
             except ProcessOwnershipLost:
                 process_owned = False
-                run_quiescent = False
+                run_quiescent = _abort_adapter(adapter)
+                outcome = "failed"
+                reason_code = "process_ownership_lost" if run_quiescent else "process_quiescence_unconfirmed"
             except UncleanAdapter:
-                run_quiescent = False
+                process_owned = False
+                run_quiescent = _abort_adapter(adapter)
+                outcome = "failed"
+                reason_code = "adapter_error" if run_quiescent else "process_quiescence_unconfirmed"
             except Exception:
-                pass
-            try:
-                if not run_quiescent:
-                    raise UncleanAdapter
-                still_running = _bounded_call(adapter, adapter.is_running, process,
-                                              timeout_seconds=timeout_seconds, cancel_event=threading.Event())
-                if still_running:
-                    _check_owned(adapter, process, timeout_seconds, threading.Event())
-                    _bounded_call(adapter, adapter.close, process, timeout_seconds,
-                                  timeout_seconds=timeout_seconds, cancel_event=threading.Event())
+                process_owned = False
+                run_quiescent = _abort_adapter(adapter)
+                outcome = "failed"
+                reason_code = "adapter_error" if run_quiescent else "process_quiescence_unconfirmed"
+            if process_owned and run_quiescent:
+                try:
                     still_running = _bounded_call(adapter, adapter.is_running, process,
                                                   timeout_seconds=timeout_seconds, cancel_event=threading.Event())
-                if still_running:
-                    run_quiescent = False
-            except Exception:
-                run_quiescent = False
+                    if still_running:
+                        _check_owned(adapter, process, timeout_seconds, threading.Event())
+                        _bounded_call(adapter, adapter.close, process, timeout_seconds,
+                                      timeout_seconds=timeout_seconds, cancel_event=threading.Event())
+                        still_running = _bounded_call(adapter, adapter.is_running, process,
+                                                      timeout_seconds=timeout_seconds, cancel_event=threading.Event())
+                    if still_running:
+                        process_owned = False
+                        run_quiescent = _abort_adapter(adapter)
+                        outcome = "failed"
+                        reason_code = "process_close_timeout" if run_quiescent else "process_quiescence_unconfirmed"
+                except ProcessOwnershipLost:
+                    process_owned = False
+                    run_quiescent = _abort_adapter(adapter)
+                    outcome = "failed"
+                    reason_code = "process_ownership_lost" if run_quiescent else "process_quiescence_unconfirmed"
+                except Exception:
+                    process_owned = False
+                    run_quiescent = _abort_adapter(adapter)
+                    outcome = "failed"
+                    reason_code = "adapter_error" if run_quiescent else "process_quiescence_unconfirmed"
         if run_quiescent and adapter is not None and profile_dir is not None:
             try:
                 _bounded_call(adapter, adapter.reset_profile, profile_dir,
@@ -383,8 +456,7 @@ def run_interactive_harness(
             try:
                 shutil.rmtree(run_dir)
             except Exception:
-                if outcome == "passed":
-                    outcome, reason_code = "failed", "profile_reset_failed"
+                outcome, reason_code = "failed", "profile_reset_failed"
 
     return _result(
         outcome,
@@ -399,6 +471,35 @@ def run_interactive_harness(
 class HarnessFailure(Exception):
     def __init__(self, reason_code: str):
         self.reason_code = reason_code
+
+
+def _bounded_factory_call(factory: Callable[[], Adapter], timeout_seconds: int, cancel_event: threading.Event) -> Adapter:
+    """Bound construction of a trusted, side-effect-free adapter factory."""
+    _check_cancel(cancel_event)
+    result: queue.Queue = queue.Queue(maxsize=1)
+
+    def invoke():
+        try:
+            result.put((True, factory()))
+        except BaseException as error:
+            result.put((False, error))
+
+    worker = threading.Thread(target=invoke, name="u9-office-wps-adapter-factory", daemon=True)
+    worker.start()
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        if cancel_event.is_set():
+            raise Cancelled
+        try:
+            success, value = result.get(timeout=min(0.05, remaining))
+        except queue.Empty:
+            continue
+        if success:
+            return value
+        raise value
 
 
 def _result(
@@ -480,6 +581,7 @@ def _bounded_call(
     *args,
     timeout_seconds: int,
     cancel_event: threading.Event,
+    abort_on_error: bool = False,
 ):
     """Watch an adapter call and abort the full run on deadline or cancellation.
 
@@ -505,18 +607,24 @@ def _bounded_call(
                 raise UncleanAdapter
             worker.join(MAX_ABORT_GRACE_SECONDS)
             if cancel_event.is_set():
-                raise Cancelled
-            raise TimeoutError
+                raise RunAbortConfirmed("cancelled")
+            raise RunAbortConfirmed("timeout")
         try:
             success, value = result.get(timeout=min(0.05, remaining))
         except queue.Empty:
             continue
         if success:
             return value
+        if isinstance(value, Cancelled):
+            if not _abort_adapter(adapter, worker):
+                raise UncleanAdapter
+            raise RunAbortConfirmed("cancelled")
+        if abort_on_error and not _abort_adapter(adapter, worker):
+            raise UncleanAdapter
         raise value
 
 
-def _abort_adapter(adapter: Adapter, worker: threading.Thread) -> bool:
+def _abort_adapter(adapter: Adapter, worker: threading.Thread | None = None) -> bool:
     completed = threading.Event()
     succeeded = threading.Event()
 
@@ -531,8 +639,10 @@ def _abort_adapter(adapter: Adapter, worker: threading.Thread) -> bool:
 
     threading.Thread(target=abort, name="u9-office-wps-abort", daemon=True).start()
     abort_completed = completed.wait(MAX_ABORT_GRACE_SECONDS)
-    worker.join(MAX_ABORT_GRACE_SECONDS)
-    return abort_completed and succeeded.is_set() and not worker.is_alive()
+    if worker is not None:
+        worker.join(MAX_ABORT_GRACE_SECONDS)
+    worker_stopped = worker is None or not worker.is_alive()
+    return abort_completed and succeeded.is_set() and worker_stopped
 
 
 def _is_within(path: Path, parent: Path) -> bool:
