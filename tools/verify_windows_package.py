@@ -12,6 +12,10 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 HEX = re.compile(r"^[0-9a-f]{64}$")
+MAX_ARCHIVE_ENTRIES = 20_000
+MAX_MEMBER_BYTES = 512 * 1024 * 1024
+MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+WINDOWS_RESERVED = {"con", "prn", "aux", "nul", "conin$", "conout$", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10)), *(f"com{i}" for i in "¹²³"), *(f"lpt{i}" for i in "¹²³")}
 REQUIRED = {"schemaVersion", "package", "sourceRevision", "target", "configuration", "selfContained", "runtimeIdentifier", "dependencyLockFiles", "license", "signed", "excludedRuntimes", "files"}
 
 def fail(message: str) -> None:
@@ -22,8 +26,13 @@ def safe_path(value: object) -> str:
         fail("manifest path must be a non-empty POSIX relative path")
     raw_parts = value.split("/")
     p = PurePosixPath(value)
-    if p.is_absolute() or any(part in ("", ".", "..") for part in raw_parts) or ":" in raw_parts[0]:
+    if p.is_absolute() or any(part in ("", ".", "..") for part in raw_parts):
         fail(f"unsafe package path: {value!r}")
+    for part in raw_parts:
+        stem = part.split(".", 1)[0].casefold()
+        if (any(ord(char) < 32 for char in part) or any(char in '<>:"|?*' for char in part)
+                or part.endswith((".", " ")) or stem in WINDOWS_RESERVED):
+            fail(f"Windows-incompatible package path: {value!r}")
     return p.as_posix()
 
 def validate(root: Path, excluded_outputs: set[str] | None = None) -> dict:
@@ -38,7 +47,7 @@ def validate(root: Path, excluded_outputs: set[str] | None = None) -> dict:
         fail("package license/signing declaration is invalid")
     if not isinstance(m["sourceRevision"], str) or not re.fullmatch(r"[0-9a-f]{40,64}", m["sourceRevision"]):
         fail("invalid source revision")
-    seen = set()
+    seen, folded_seen = set(), set()
     entries = m["files"]
     if not isinstance(entries, list) or not entries:
         fail("manifest files must be a non-empty array")
@@ -46,10 +55,11 @@ def validate(root: Path, excluded_outputs: set[str] | None = None) -> dict:
         if not isinstance(row, dict) or set(row) != {"path", "size", "sha256"}:
             fail("invalid file entry")
         name = safe_path(row["path"])
-        if name in seen:
+        if name.casefold() in folded_seen:
             fail(f"duplicate manifest path: {name}")
         seen.add(name)
-        if not isinstance(row["size"], int) or row["size"] < 0 or not isinstance(row["sha256"], str) or not HEX.fullmatch(row["sha256"]):
+        folded_seen.add(name.casefold())
+        if not isinstance(row["size"], int) or isinstance(row["size"], bool) or row["size"] < 0 or row["size"] > MAX_MEMBER_BYTES or not isinstance(row["sha256"], str) or not HEX.fullmatch(row["sha256"]):
             fail(f"invalid size or digest for {name}")
         path = root.joinpath(*PurePosixPath(name).parts)
         attrs = getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0)
@@ -96,19 +106,33 @@ def verify_archive(archive: Path, expected_root: Path, excluded_outputs: set[str
                     digest.update(block)
             expected[path.relative_to(expected_root).as_posix()] = (size, digest.hexdigest())
     with zipfile.ZipFile(archive) as z:
+        infos = z.infolist()
+        if len(infos) > MAX_ARCHIVE_ENTRIES:
+            fail("archive contains too many entries")
         names, seen = [], set()
-        for info in z.infolist():
-            name = safe_path(info.filename.rstrip("/")) if info.filename.rstrip("/") else ""
+        total_size = 0
+        for info in infos:
+            is_directory = info.is_dir()
+            raw_name = info.filename[:-1] if is_directory and info.filename.endswith("/") else info.filename
+            name = safe_path(raw_name) if raw_name else ""
             if not name:
                 fail("rooted or empty ZIP entry")
-            if name in seen:
-                fail(f"duplicate ZIP entry: {name}")
-            seen.add(name)
+            folded = name.casefold()
+            if folded in seen:
+                fail(f"duplicate ZIP entry or case-colliding path: {name}")
+            seen.add(folded)
             mode = info.external_attr >> 16
-            if stat.S_ISLNK(mode):
-                fail(f"symlink ZIP entry: {name}")
-            if info.is_dir():
+            file_type = stat.S_IFMT(mode)
+            if file_type and (file_type != stat.S_IFDIR if is_directory else file_type != stat.S_IFREG):
+                kind = "symlink" if stat.S_ISLNK(mode) else "special-file"
+                fail(f"{kind} ZIP entry: {name}")
+            if is_directory:
                 continue
+            if info.file_size > MAX_MEMBER_BYTES:
+                fail(f"archive member exceeds size limit: {name}")
+            total_size += info.file_size
+            if total_size > MAX_TOTAL_BYTES:
+                fail("archive exceeds total uncompressed size limit")
             names.append(name)
         if set(names) != set(expected):
             fail("archive file list differs from package directory")
@@ -122,10 +146,8 @@ def verify_archive(archive: Path, expected_root: Path, excluded_outputs: set[str
             if (size, digest.hexdigest()) != expected[name]:
                 fail(f"archive payload mismatch: {name}")
         with tempfile.TemporaryDirectory(prefix="paperbatch-package-check-") as temp:
-            for info in z.infolist():
-                name = info.filename.rstrip("/")
-                if not name:
-                    fail("empty ZIP entry")
+            for info in infos:
+                name = info.filename[:-1] if info.is_dir() and info.filename.endswith("/") else info.filename
                 target = Path(temp).joinpath(*PurePosixPath(name).parts)
                 if not target.resolve().is_relative_to(Path(temp).resolve()):
                     fail(f"archive path escapes extraction root: {name}")

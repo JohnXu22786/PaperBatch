@@ -67,6 +67,15 @@ jobs:
         shell: pwsh
         run: ./tools/simulate_windows_package_session.ps1 -PackageDirectory artifacts/windows-x64-lite -PackageArchive artifacts/windows-x64-lite/PaperBatch-windows-x64-lite.zip
 
+      - name: Upload bounded Windows package session report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: u9-windows-package-session-report
+          path: u9-windows-package-session-report.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload unsigned development package
         uses: actions/upload-artifact@v4
         with:
