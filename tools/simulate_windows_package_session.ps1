@@ -91,6 +91,21 @@ function Start-PaperBatchHost([string]$packageRoot) {
         if (-not $ready -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
     }
 }
+function Stop-PaperBatchHost([System.Diagnostics.Process]$process) {
+    if ($null -eq $process) { return }
+    $process.Refresh()
+    if ($process.HasExited) {
+        if ($process.ExitCode -ne 0) { throw "Packaged coordinator exited unexpectedly with code $($process.ExitCode)." }
+        return
+    }
+    try { Stop-Process -Id $process.Id -Force -ErrorAction Stop }
+    catch {
+        $process.Refresh()
+        if (-not $process.HasExited) { throw }
+        if ($process.ExitCode -ne 0) { throw "Packaged coordinator exited during cleanup with code $($process.ExitCode)." }
+    }
+    if (-not $process.WaitForExit(5000)) { throw 'Packaged coordinator did not stop within five seconds.' }
+}
 function Invoke-Doctor([string]$command) {
     $project = Join-Path $repoRoot 'src/PaperBatch.Cli/PaperBatch.Cli.csproj'
     $stdout = Join-Path $temp "cli-$command.stdout"
@@ -144,27 +159,24 @@ try {
     $dataRoot = Join-Path $local 'PaperBatch'
     $marker = Join-Path $dataRoot 'u9-swap-marker.txt'
     Set-Content -LiteralPath $marker -Value 'fixture-survives-package-tree-switch' -Encoding utf8
-    Stop-Process -Id $hostProcess.Id -Force; $hostProcess = $null
+    Stop-PaperBatchHost $hostProcess; $hostProcess = $null
     $hostProcess = Start-PaperBatchHost $packageB
     Invoke-Doctor 'doctor'
     if ((Get-Content -Raw -LiteralPath $marker).Trim() -ne 'fixture-survives-package-tree-switch') { throw 'User-data fixture did not survive package-tree switch.' }
-    Stop-Process -Id $hostProcess.Id -Force; $hostProcess = $null
+    Stop-PaperBatchHost $hostProcess; $hostProcess = $null
     $hostProcess = Start-PaperBatchHost $packageA
     Invoke-Doctor 'doctor'
     if ((Get-Content -Raw -LiteralPath $marker).Trim() -ne 'fixture-survives-package-tree-switch') { throw 'User-data fixture did not survive package-tree rollback.' }
-    Stop-Process -Id $hostProcess.Id -Force; $hostProcess = $null
+    Stop-PaperBatchHost $hostProcess; $hostProcess = $null
     if (-not (Test-Path -LiteralPath $dataRoot) -or -not (Test-Path -LiteralPath (Join-Path $dataRoot 'CoordinatorLocks'))) { throw 'Coordinator did not use isolated PaperBatch app data.' }
     $sessionFiles = @(Get-ChildItem -LiteralPath $sessionRoot -File -Recurse | ForEach-Object { [IO.Path]::GetFullPath($_.FullName) })
     foreach ($file in $sessionFiles) { if (-not $file.StartsWith([IO.Path]::GetFullPath($sessionRoot) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Session file escaped the task-owned root.' } }
     $scenario.assertions += 'task-owned-session-file-boundary-passed'
     $scenario.status = 'passed'
 } finally {
-    if ($hostProcess -and -not $hostProcess.HasExited) {
-        try {
-            Stop-Process -Id $hostProcess.Id -Force -ErrorAction Stop
-            $hostProcess.WaitForExit(5000)
-            if (-not $hostProcess.HasExited) { $scenario.status = 'failed'; $scenario.assertions += 'coordinator-process-cleanup-failed' }
-        } catch { $scenario.status = 'failed'; $scenario.assertions += 'coordinator-process-cleanup-failed' }
+    if ($hostProcess) {
+        try { Stop-PaperBatchHost $hostProcess }
+        catch { $scenario.status = 'failed'; $scenario.assertions += 'coordinator-process-cleanup-failed' }
     }
     foreach ($rule in $blockedRules) {
         try { Remove-NetFirewallRule -DisplayName $rule -ErrorAction Stop }
