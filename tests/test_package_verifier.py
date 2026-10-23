@@ -7,7 +7,7 @@ import zipfile
 from unittest.mock import patch
 from pathlib import Path
 
-from tools.verify_windows_package import validate, verify_archive
+from tools.verify_windows_package import safe_path, validate, verify_archive
 
 class PackageVerifierTests(unittest.TestCase):
     def archive_with(self, archive, member, data=b'bad', mode=None):
@@ -84,6 +84,11 @@ class PackageVerifierTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'unsafe package path'):
                 validate(root)
 
+    def test_windows_console_device_paths_are_rejected(self):
+        for unsafe in ['app/CONIN$', 'app/CONOUT$']:
+            with self.subTest(path=unsafe), self.assertRaisesRegex(ValueError, 'Windows-incompatible'):
+                safe_path(unsafe)
+
     def test_archive_symlink_is_rejected(self):
         import stat
         with tempfile.TemporaryDirectory() as temp:
@@ -124,7 +129,7 @@ class PackageVerifierTests(unittest.TestCase):
                 verify_archive(archive, root)
 
     def test_windows_sensitive_archive_names_rejected_before_extraction(self):
-        cases = ['../outside', '/rooted', 'C:/drive', 'app/file:stream', 'app/CON.txt',
+        cases = ['../outside', '/rooted', 'C:/drive', 'app/file:stream', 'app/CON.txt', 'app/CONIN$', 'app/CONOUT$',
                  'app/name. ', 'app/name.', 'app/COM1.log', 'app/with?.dll']
         for member in cases:
             with self.subTest(member=member), tempfile.TemporaryDirectory() as temp:
@@ -132,7 +137,8 @@ class PackageVerifierTests(unittest.TestCase):
                 archive = Path(temp) / 'malicious.zip'
                 self.archive_with(archive, member)
                 outside = Path(temp).parent / 'outside'
-                with self.assertRaises(ValueError):
+                message = 'unsafe package path' if member in {'../outside', '/rooted'} else 'Windows-incompatible'
+                with self.assertRaisesRegex(ValueError, message):
                     verify_archive(archive, root)
                 self.assertFalse(outside.exists())
                 self.assertEqual(list(Path(temp).glob('paperbatch-package-check-*')), [])

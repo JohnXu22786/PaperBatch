@@ -15,7 +15,7 @@ HEX = re.compile(r"^[0-9a-f]{64}$")
 MAX_ARCHIVE_ENTRIES = 20_000
 MAX_MEMBER_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
-WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10)), *(f"com{i}" for i in "¹²³"), *(f"lpt{i}" for i in "¹²³")}
+WINDOWS_RESERVED = {"con", "prn", "aux", "nul", "conin$", "conout$", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10)), *(f"com{i}" for i in "¹²³"), *(f"lpt{i}" for i in "¹²³")}
 REQUIRED = {"schemaVersion", "package", "sourceRevision", "target", "configuration", "selfContained", "runtimeIdentifier", "dependencyLockFiles", "license", "signed", "excludedRuntimes", "files"}
 
 def fail(message: str) -> None:
