@@ -34,6 +34,12 @@ MAX_PACKAGE_ENTRIES = 256
 MAX_PACKAGE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024
 MAX_LOG_CHARS = 2_000
 MAX_PDF_BYTES = 64 * 1024 * 1024
+SECRET_ASSIGNMENT = re.compile(
+    r'''(?i)(password|passwd|token|secret|credentials?|api[_-]?key)(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)'''
+)
+AUTHORIZATION_ASSIGNMENT = re.compile(r"(?i)((?:proxy-)?authorization)(\s*[:=]\s*)[^\r\n,;]*")
+BEARER_CREDENTIAL = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*")
+ABSOLUTE_PATH = re.compile(r"(?<!\w)(?:(?:[A-Za-z]:[\\/]|/)|\\\\)[^\r\n]*")
 
 
 def file_sha256(path: Path) -> str:
@@ -145,11 +151,11 @@ def select_fixtures(manifest: dict[str, Any], corpus_dir: Path) -> tuple[list[di
             total_selected_bytes += size
         else:
             skipped.append({
-                "id": fixture_id,
-                "path": path_value or "",
+                "id": _redacted_log(str(fixture_id)),
+                "path": _redacted_log(str(path_value or "")),
                 "sha256": fixture.get("sha256"),
                 "sizeBytes": fixture.get("size_bytes"),
-                "reason": str(reason),
+                "reason": _redacted_log(str(reason)),
             })
     selected.sort(key=lambda item: item["id"])
     return selected, skipped
@@ -165,7 +171,7 @@ def result_record(
         reason = _conversion_failure_reason(command, output_bytes, structure_valid)
     return {
         "inputId": fixture["id"],
-        "inputPath": fixture["path"],
+        "inputPath": _redacted_log(str(fixture["path"])),
         "inputSha256": input_sha256,
         "manifestSha256": fixture["sha256"],
         "inputBytes": fixture["size_bytes"],
@@ -174,13 +180,13 @@ def result_record(
         "timedOut": command.get("timedOut") if command else False,
         "launchAttempted": command.get("launchAttempted") if command else False,
         "identityVerified": command.get("identityVerified") if command else False,
-        "identityFailure": command.get("identityFailure") if command else None,
+        "identityFailure": _redacted_log(str(command["identityFailure"])) if command and command.get("identityFailure") else None,
         "durationSeconds": command.get("durationSeconds") if command else 0,
         "outputPdfBytes": output_bytes,
         "outputPdfSha256": output_sha256,
         "pageInspection": {"status": page_inspection_status, "structureValid": structure_valid, "pageCount": page_count},
-        "stdout": _bounded_log(command.get("stdout", "")) if command else "",
-        "stderr": _bounded_log(command.get("stderr", "")) if command else "",
+        "stdout": _redacted_log(command.get("stdout", "")) if command else "",
+        "stderr": _redacted_log(command.get("stderr", "")) if command else "",
         "reason": reason,
     }
 
@@ -194,7 +200,7 @@ def _conversion_failure_reason(
         return "total corpus runtime budget exhausted before LibreOffice launch."
     if command.get("launchAttempted") is False:
         detail = command.get("stderr") or command.get("identityFailure") or "runtime preparation failed"
-        return f"LibreOffice was not launched; {_bounded_log(str(detail))}."
+        return f"LibreOffice was not launched; {_redacted_log(str(detail))}."
     if command.get("timedOut"):
         process = f"LibreOffice exceeded its per-file timeout after {command.get('durationSeconds')} seconds"
     else:
@@ -214,7 +220,7 @@ def _conversion_failure_reason(
         output += " but failed PDF structure validation"
     if command.get("identityVerified") is False:
         identity_failure = command.get("identityFailure") or command.get("stderr") or "pinned engine/runtime identity could not be verified"
-        return f"LibreOffice output was rejected because {_bounded_log(str(identity_failure))}; {output}."
+        return f"LibreOffice output was rejected because {_redacted_log(str(identity_failure))}; {output}."
     empty_logs = [name for name in ("stdout", "stderr") if not command.get(name)]
     details = f"; {', '.join(empty_logs)} empty" if empty_logs else ""
     return f"{process}; {output}{details}."
@@ -224,6 +230,15 @@ def _bounded_log(value: str) -> str:
     if len(value) <= MAX_LOG_CHARS:
         return value
     return value[:MAX_LOG_CHARS] + " [truncated]"
+
+
+def _redacted_log(value: str) -> str:
+    """Keep engine diagnostics useful without publishing credentials or host paths."""
+    safe = ABSOLUTE_PATH.sub("[PATH]", value)
+    safe = AUTHORIZATION_ASSIGNMENT.sub(r"\1\2[REDACTED]", safe)
+    safe = SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", safe)
+    safe = BEARER_CREDENTIAL.sub("Bearer [REDACTED]", safe)
+    return _bounded_log(safe)
 
 
 def classify_report(
@@ -321,7 +336,7 @@ def run_corpus(engine_binary: str, expected_engine_sha256: str, timeout_seconds:
             version_output = version.get("stdout") or version.get("stderr") or ""
             version_ok = (not version.get("timedOut") and version.get("exitCode") == 0
                           and version.get("identityVerified") and re.match(r"^LibreOffice(?:Dev)?\s+\S+", version_output, re.I))
-            engine = {"version": version_output if version_ok else None, "binarySha256": pinned.sha256,
+            engine = {"version": _redacted_log(version_output) if version_ok else None, "binarySha256": pinned.sha256,
                       "expectedBinarySha256": expected_engine_sha256.lower(),
                       "runtimeDirectorySha256": pinned.runtime_directory_sha256,
                       "versionCommand": {key: version.get(key) for key in ("exitCode", "timedOut", "durationSeconds")}}
@@ -417,7 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         report, exit_code = run_corpus(args.engine_binary, args.expected_engine_sha256, args.timeout_seconds,
                                        args.budget_seconds, args.corpus_dir)
     except (OSError, ValueError, json.JSONDecodeError, zipfile.BadZipFile) as error:
-        report, exit_code = {"schemaVersion": "1.0", "status": "blocked", "reason": str(error),
+        report, exit_code = {"schemaVersion": "1.0", "status": "blocked", "reason": _redacted_log(str(error)),
                              "compatibilityEvidenceCount": 0}, 1
     output = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if args.output:
