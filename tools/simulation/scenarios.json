@@ -4,18 +4,29 @@
   "lanes": {
     "linux": {
       "scenarioId": "ipp.fake_loopback_endpoint.linux_runner_python_http_client.smoke",
+      "endpoint": "fake_loopback_endpoint",
       "client": "python_stdlib_http_client_on_linux_runner",
       "evidenceLimit": "Synthetic loopback request/response contract only; does not invoke CUPS, PaperBatch, a printer, or paper output."
     },
     "windows": {
       "scenarioId": "ipp.fake_loopback_endpoint.windows_runner_python_http_client.smoke",
+      "endpoint": "fake_loopback_endpoint",
       "client": "python_stdlib_http_client_on_windows_runner",
       "evidenceLimit": "Synthetic loopback request/response contract only; does not invoke Winspool, PaperBatch, a printer, or paper output."
     },
     "macos": {
       "scenarioId": "ipp.fake_loopback_endpoint.macos_runner_python_http_client.smoke",
+      "endpoint": "fake_loopback_endpoint",
       "client": "python_stdlib_http_client_on_macos_runner",
-      "evidenceLimit": "Synthetic loopback request/response contract only; does not invoke macOS CUPS or PaperBatch. Protocol interoperability is not PaperBatch macOS support and does not prove physical output."
+      "evidenceLimit": "Synthetic loopback request/response contract only; does not invoke macOS CUPS or PaperBatch. Protocol interoperability is not PaperBatch macOS support and does not prove physical output.",
+      "additionalScenarios": [
+        {
+          "scenarioId": "ipp.cups_ipptool_loopback.macos_runner.system_cups_client.protocol",
+          "endpoint": "fake_loopback_endpoint",
+          "client": "macos_system_ipptool",
+          "evidenceLimit": "macOS CUPS ipptool protocol exchange with a synthetic loopback endpoint only; does not invoke PaperBatch, a printer, or paper output."
+        }
+      ]
     }
   },
   "nativeOfficeWps": {
