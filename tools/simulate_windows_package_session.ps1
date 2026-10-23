@@ -67,6 +67,15 @@ function Get-SnapshotDigest($value) {
     $bytes = [Text.Encoding]::UTF8.GetBytes($json)
     return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
 }
+function Get-PaperBatchHostFailureOutput([System.Diagnostics.Process]$process) {
+    foreach ($path in @($process.PaperBatchStderrPath, $process.PaperBatchStdoutPath)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        $output = [IO.File]::ReadAllText($path)
+        if ($output.Length -gt 4096) { $output = $output.Substring($output.Length - 4096) }
+        if (-not [string]::IsNullOrWhiteSpace($output)) { return $output.Trim() }
+    }
+    return ''
+}
 function Start-PaperBatchHost([string]$packageRoot) {
     $exe = Join-Path $packageRoot 'app/PaperBatch.Desktop.exe'
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Packaged host missing: $exe" }
@@ -84,7 +93,10 @@ function Start-PaperBatchHost([string]$packageRoot) {
     $ready = $false
     try {
         while ([DateTime]::UtcNow -lt $deadline) {
-            if ($proc.HasExited) { throw "Packaged coordinator exited during startup ($($proc.ExitCode))." }
+            if ($proc.HasExited) {
+                $details = Get-PaperBatchHostFailureOutput $proc
+                throw "Packaged coordinator exited during startup ($($proc.ExitCode)). Output: $details"
+            }
             $owned = Get-CimInstance Win32_Process -Filter "ProcessId = $($proc.Id)"
             if (-not $owned -or [string]::IsNullOrWhiteSpace($owned.ExecutablePath)) { throw 'Coordinator process ownership could not be verified.' }
             if ([IO.Path]::GetFullPath($owned.ExecutablePath) -ne [IO.Path]::GetFullPath($exe)) { throw 'Coordinator process executable does not match the staged package.' }
@@ -98,28 +110,17 @@ function Start-PaperBatchHost([string]$packageRoot) {
 }
 function Stop-PaperBatchHost([System.Diagnostics.Process]$process) {
     if ($null -eq $process) { return }
-    function Get-FailureOutput([string]$path) {
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return '' }
-        $output = [IO.File]::ReadAllText($path)
-        if ($output.Length -gt 4096) { $output = $output.Substring($output.Length - 4096) }
-        return $output.Trim()
-    }
     $process.Refresh()
     if ($process.HasExited) {
-        if ($process.ExitCode -ne 0) {
-            $details = Get-FailureOutput $process.PaperBatchStderrPath
-            if (-not $details) { $details = Get-FailureOutput $process.PaperBatchStdoutPath }
-            throw "Packaged coordinator exited unexpectedly with code $($process.ExitCode). Output: $details"
-        }
-        return
+        $details = Get-PaperBatchHostFailureOutput $process
+        throw "Packaged coordinator exited before cleanup was requested (code $($process.ExitCode)). Output: $details"
     }
     try { Stop-Process -Id $process.Id -Force -ErrorAction Stop }
     catch {
         $process.Refresh()
         if (-not $process.HasExited) { throw }
         if ($process.ExitCode -ne 0) {
-            $details = Get-FailureOutput $process.PaperBatchStderrPath
-            if (-not $details) { $details = Get-FailureOutput $process.PaperBatchStdoutPath }
+            $details = Get-PaperBatchHostFailureOutput $process
             throw "Packaged coordinator exited during cleanup with code $($process.ExitCode). Output: $details"
         }
     }
