@@ -240,6 +240,20 @@ try {
         schemaVersion = 1; commit = (& git -C $repoRoot rev-parse HEAD).Trim()
         runner = [ordered]@{ os = [string](Get-CimInstance Win32_OperatingSystem).Caption; image = $env:ImageOS; name = $env:RUNNER_NAME; powershell = $PSVersionTable.PSVersion.ToString() }
         packageManifestSha256 = $beforeManifest; generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        packageTreeComparison = [ordered]@{
+            status = 'partial'
+            distinctArtifacts = $false
+            trees = @(
+                [ordered]@{ id = 'package-a'; sourceRevision = (Get-Content -Raw -LiteralPath (Join-Path $PackageDirectory 'package-manifest.json') | ConvertFrom-Json).sourceRevision; packageManifestSha256 = $beforeManifest; archiveSha256 = (Get-FileHash -LiteralPath $PackageArchive -Algorithm SHA256).Hash.ToLowerInvariant() },
+                [ordered]@{ id = 'package-b'; sourceRevision = (Get-Content -Raw -LiteralPath (Join-Path $PackageDirectory 'package-manifest.json') | ConvertFrom-Json).sourceRevision; packageManifestSha256 = $beforeManifest; archiveSha256 = (Get-FileHash -LiteralPath $PackageArchive -Algorithm SHA256).Hash.ToLowerInvariant() }
+            )
+            reason = 'Both trees are extracted from the same current package archive; no historical release artifact or supported package upgrade lifecycle is available.'
+        }
+        schemaMigration = [ordered]@{
+            evidence = 'managed-compatibility-tests'
+            tests = @('SQLite migrations are idempotent and preserve v1 records', 'SQLite migration failure rolls back and never resubmits legacy jobs')
+            boundary = 'SQLite schema semantics only; no previous application version, installer/updater, or product-level rollback lifecycle is exercised.'
+        }
         observations = [ordered]@{
             printers = [ordered]@{ status = $printerObservationStatus; beforeSha256 = $beforePrinterHash; afterSha256 = $afterPrinterHash; beforeCount = if ($null -ne $beforePrinters) { $beforePrinters.Count } else { $null }; afterCount = if ($null -ne $afterPrinters) { $afterPrinters.Count } else { $null } }
             registry = [ordered]@{ status = $registryObservationStatus; beforeSha256 = $beforeRegistryHash; afterSha256 = $afterRegistryHash; selectedKeyCount = 3 }
