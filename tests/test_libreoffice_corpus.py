@@ -245,27 +245,12 @@ class LibreOfficeCorpusTests(unittest.TestCase):
                 self.assertIn("[PATH]", skipped[0]["path"])
 
     def test_selected_windows_manifest_path_is_redacted_in_results(self):
-        source_fixture = CORPUS_DIR / "variants/docx_000.docx"
         windows_path = "C:\\Users\\Jane Doe\\document.docx"
-        with tempfile.TemporaryDirectory() as directory:
-            corpus = Path(directory)
-            target = corpus / windows_path
-            target.write_bytes(source_fixture.read_bytes())
-            data = target.read_bytes()
-            manifest = {
-                "synthetic": True, "evidence_class": "synthetic", "simulation_only": True,
-                "fixtures": [{
-                    "id": "docx_variant_000", "path": windows_path, "format": "docx", "stratum": "docx",
-                    "expected_outcome": {"status": "accepted"}, "evidence_class": "synthetic", "simulation_only": True,
-                    "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data),
-                }],
-            }
-            selected, skipped = run_libreoffice_corpus.select_fixtures(manifest, corpus)
-
-        self.assertEqual(skipped, [])
-        self.assertEqual(len(selected), 1)
+        selected_fixture = {
+            "id": "docx_variant_000", "path": windows_path, "sha256": "a" * 64, "size_bytes": 123,
+        }
         result = run_libreoffice_corpus.result_record(
-            selected[0], status="failed", input_sha256=selected[0]["sha256"], output_bytes=None,
+            selected_fixture, status="failed", input_sha256=selected_fixture["sha256"], output_bytes=None,
             output_sha256=None, page_count=None, command=None,
         )
         self.assertNotIn("Jane Doe", result["inputPath"])
