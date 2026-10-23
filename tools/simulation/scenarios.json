@@ -30,8 +30,10 @@
     }
   },
   "nativeOfficeWps": {
-    "scenarioId": "office_wps.native_runner.provisioning_stub",
+    "scenarioId": "office_wps.native_runner.trusted_snapshot_contract",
     "outcome": "blocked",
-    "reason": "No trusted licensed disposable Office/WPS runner is provisioned for this unit."
+    "reason": "No already available, legitimately licensed isolated Windows 11 VM or exact snapshot is available in this environment.",
+    "requiredSnapshotProfiles": ["office_only", "wps_only", "coexistence"],
+    "compatibilityClaimsOpen": true
   }
 }

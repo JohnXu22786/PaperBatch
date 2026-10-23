@@ -160,7 +160,9 @@ class SimulationMatrixTests(unittest.TestCase):
     def test_native_runner_stub_is_blocked(self):
         scenario = simulation_matrix.native_runner_stub()
         self.assertEqual(scenario["outcome"], "blocked")
-        self.assertIn("provisioned", scenario["evidenceLimit"].lower())
+        self.assertIn("snapshot", scenario["evidenceLimit"].lower())
+        self.assertEqual(scenario["requiredSnapshotProfiles"], ["office_only", "wps_only", "coexistence"])
+        self.assertTrue(scenario["compatibilityClaimsOpen"])
 
 
 if __name__ == "__main__":
