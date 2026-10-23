@@ -68,13 +68,25 @@ function Get-SnapshotDigest($value) {
     return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
 }
 function Get-PaperBatchHostFailureOutput([System.Diagnostics.Process]$process) {
-    foreach ($path in @($process.PaperBatchStderrPath, $process.PaperBatchStdoutPath)) {
+    $details = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in @(
+        @{ label = 'stderr'; path = $process.PaperBatchStderrPath },
+        @{ label = 'stdout'; path = $process.PaperBatchStdoutPath }
+    )) {
+        $path = $entry.path
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
-        $output = [IO.File]::ReadAllText($path)
-        if ($output.Length -gt 4096) { $output = $output.Substring($output.Length - 4096) }
-        if (-not [string]::IsNullOrWhiteSpace($output)) { return $output.Trim() }
+        $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        try {
+            $count = [int][Math]::Min(1900, $stream.Length)
+            if ($count -le 0) { continue }
+            [void]$stream.Seek(-$count, [IO.SeekOrigin]::End)
+            $bytes = [byte[]]::new($count)
+            [void]$stream.Read($bytes, 0, $count)
+            $output = [Text.Encoding]::UTF8.GetString($bytes).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($output)) { $details.Add("[$($entry.label) tail] $output") }
+        } finally { $stream.Dispose() }
     }
-    return ''
+    return ($details -join "`n")
 }
 function Start-PaperBatchHost([string]$packageRoot) {
     $exe = Join-Path $packageRoot 'app/PaperBatch.Desktop.exe'
