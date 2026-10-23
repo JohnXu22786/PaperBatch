@@ -70,7 +70,12 @@ function Get-SnapshotDigest($value) {
 function Start-PaperBatchHost([string]$packageRoot) {
     $exe = Join-Path $packageRoot 'app/PaperBatch.Desktop.exe'
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Packaged host missing: $exe" }
-    $proc = Start-Process -FilePath $exe -ArgumentList '--coordinator-host' -WorkingDirectory (Split-Path -Parent $exe) -PassThru -WindowStyle Hidden
+    $logPrefix = Join-Path $temp "coordinator-$([Guid]::NewGuid().ToString('N'))"
+    $stdout = "$logPrefix.stdout"
+    $stderr = "$logPrefix.stderr"
+    $proc = Start-Process -FilePath $exe -ArgumentList '--coordinator-host' -WorkingDirectory (Split-Path -Parent $exe) -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $proc | Add-Member -NotePropertyName PaperBatchStdoutPath -NotePropertyValue $stdout
+    $proc | Add-Member -NotePropertyName PaperBatchStderrPath -NotePropertyValue $stderr
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $pipeInput = [Text.Encoding]::UTF8.GetBytes("PaperBatch`n$sid")
     $pipeDigest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pipeInput)).ToLowerInvariant().Substring(0, 24)
@@ -93,16 +98,30 @@ function Start-PaperBatchHost([string]$packageRoot) {
 }
 function Stop-PaperBatchHost([System.Diagnostics.Process]$process) {
     if ($null -eq $process) { return }
+    function Get-FailureOutput([string]$path) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return '' }
+        $output = [IO.File]::ReadAllText($path)
+        if ($output.Length -gt 4096) { $output = $output.Substring($output.Length - 4096) }
+        return $output.Trim()
+    }
     $process.Refresh()
     if ($process.HasExited) {
-        if ($process.ExitCode -ne 0) { throw "Packaged coordinator exited unexpectedly with code $($process.ExitCode)." }
+        if ($process.ExitCode -ne 0) {
+            $details = Get-FailureOutput $process.PaperBatchStderrPath
+            if (-not $details) { $details = Get-FailureOutput $process.PaperBatchStdoutPath }
+            throw "Packaged coordinator exited unexpectedly with code $($process.ExitCode). Output: $details"
+        }
         return
     }
     try { Stop-Process -Id $process.Id -Force -ErrorAction Stop }
     catch {
         $process.Refresh()
         if (-not $process.HasExited) { throw }
-        if ($process.ExitCode -ne 0) { throw "Packaged coordinator exited during cleanup with code $($process.ExitCode)." }
+        if ($process.ExitCode -ne 0) {
+            $details = Get-FailureOutput $process.PaperBatchStderrPath
+            if (-not $details) { $details = Get-FailureOutput $process.PaperBatchStdoutPath }
+            throw "Packaged coordinator exited during cleanup with code $($process.ExitCode). Output: $details"
+        }
     }
     if (-not $process.WaitForExit(5000)) { throw 'Packaged coordinator did not stop within five seconds.' }
 }
