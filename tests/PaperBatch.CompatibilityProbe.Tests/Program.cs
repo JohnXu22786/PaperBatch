@@ -36,6 +36,11 @@ if (args.Length >= 1 && args[0] == "--resource-stress")
     return ResourceStressProfile.RunCommand(args);
 }
 
+if (args.Length >= 1 && args[0] == "--fault-security-stress")
+{
+    return FaultSecurityStressProfile.RunCommand(args);
+}
+
 if (args.Length == 6 && args[0] == "--source-cache-worker")
 {
     return SourceIntakeTests.RunCrossProcessCacheWorker(args[1], args[2], args[3], args[4], args[5]);
@@ -45,6 +50,7 @@ var tests = new List<(string Name, Action Run)>
 {
     ("app data override isolates the resolved PaperBatch local data root", CoreTests.AppDataPathHonorsExplicitOverride),
     ("synthetic resource stress profile exercises bounded file and logical page counts", ResourceStressProfileSelfCheck),
+    ("fault security stress matrix is bounded, complete, and privacy-safe", FaultSecurityStressProfileSelfCheck),
     ("simulated evidence does not close G1", SimulatedEvidenceDoesNotCloseG1),
     ("artifact store persists stable PDF bytes and receipt", RendererTests.ArtifactStorePersistsStablePdfAndReceipt),
     ("artifact store rejects changed PDF bytes on readback", RendererTests.ArtifactStoreRejectsChangedPdfOnReadback),
@@ -321,6 +327,32 @@ static void ResourceStressProfileSelfCheck()
     Assert.Equal("cancelled", cancelledReport.Status);
     Assert.Equal("The stress profile was cancelled by the caller.", cancelledReport.Failure);
     Assert.True(cancelledReport.TemporaryFixturesRemoved);
+}
+
+static void FaultSecurityStressProfileSelfCheck()
+{
+    var report = FaultSecurityStressProfile.Run();
+    Assert.Equal(1, report.SchemaVersion);
+    Assert.Equal("simulation-only", report.EvidenceClass);
+    Assert.Equal("passed", report.Status);
+    Assert.Equal(FaultSecurityStressProfile.MaximumScenarioCount, report.Scenarios.Length);
+    Assert.Equal(report.Scenarios.Length, report.Scenarios.Select(scenario => scenario.Id).Distinct().Count());
+    Assert.True(report.Scenarios.All(scenario => scenario.Status == "passed"));
+    Assert.True(report.Scenarios.Any(scenario => scenario.Id == "lifecycle.ambiguous_acceptance_restart"));
+    Assert.True(report.Scenarios.Any(scenario => scenario.Id == "security.malicious_input_bounds"));
+    Assert.True(report.Scenarios.Any(scenario => scenario.Id == "privacy.diagnostic_redaction"));
+    Assert.True(report.Scenarios.Any(scenario => scenario.Id == "concurrency.watch_scan_serialization"));
+    Assert.True(report.Scenarios.All(scenario => !string.IsNullOrWhiteSpace(scenario.Client) && !string.IsNullOrWhiteSpace(scenario.Endpoint)));
+    Assert.True(!string.IsNullOrWhiteSpace(report.Commit));
+    Assert.True(report.SourceTreeDiffSha256.Length == 64 && report.SourceTreeDiffSha256.All(Uri.IsHexDigit));
+    Assert.True(!string.IsNullOrWhiteSpace(report.OperatingSystem) && !string.IsNullOrWhiteSpace(report.RunnerImage));
+    Assert.True(report.ToolVersions.ContainsKey("dotnetSdk"));
+    Assert.True(report.ToolVersions.ContainsKey("dotnetRuntime"));
+    Assert.Contains("No real queue", report.EvidenceLimit);
+    var serialized = System.Text.Json.JsonSerializer.Serialize(report);
+    Assert.True(!serialized.Contains("simulation-user-secret", StringComparison.Ordinal));
+    Assert.True(!serialized.Contains("/private/", StringComparison.Ordinal));
+    Assert.True(!serialized.Contains("TemporaryFixtureDirectory", StringComparison.Ordinal));
 }
 
 static void SimulatedEvidenceDoesNotCloseG1()
