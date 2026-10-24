@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
@@ -12,6 +14,39 @@ import run_python_unit_tests_ci
 
 
 class PythonCiDiagnosticsTests(unittest.TestCase):
+    def test_run_command_bounds_oversized_output_without_temp_artifacts(self) -> None:
+        script = (
+            "import sys; "
+            "sys.stdout.write('failure-start\\n'); sys.stdout.flush(); "
+            "sys.stdout.write('x' * 200000); sys.stdout.flush(); "
+            "sys.stderr.write('\\nfailure-end'); sys.stderr.flush(); "
+            "sys.exit(23)"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(tempfile, "tempdir", directory):
+                exit_code, output = run_python_unit_tests_ci.run_command(
+                    [sys.executable, "-c", script],
+                    cwd=directory,
+                    max_capture_bytes=512,
+                )
+
+            self.assertEqual(exit_code, 23)
+            self.assertLessEqual(len(output.encode("utf-8")), 512)
+            self.assertIn("failure-start", output)
+            self.assertIn("failure-end", output)
+            self.assertIn("middle omitted", output)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_run_command_preserves_success_exit_and_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, output = run_python_unit_tests_ci.run_command(
+                [sys.executable, "-c", "print('success-output')"],
+                cwd=directory,
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(output, "success-output\n")
+
     def test_sanitize_output_redacts_runner_and_profile_paths(self) -> None:
         output = (
             r"D:\a\PaperBatch\PaperBatch\tests\test_sample.py "
