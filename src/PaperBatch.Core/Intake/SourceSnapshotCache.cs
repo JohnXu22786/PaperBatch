@@ -359,10 +359,23 @@ public sealed class SourceSnapshotCache
     private FileStream OpenMutationLockFile()
     {
         var path = Path.Combine(_rootPath, MutationLockName);
-        if (!OperatingSystem.IsWindows())
+        if (OperatingSystem.IsMacOS())
         {
-            var flags = OperatingSystem.IsLinux() ? 0x00080042 : 0x01000202;
-            var descriptor = OpenUnixLockFile(path, flags, 0x180);
+            var options = new FileStreamOptions
+            {
+                Mode = FileMode.OpenOrCreate,
+                Access = FileAccess.ReadWrite,
+                Share = FileShare.ReadWrite,
+                BufferSize = 1,
+                Options = FileOptions.None,
+                UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite
+            };
+            return new FileStream(path, options);
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            var descriptor = OpenUnixLockFile(path, 0x00080042, 0x180);
             if (descriptor < 0) throw new IOException("The cache mutation lock file could not be opened.", new Win32Exception(Marshal.GetLastPInvokeError()));
             return new FileStream(new SafeFileHandle((IntPtr)descriptor, ownsHandle: true), FileAccess.ReadWrite, 1, isAsync: false);
         }

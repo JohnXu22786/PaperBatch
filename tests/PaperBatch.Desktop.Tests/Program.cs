@@ -342,10 +342,10 @@ static void MacSourceCaptureUsesSafeNativeIdentity()
         }
         catch (SourceIntakeException exception)
         {
-            var inner = exception.InnerException is null
-                ? "none"
-                : $"{exception.InnerException.GetType().Name}: {exception.InnerException.Message}";
-            throw new InvalidOperationException($"{exception.Diagnostic.Code}: {exception.Diagnostic.Message}; inner exception: {inner}", exception);
+            var inner = exception.InnerException;
+            var innerDetails = inner is null ? "none" : string.Join(" -> ", EnumerateExceptionChain(inner)
+                .Select(item => $"{item.GetType().Name}: {item.Message}"));
+            throw new InvalidOperationException($"{exception.Diagnostic.Code}: {exception.Diagnostic.Message}; inner exception: {innerDetails}", exception);
         }
 
         Assert.Equal(content.LongLength, snapshot.LengthBytes);
@@ -359,6 +359,11 @@ static void MacSourceCaptureUsesSafeNativeIdentity()
     {
         if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
+}
+
+static IEnumerable<Exception> EnumerateExceptionChain(Exception exception)
+{
+    for (Exception? current = exception; current is not null; current = current.InnerException) yield return current;
 }
 
 static string GetTestTempRoot() => Environment.GetEnvironmentVariable("PAPERBATCH_CI_TEST_TEMP") is { Length: > 0 } configuredRoot
