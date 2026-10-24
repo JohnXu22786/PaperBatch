@@ -225,7 +225,7 @@ static void PrintStatusFailuresAreVisibleAndBlockSubmission()
 
 static void SourceIntakeErrorsRemainVisibleAndAppend()
 {
-    var cacheRoot = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-tests", Guid.NewGuid().ToString("N"));
+    var cacheRoot = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-tests", Guid.NewGuid().ToString("N"));
     var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = cacheRoot });
     var sources = new ProductionPresentationSources(new SourceIntakeService(cache), new RendererCoordinator([]), cache);
     var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
@@ -254,7 +254,7 @@ static void SourceIntakeErrorsRemainVisibleAndAppend()
 
 static void IntentionalDuplicateQueueRowsRemainIndependent()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-duplicate-queue-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-duplicate-queue-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -284,7 +284,7 @@ static void IntentionalDuplicateQueueRowsRemainIndependent()
 
 static void CancelledRendererBatchReleasesEverySnapshot()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-tests", Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-tests", Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     var cacheRoot = Path.Combine(root, "cache");
     var firstPath = Path.Combine(root, "first.pdf");
@@ -311,6 +311,10 @@ static void CancelledRendererBatchReleasesEverySnapshot()
         if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
 }
+
+static string GetTestTempRoot() => Environment.GetEnvironmentVariable("PAPERBATCH_CI_TEST_TEMP") is { Length: > 0 } configuredRoot
+    ? configuredRoot
+    : Path.GetTempPath();
 
 static byte[] MinimalPdf()
 {
@@ -441,7 +445,7 @@ static void ProductionPresentationIsExplicitlyUnavailable()
 
 static void ProductionPreviewReadsPreparedArtifact()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-preview-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-preview-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -504,7 +508,7 @@ static void ProductionPreviewReadsPreparedArtifact()
 
 static void ChangedSourceAfterPreflightCreatesNoPreparedArtifact()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-changed-source-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-changed-source-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -576,7 +580,7 @@ static void PreparationControlsForwardRequestedSettingsAndInvalidate()
 
 static void RecipeDeviceConflictCreatesNoRunOrFinalArtifact()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-device-conflict-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-device-conflict-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -649,7 +653,7 @@ static void PreparationErrorsFollowSelectedLanguage()
 
 static void RecipeDuplexRequestChangesCompiledLayout()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-recipe-duplex-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-recipe-duplex-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -728,7 +732,7 @@ static byte[] TestOnePagePdf()
 
 static void CorruptSavedRecipesRemainVisibleAsAnError()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-corrupt-recipe-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-corrupt-recipe-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -774,7 +778,7 @@ static void CorruptSavedRecipesRemainVisibleAsAnError()
 
 static void RecipeLifecycleIsExplicitAndBounded()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-recipe-lifecycle-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-recipe-lifecycle-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -830,7 +834,7 @@ static string WriteOversizedRecipe(string root)
 
 static void CorruptSavedHistoryRemainsVisibleAsAnError()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-corrupt-history-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-corrupt-history-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
