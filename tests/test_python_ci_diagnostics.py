@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -46,7 +47,7 @@ class PythonCiDiagnosticsTests(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(output, "success-output\n")
+        self.assertEqual(output, f"success-output{os.linesep}")
 
     def test_run_command_bounds_decoded_invalid_utf8_output(self) -> None:
         script = (

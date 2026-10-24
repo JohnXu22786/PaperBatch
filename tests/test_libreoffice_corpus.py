@@ -270,12 +270,20 @@ class LibreOfficeCorpusTests(unittest.TestCase):
             missing_engine = root / "Jane Doe" / "missing-engine"
             output = io.StringIO()
 
-            with redirect_stdout(output):
+            with (
+                mock.patch.object(run_libreoffice_corpus.sys, "platform", "linux"),
+                mock.patch.object(run_libreoffice_corpus.probe, "open_pinned_engine") as open_engine,
+                mock.patch.object(run_libreoffice_corpus.probe, "invoke") as invoke,
+                redirect_stdout(output),
+            ):
                 exit_code = run_libreoffice_corpus.main([
                     "--engine-binary", str(missing_engine),
                     "--expected-engine-sha256", "a" * 64,
                     "--corpus-dir", str(corpus),
                 ])
+
+            open_engine.assert_not_called()
+            invoke.assert_not_called()
 
         report_text = output.getvalue()
         report = json.loads(report_text)
