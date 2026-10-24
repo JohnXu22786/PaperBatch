@@ -1,4 +1,4 @@
-"""Run the Windows CI Python suite and expose bounded, sanitized failures."""
+"""Run the CI Python suite and expose bounded, sanitized failures."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 
 MAX_DIAGNOSTIC_CHARS = 12_000
 MAX_CAPTURE_BYTES = 12_000
+MAX_RUN_OUTPUT_BYTES = 256_000
 MAX_WORKFLOW_ANNOTATION_BYTES = 12_000
 OMISSION_MARKER = "\n[... middle omitted ...]\n"
 WORKFLOW_OMISSION_MARKER = "%0A[... middle omitted ...]%0A"
@@ -21,12 +22,14 @@ def sanitize_output(
     *,
     workspace: str | None = None,
     runner_temp: str | None = None,
+    test_temp: str | None = None,
     home: str | None = None,
 ) -> str:
     """Hide runner-specific paths and profile names from test output."""
     path_replacements = (
         (workspace, "[WORKSPACE]"),
         (runner_temp, "[RUNNER_TEMP]"),
+        (test_temp, "[TEST_TEMP]"),
         (home, "[USER_HOME]"),
     )
     for path, replacement in path_replacements:
@@ -114,7 +117,7 @@ def bound_workflow_command_data(value: str, max_bytes: int) -> str:
 
 def format_workflow_annotation(exit_code: int, diagnostic: str) -> str:
     """Format a bounded Actions error command containing sanitized diagnostics."""
-    prefix = f"::error::Windows Python unit tests failed (exit code {exit_code})%0A"
+    prefix = f"::error::Python unit tests failed (exit code {exit_code})%0A"
     terminator = "\n"
     content_budget = (
         MAX_WORKFLOW_ANNOTATION_BYTES
@@ -177,11 +180,22 @@ class BoundedCapture:
         return head + self._marker.decode("ascii") + tail
 
 
+def summarize_unittest_failures(output: str) -> str:
+    """Return a compact failure list from unittest's standard traceback report."""
+    summaries: list[str] = []
+    for section in re.split(r"(?m)^={7,}\s*$", output):
+        lines = [line.strip() for line in section.splitlines() if line.strip()]
+        if not lines or not lines[0].startswith(("ERROR: ", "FAIL: ")):
+            continue
+        summaries.append(f"{lines[0]} — {lines[-1]}")
+    return "\n".join(summaries)
+
+
 def run_command(
     command: list[str],
     *,
     cwd: Path | str,
-    max_capture_bytes: int = MAX_CAPTURE_BYTES,
+    max_capture_bytes: int = MAX_RUN_OUTPUT_BYTES,
 ) -> tuple[int, str]:
     """Drain merged child output continuously into a fixed-size memory buffer."""
     capture = BoundedCapture(max_capture_bytes)
@@ -210,7 +224,7 @@ def _write_failure_summary(exit_code: int, diagnostic: str) -> None:
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     escaped = diagnostic.replace("```", "` ` `")
     report = (
-        "### Windows Python unit test diagnostics\n\n"
+        "### Python unit test diagnostics\n\n"
         f"Exit code: {exit_code}\n\n"
         "```text\n"
         f"{escaped}\n"
@@ -234,8 +248,12 @@ def main() -> int:
         output,
         workspace=os.environ.get("GITHUB_WORKSPACE"),
         runner_temp=os.environ.get("RUNNER_TEMP"),
+        test_temp=os.environ.get("PAPERBATCH_CI_TEST_TEMP"),
         home=str(Path.home()),
     )
+    failure_summary = summarize_unittest_failures(sanitized) if exit_code else ""
+    if failure_summary:
+        sanitized = "Failed tests:\n" + failure_summary + "\n\nCaptured test output:\n" + sanitized
     diagnostic = bound_utf8_output(bound_output(sanitized))
     if exit_code:
         _write_failure_summary(exit_code, diagnostic)

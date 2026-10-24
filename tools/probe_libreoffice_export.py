@@ -459,9 +459,27 @@ def open_readonly_regular_file(path: Path):
                 os.close(descriptor)
             os.close(path_descriptor)
 
+    if sys.platform == "darwin":
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0x100)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        descriptor = os.open(path, flags)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise PinnedEngineError("The selected path is not a regular file.")
+            stream = os.fdopen(descriptor, "rb")
+            descriptor = -1
+            return stream
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
     if os.name != "nt":
         path.stat()
-        raise PinnedEngineError("Safe regular-file inspection is supported only on Windows and Linux.")
+        raise PinnedEngineError("Safe regular-file inspection is supported only on Windows, Linux, and macOS.")
 
     stream = path.open("rb")
     if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):

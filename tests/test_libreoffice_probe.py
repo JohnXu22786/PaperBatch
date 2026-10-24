@@ -231,14 +231,47 @@ def pdf_with_type1_font(base_font: bytes, page_content: bytes) -> bytes:
     )
 
 
+requires_pinned_engine_inspection = unittest.skipUnless(
+    sys.platform.startswith("linux") or os.name == "nt",
+    "pinned LibreOffice engine inspection supports Windows and Linux only",
+)
+
+
+def mocked_pinned_engine_patch(executable: Path):
+    if sys.platform != "darwin":
+        return contextlib.nullcontext()
+
+    # The mocked-process tests exercise export/PDF reporting, not the native
+    # pinned-engine inspection implementation which is limited to Windows/Linux.
+    engine_status = executable.stat()
+    engine_identity = (engine_status.st_dev, engine_status.st_ino)
+    pinned_engine = probe_libreoffice_export.PinnedEngine(
+        stream=executable.open("rb"),
+        launch_target=str(executable),
+        launch_kwargs={},
+        sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+        engine_path=str(executable),
+        identity_binding="test-only mocked engine",
+        runtime_directory_path=str(executable.parent),
+        runtime_directory_sha256=probe_libreoffice_export.runtime_directory_sha256(
+            executable.parent,
+            executable.name,
+            engine_identity,
+        ),
+        engine_file_identity=engine_identity,
+    )
+    return mock.patch.object(probe_libreoffice_export, "open_pinned_engine", return_value=pinned_engine)
+
+
 def run_pinned_probe(executable: Path) -> tuple[dict[str, object], int]:
     digest = hashlib.sha256(executable.read_bytes()).hexdigest()
-    return probe_libreoffice_export.run_probe(
-        None,
-        timeout_seconds=5,
-        engine_binary=str(executable),
-        expected_engine_sha256=digest,
-    )
+    with mocked_pinned_engine_patch(executable):
+        return probe_libreoffice_export.run_probe(
+            None,
+            timeout_seconds=5,
+            engine_binary=str(executable),
+            expected_engine_sha256=digest,
+        )
 
 
 def fixture_classic_xref_is_valid(
@@ -818,6 +851,7 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
         self.assertEqual("original-engine", result["stdout"])
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux opened-descriptor runtime-path regression")
+    @requires_pinned_engine_inspection
     def test_engine_path_redirection_to_symlink_blocks_before_launch(self):
         with tempfile.TemporaryDirectory(prefix="paperbatch-engine-runtime-redirection-test-") as directory:
             root = Path(directory)
@@ -927,6 +961,7 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
         self.assertIn("runtime=original runtime", result["stdout"])
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux runtime-component mutation regression")
+    @requires_pinned_engine_inspection
     def test_runtime_component_mutation_blocks_version_and_export_evidence(self):
         with tempfile.TemporaryDirectory(prefix="paperbatch-runtime-component-mutation-test-") as directory:
             root = Path(directory)
@@ -1092,17 +1127,35 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
 
             self.assertTrue(replaced)
 
-    def test_non_linux_unix_file_inspection_rejects_before_open(self):
-        with tempfile.TemporaryDirectory(prefix="paperbatch-unix-file-inspection-test-") as directory:
-            candidate = Path(directory) / "candidate"
+    @unittest.skipUnless(sys.platform == "darwin", "macOS O_NOFOLLOW file-open behavior")
+    def test_macos_file_inspection_opens_regular_files_without_following_symlinks(self):
+        with tempfile.TemporaryDirectory(prefix="paperbatch-macos-file-inspection-test-") as directory:
+            root = Path(directory)
+            candidate = root / "candidate"
             candidate.write_bytes(b"candidate")
+            symlink = root / "candidate-link"
+            symlink.symlink_to(candidate)
+            fifo = root / "candidate-pipe"
+            os.mkfifo(fifo)
             with (
                 mock.patch.object(probe_libreoffice_export.sys, "platform", "darwin"),
                 mock.patch.object(probe_libreoffice_export.os, "name", "posix"),
-                mock.patch.object(Path, "open", side_effect=AssertionError("unsupported Unix paths must not be opened")),
+                mock.patch.object(Path, "open", side_effect=AssertionError("Mac safe open must use the no-follow descriptor path")),
             ):
-                with self.assertRaises(probe_libreoffice_export.PinnedEngineError):
-                    probe_libreoffice_export.open_readonly_regular_file(candidate)
+                with probe_libreoffice_export.open_readonly_regular_file(candidate) as stream:
+                    self.assertEqual(b"candidate", stream.read())
+                with self.assertRaises(OSError):
+                    probe_libreoffice_export.open_readonly_regular_file(symlink)
+                real_open = os.open
+
+                def check_nonblocking_fifo(path, flags, *args, **kwargs):
+                    if Path(path) == fifo:
+                        self.assertTrue(flags & os.O_NONBLOCK)
+                    return real_open(path, flags, *args, **kwargs)
+
+                with mock.patch.object(os, "open", side_effect=check_nonblocking_fifo):
+                    with self.assertRaises(probe_libreoffice_export.PinnedEngineError):
+                        probe_libreoffice_export.open_readonly_regular_file(fifo)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux O_PATH race regression")
     def test_readonly_file_open_pins_regular_file_before_content_open(self):
@@ -1157,6 +1210,7 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
                     probe_libreoffice_export.open_pinned_engine(executable, expected_sha256)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux selected-engine size-before-hash regression")
+    @requires_pinned_engine_inspection
     def test_run_probe_blocks_oversized_engine_before_hashing_even_with_mismatched_pin(self):
         with tempfile.TemporaryDirectory(prefix="paperbatch-engine-size-before-hash-test-") as directory:
             executable = Path(directory) / "soffice.bin"
@@ -1182,6 +1236,7 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
         self.assertIn("snapshot limit", report["libreOffice"]["limitation"])
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux engine-path replacement regression")
+    @requires_pinned_engine_inspection
     def test_engine_path_replacement_with_fifo_does_not_block_hashing(self):
         with tempfile.TemporaryDirectory(prefix="paperbatch-engine-fifo-race-test-") as directory:
             executable = Path(directory) / "soffice.bin"
@@ -1244,6 +1299,7 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
         self.assertIn("non-regular", report["libreOffice"]["limitation"].lower())
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux pinned-runtime reuse regression")
+    @requires_pinned_engine_inspection
     def test_run_probe_reuses_the_opened_runtime_directory_for_version_and_export(self):
         with tempfile.TemporaryDirectory(prefix="paperbatch-runtime-directory-reuse-test-") as directory:
             root = Path(directory)
@@ -1925,6 +1981,7 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
         self.assertIn("runtime components changed", result["identityFailure"].lower())
         self.assertRegex(result["runtimeDirectorySha256"], r"^[0-9a-f]{64}$")
 
+    @requires_pinned_engine_inspection
     def test_mismatched_binary_digest_blocks_before_launch(self):
         with tempfile.TemporaryDirectory(prefix="paperbatch-mismatched-lo-pin-test-") as directory:
             executable = Path(directory) / "soffice"
@@ -1991,6 +2048,7 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
 
             output = io.StringIO()
             with (
+                mocked_pinned_engine_patch(executable),
                 mock.patch.dict(probe_libreoffice_export.os.environ, {"PAPERBATCH_PROBE_ENVIRONMENT_ID": "lab-42"}),
                 mock.patch.object(probe_libreoffice_export, "invoke", side_effect=fake_invoke),
                 contextlib.redirect_stdout(output),
@@ -2379,7 +2437,18 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
             executable.write_text("mock executable", encoding="utf-8")
             expected_sha256 = hashlib.sha256(executable.read_bytes()).hexdigest()
 
-            with mock.patch.object(probe_libreoffice_export, "sha256_stream", side_effect=PermissionError("read denied")):
+            with (
+                mock.patch.object(probe_libreoffice_export, "sha256_stream", side_effect=PermissionError("read denied")),
+                mock.patch.object(
+                    probe_libreoffice_export,
+                    "open_pinned_engine",
+                    side_effect=PermissionError("read denied"),
+                ) if sys.platform == "darwin" else mock.patch.object(
+                    probe_libreoffice_export,
+                    "open_pinned_engine",
+                    wraps=probe_libreoffice_export.open_pinned_engine,
+                ),
+            ):
                 report, exit_code = probe_libreoffice_export.run_probe(
                     None,
                     timeout_seconds=5,

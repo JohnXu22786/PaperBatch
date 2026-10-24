@@ -696,7 +696,7 @@ internal static class SourceIntakeTests
 
     internal static void SnapshotCaptureFailsClosedWithoutNativeFileIdentity()
     {
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) return;
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux() || OperatingSystem.IsMacOS()) return;
 
         using var temporary = new TemporaryDirectory();
         var source = Path.Combine(temporary.Path, "source.pdf");

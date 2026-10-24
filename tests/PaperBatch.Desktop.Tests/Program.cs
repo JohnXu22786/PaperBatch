@@ -26,6 +26,7 @@ var tests = new (string Name, Action Run)[]
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
     ("intentional duplicate sources have independent queue row identities", IntentionalDuplicateQueueRowsRemainIndependent),
     ("cancelled renderer batch releases every captured snapshot", CancelledRendererBatchReleasesEverySnapshot),
+    ("macOS safely captures a regular source file", MacSourceCaptureUsesSafeNativeIdentity),
     ("file picker reports all skipped and mixed local selections", FilePickerClassifiesSkippedSelections),
     ("headless shell identifies demo data and has no print action", HeadlessShellIsExplicitlyDemoOnly),
     ("production presentation exposes unavailable production capabilities without demo rows", ProductionPresentationIsExplicitlyUnavailable),
@@ -225,7 +226,7 @@ static void PrintStatusFailuresAreVisibleAndBlockSubmission()
 
 static void SourceIntakeErrorsRemainVisibleAndAppend()
 {
-    var cacheRoot = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-tests", Guid.NewGuid().ToString("N"));
+    var cacheRoot = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-tests", Guid.NewGuid().ToString("N"));
     var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = cacheRoot });
     var sources = new ProductionPresentationSources(new SourceIntakeService(cache), new RendererCoordinator([]), cache);
     var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
@@ -254,7 +255,7 @@ static void SourceIntakeErrorsRemainVisibleAndAppend()
 
 static void IntentionalDuplicateQueueRowsRemainIndependent()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-duplicate-queue-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-duplicate-queue-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -284,7 +285,7 @@ static void IntentionalDuplicateQueueRowsRemainIndependent()
 
 static void CancelledRendererBatchReleasesEverySnapshot()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-tests", Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-tests", Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     var cacheRoot = Path.Combine(root, "cache");
     var firstPath = Path.Combine(root, "first.pdf");
@@ -297,8 +298,18 @@ static void CancelledRendererBatchReleasesEverySnapshot()
     var sources = new ProductionPresentationSources(new SourceIntakeService(cache), renderer, cache, rendererAvailable: true);
     try
     {
-        Assert.Throws<OperationCanceledException>(() => sources.ImportAsync([firstPath, secondPath], cancellation.Token)
-            .GetAwaiter().GetResult());
+        var cancellationThrown = false;
+        try
+        {
+            sources.ImportAsync([firstPath, secondPath], cancellation.Token).GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            cancellationThrown = true;
+        }
+        var intakeDiagnostics = sources.GetQueueItems().SelectMany(item => sources.GetFindings(item.Id))
+            .Select(finding => finding.Title + ": " + finding.Detail);
+        Assert.True(cancellationThrown, string.Join("; ", intakeDiagnostics));
         var metadata = Directory.EnumerateDirectories(cacheRoot, "snap_*", SearchOption.TopDirectoryOnly)
             .Select(directory => JsonDocument.Parse(File.ReadAllBytes(Path.Combine(directory, "metadata.json"))))
             .ToArray();
@@ -311,6 +322,53 @@ static void CancelledRendererBatchReleasesEverySnapshot()
         if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
 }
+
+static void MacSourceCaptureUsesSafeNativeIdentity()
+{
+    if (!OperatingSystem.IsMacOS()) return;
+
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-macos-source-capture-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var source = Path.Combine(root, "source.pdf");
+        var content = TestOnePagePdf();
+        File.WriteAllBytes(source, content);
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+        SourceSnapshot snapshot;
+        try
+        {
+            snapshot = cache.CaptureAsync(source).GetAwaiter().GetResult();
+        }
+        catch (SourceIntakeException exception)
+        {
+            var inner = exception.InnerException;
+            var innerDetails = inner is null ? "none" : string.Join(" -> ", EnumerateExceptionChain(inner)
+                .Select(item => $"{item.GetType().Name}: {item.Message}"));
+            throw new InvalidOperationException($"{exception.Diagnostic.Code}: {exception.Diagnostic.Message}; inner exception: {innerDetails}", exception);
+        }
+
+        Assert.Equal(content.LongLength, snapshot.LengthBytes);
+        using var captured = cache.OpenRead(snapshot.SnapshotId);
+        using var copy = new MemoryStream();
+        captured.CopyTo(copy);
+        Assert.True(content.SequenceEqual(copy.ToArray()));
+        cache.Release(snapshot.SnapshotId);
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+static IEnumerable<Exception> EnumerateExceptionChain(Exception exception)
+{
+    for (Exception? current = exception; current is not null; current = current.InnerException) yield return current;
+}
+
+static string GetTestTempRoot() => Environment.GetEnvironmentVariable("PAPERBATCH_CI_TEST_TEMP") is { Length: > 0 } configuredRoot
+    ? configuredRoot
+    : Path.GetTempPath();
 
 static byte[] MinimalPdf()
 {
@@ -441,7 +499,7 @@ static void ProductionPresentationIsExplicitlyUnavailable()
 
 static void ProductionPreviewReadsPreparedArtifact()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-preview-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-preview-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -504,7 +562,7 @@ static void ProductionPreviewReadsPreparedArtifact()
 
 static void ChangedSourceAfterPreflightCreatesNoPreparedArtifact()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-changed-source-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-changed-source-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -523,6 +581,8 @@ static void ChangedSourceAfterPreflightCreatesNoPreparedArtifact()
             artifacts: artifacts, runStore: store, preparationAvailable: true,
             coordinatorTransport: new PreparedArtifactTestTransport(coordinator));
         var queueItem = sources.ImportAsync([path]).GetAwaiter().GetResult().Single();
+        Assert.True(queueItem.Status.StartsWith("Ready to prepare", StringComparison.Ordinal),
+            string.Join("; ", sources.GetFindings(queueItem.Id).Select(finding => finding.Title + ": " + finding.Detail)));
         File.AppendAllText(path, "\n% changed after preflight\n");
 
         var result = sources.PrepareQueueAsync(
@@ -576,7 +636,7 @@ static void PreparationControlsForwardRequestedSettingsAndInvalidate()
 
 static void RecipeDeviceConflictCreatesNoRunOrFinalArtifact()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-device-conflict-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-device-conflict-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -596,7 +656,10 @@ static void RecipeDeviceConflictCreatesNoRunOrFinalArtifact()
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
             artifacts: artifacts, runStore: store, preparationAvailable: true,
             coordinatorTransport: new PreparedArtifactTestTransport(coordinator));
-        sources.ImportAsync([firstPath, secondPath]).GetAwaiter().GetResult();
+        var imported = sources.ImportAsync([firstPath, secondPath]).GetAwaiter().GetResult();
+        Assert.True(imported.All(item => item.Status.StartsWith("Ready to prepare", StringComparison.Ordinal)),
+            string.Join("; ", imported.SelectMany(item => sources.GetFindings(item.Id))
+                .Select(finding => finding.Title + ": " + finding.Detail)));
         var recipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "r", "conflict",
             [new RecipeSource("first", firstPath), new RecipeSource("second", secondPath)],
             new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter"))
@@ -649,7 +712,7 @@ static void PreparationErrorsFollowSelectedLanguage()
 
 static void RecipeDuplexRequestChangesCompiledLayout()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-recipe-duplex-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-recipe-duplex-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -728,7 +791,7 @@ static byte[] TestOnePagePdf()
 
 static void CorruptSavedRecipesRemainVisibleAsAnError()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-corrupt-recipe-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-corrupt-recipe-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -774,7 +837,7 @@ static void CorruptSavedRecipesRemainVisibleAsAnError()
 
 static void RecipeLifecycleIsExplicitAndBounded()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-recipe-lifecycle-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-recipe-lifecycle-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -830,7 +893,7 @@ static string WriteOversizedRecipe(string root)
 
 static void CorruptSavedHistoryRemainsVisibleAsAnError()
 {
-    var root = Path.Combine(Path.GetTempPath(), "paperbatch-desktop-corrupt-history-" + Guid.NewGuid().ToString("N"));
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-corrupt-history-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     try
     {
@@ -1128,6 +1191,14 @@ static class Assert
         if (!condition)
         {
             throw new InvalidOperationException("Expected true.");
+        }
+    }
+
+    public static void True(bool condition, string message)
+    {
+        if (!condition)
+        {
+            throw new InvalidOperationException($"Expected true. {message}");
         }
     }
 
