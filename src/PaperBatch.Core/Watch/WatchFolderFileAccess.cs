@@ -40,7 +40,14 @@ public sealed class PhysicalWatchFolderFileAccess : IWatchFolderFileAccess
             var info = GetInformation(root);
             return $"{info.VolumeSerialNumber:x8}:{info.FileIndexHigh:x8}{info.FileIndexLow:x8}";
         }
-        throw new NotSupportedException("Safe root identity checks are supported only on Linux x64 and Windows.");
+        if (OperatingSystem.IsMacOS())
+        {
+            using var root = OpenMacRoot(rootPath);
+            var info = GetMacInformation(root);
+            if ((info.Mode & 0xf000) != 0x4000) throw new IOException("Watch root is not a directory.");
+            return $"{info.Device:x8}:{info.Inode:x16}";
+        }
+        throw new NotSupportedException("Safe root identity checks are supported only on Linux x64, Windows, and macOS x64/arm64.");
     }
 
     public Stream OpenRead(string rootPath, string expectedRootIdentity, string relativePath)
@@ -52,7 +59,8 @@ public sealed class PhysicalWatchFolderFileAccess : IWatchFolderFileAccess
             throw new IOException("Watch source path is outside its configured root.");
         if (OperatingSystem.IsLinux()) return OpenLinux(rootPath, expectedRootIdentity, components);
         if (OperatingSystem.IsWindows()) return OpenWindows(rootPath, expectedRootIdentity, components);
-        throw new NotSupportedException("Safe root-relative source opens are supported only on Linux and Windows.");
+        if (OperatingSystem.IsMacOS()) return OpenMac(rootPath, expectedRootIdentity, components);
+        throw new NotSupportedException("Safe root-relative source opens are supported only on Linux, Windows, and macOS.");
     }
 
     private static Stream OpenLinux(string rootPath, string expectedRootIdentity, string[] components)
@@ -90,6 +98,89 @@ public sealed class PhysicalWatchFolderFileAccess : IWatchFolderFileAccess
             if (descriptor < 0) throw NativeOpenError("Could not safely open the watch root");
             return new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
         }
+    }
+
+    private static Stream OpenMac(string rootPath, string expectedRootIdentity, string[] components)
+    {
+        EnsureSupportedMacArchitecture();
+        using var root = OpenMacRoot(rootPath);
+        var rootInfo = GetMacInformation(root);
+        var actualIdentity = $"{rootInfo.Device:x8}:{rootInfo.Inode:x16}";
+        if ((rootInfo.Mode & 0xf000) != 0x4000 || !string.Equals(actualIdentity, expectedRootIdentity, StringComparison.Ordinal))
+            throw new IOException("Watch root was replaced after the scanner was created.");
+
+        SafeFileHandle parent = root;
+        var ownsParent = false;
+        try
+        {
+            for (var index = 0; index < components.Length; index++)
+            {
+                var final = index == components.Length - 1;
+                var flags = 0x01000000 | 0x00000100 | (final ? 0x00000004 : 0x00100000); // CLOEXEC, NOFOLLOW, NONBLOCK or DIRECTORY
+                var descriptor = OpenAtMac(parent.DangerousGetHandle().ToInt32(), components[index], flags);
+                if (descriptor < 0) throw NativeOpenError("Could not safely open a watch source");
+                var child = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+                if (ownsParent) parent.Dispose();
+                parent = child;
+                ownsParent = true;
+                var information = GetMacInformation(parent);
+                if ((!final && (information.Mode & 0xf000) != 0x4000) ||
+                    (final && (information.Mode & 0xf000) != 0x8000))
+                    throw new IOException(final ? "Only regular files can be opened as watch sources." : "Watch source path contains a non-directory component.");
+            }
+
+            var stream = new FileStream(parent, FileAccess.Read, 64 * 1024, isAsync: false);
+            ownsParent = false;
+            return stream;
+        }
+        finally
+        {
+            if (ownsParent) parent.Dispose();
+        }
+    }
+
+    private static void EnsureSupportedMacArchitecture()
+    {
+        if (System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture is not (System.Runtime.InteropServices.Architecture.X64 or System.Runtime.InteropServices.Architecture.Arm64) ||
+            Marshal.SizeOf<SourceSnapshotCache.PhysicalSourceFileAccess.DarwinStat>() != 144)
+            throw new NotSupportedException("Safe macOS source access requires a verified x64 or arm64 stat layout.");
+    }
+
+    private static SafeFileHandle OpenMacRoot(string rootPath)
+    {
+        EnsureSupportedMacArchitecture();
+        var fullPath = Path.GetFullPath(rootPath);
+        if (SourcePathSafety.FindReparsePointComponent(fullPath) is not null)
+            throw new IOException("Watch root contains a symbolic link.");
+        var descriptor = OpenMac("/", 0x01000000 | 0x00100000); // CLOEXEC, DIRECTORY
+        if (descriptor < 0) throw NativeOpenError("Could not safely open the watch root");
+        var current = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+        try
+        {
+            foreach (var component in fullPath.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var nextDescriptor = OpenAtMac(current.DangerousGetHandle().ToInt32(), component,
+                    0x01000000 | 0x00100000 | 0x00000100); // CLOEXEC, DIRECTORY, NOFOLLOW
+                if (nextDescriptor < 0) throw NativeOpenError("Could not safely open the watch root");
+                var next = new SafeFileHandle((IntPtr)nextDescriptor, ownsHandle: true);
+                current.Dispose();
+                current = next;
+            }
+
+            return current;
+        }
+        catch
+        {
+            current.Dispose();
+            throw;
+        }
+    }
+
+    private static SourceSnapshotCache.PhysicalSourceFileAccess.DarwinStat GetMacInformation(SafeFileHandle handle)
+    {
+        if (FStatMac(handle.DangerousGetHandle().ToInt32(), out var information) != 0)
+            throw NativeOpenError("Could not inspect an opened watch path component");
+        return information;
     }
 
     private static Stream OpenWindows(string rootPath, string expectedRootIdentity, string[] components)
@@ -231,6 +322,13 @@ public sealed class PhysicalWatchFolderFileAccess : IWatchFolderFileAccess
     private static extern int OpenAt2(long syscallNumber, int dirfd, IntPtr path, ref OpenHow how, nuint size);
     [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
     private static extern int FStat(int descriptor, out SourceSnapshotCache.PhysicalSourceFileAccess.LinuxStat information);
+
+    [DllImport("libc", EntryPoint = "open", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int OpenMac(string path, int flags);
+    [DllImport("libc", EntryPoint = "openat", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int OpenAtMac(int directoryDescriptor, string path, int flags);
+    [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
+    private static extern int FStatMac(int descriptor, out SourceSnapshotCache.PhysicalSourceFileAccess.DarwinStat information);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(string name, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
     [DllImport("kernel32.dll", SetLastError = true)]

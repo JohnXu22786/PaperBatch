@@ -921,6 +921,19 @@ public sealed class SourceSnapshotCache
 
                 source = new FileStream(new SafeFileHandle((IntPtr)descriptor, ownsHandle: true), FileAccess.Read, 64 * 1024, isAsync: false);
             }
+            else if (OperatingSystem.IsMacOS())
+            {
+                EnsureSupportedMacArchitecture();
+                var fullPath = Path.GetFullPath(path);
+                using var parent = OpenMacDirectory(Path.GetDirectoryName(fullPath)!);
+                var descriptor = OpenAtMac(parent.DangerousGetHandle().ToInt32(), Path.GetFileName(fullPath), 0x01000000 | 0x00000100 | 0x00000004); // CLOEXEC, NOFOLLOW, NONBLOCK
+                if (descriptor < 0)
+                {
+                    throw NativeOpenException(Marshal.GetLastPInvokeError(), windows: false, macOS: true);
+                }
+
+                source = new FileStream(new SafeFileHandle((IntPtr)descriptor, ownsHandle: true), FileAccess.Read, 64 * 1024, isAsync: false);
+            }
             else
             {
                 throw DiagnosticException(IntakeDiagnosticCode.SnapshotCaptureFailed,
@@ -1015,8 +1028,60 @@ public sealed class SourceSnapshotCache
                 return new SourceFileIdentity($"{information.Device:x16}:{information.Inode:x16}", information.Size, ticks);
             }
 
+            if (OperatingSystem.IsMacOS())
+            {
+                EnsureSupportedMacArchitecture();
+                if (FStatMac(fileStream.SafeFileHandle.DangerousGetHandle().ToInt32(), out var information) != 0)
+                {
+                    throw new Win32Exception(Marshal.GetLastPInvokeError());
+                }
+
+                if ((information.Mode & 0xf000) != 0x8000)
+                {
+                    throw DiagnosticException(IntakeDiagnosticCode.SourceBusyOrUnavailable, "Only regular source files can be captured.");
+                }
+
+                var ticks = DateTime.UnixEpoch.Ticks + information.ModificationTime.Seconds * TimeSpan.TicksPerSecond + information.ModificationTime.Nanoseconds / 100;
+                return new SourceFileIdentity($"{information.Device:x8}:{information.Inode:x16}", information.Size, ticks);
+            }
+
             throw DiagnosticException(IntakeDiagnosticCode.SnapshotCaptureFailed,
                 "This platform does not provide a safe handle-based identity check for source capture.");
+        }
+
+        private static SafeFileHandle OpenMacDirectory(string path)
+        {
+            var currentDescriptor = OpenMac("/", 0x01000000 | 0x00100000); // CLOEXEC, DIRECTORY
+            if (currentDescriptor < 0) throw NativeOpenException(Marshal.GetLastPInvokeError(), windows: false, macOS: true);
+            var current = new SafeFileHandle((IntPtr)currentDescriptor, ownsHandle: true);
+            try
+            {
+                foreach (var component in Path.GetFullPath(path).Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var nextDescriptor = OpenAtMac(current.DangerousGetHandle().ToInt32(), component,
+                        0x01000000 | 0x00100000 | 0x00000100); // CLOEXEC, DIRECTORY, NOFOLLOW
+                    if (nextDescriptor < 0) throw NativeOpenException(Marshal.GetLastPInvokeError(), windows: false, macOS: true);
+                    var next = new SafeFileHandle((IntPtr)nextDescriptor, ownsHandle: true);
+                    current.Dispose();
+                    current = next;
+                }
+
+                return current;
+            }
+            catch
+            {
+                current.Dispose();
+                throw;
+            }
+        }
+
+        private static void EnsureSupportedMacArchitecture()
+        {
+            if (RuntimeInformation.ProcessArchitecture is not (Architecture.X64 or Architecture.Arm64) || Marshal.SizeOf<DarwinStat>() != 144)
+            {
+                throw DiagnosticException(IntakeDiagnosticCode.UnsupportedArchitecture,
+                    $"macOS source capture supports verified x64 and arm64 stat layouts; the current process is {RuntimeInformation.ProcessArchitecture}.");
+            }
         }
 
         private static void EnsureSupportedLinuxArchitecture()
@@ -1028,7 +1093,7 @@ public sealed class SourceSnapshotCache
             }
         }
 
-        private static SourceIntakeException NativeOpenException(int error, bool windows)
+        private static SourceIntakeException NativeOpenException(int error, bool windows, bool macOS = false)
         {
             var code = windows ? error switch
             {
@@ -1037,6 +1102,15 @@ public sealed class SourceSnapshotCache
                 32 or 33 => IntakeDiagnosticCode.SourceBusyOrUnavailable,
                 206 => IntakeDiagnosticCode.PathTooLong,
                 4390 or 4392 => IntakeDiagnosticCode.ReparsePointSkipped,
+                _ => IntakeDiagnosticCode.SnapshotCaptureFailed
+            } : macOS ? error switch
+            {
+                2 => IntakeDiagnosticCode.InputVanished,
+                13 => IntakeDiagnosticCode.InputUnreadable,
+                16 => IntakeDiagnosticCode.SourceBusyOrUnavailable,
+                20 => IntakeDiagnosticCode.SourceBusyOrUnavailable,
+                62 => IntakeDiagnosticCode.ReparsePointSkipped,
+                63 => IntakeDiagnosticCode.PathTooLong,
                 _ => IntakeDiagnosticCode.SnapshotCaptureFailed
             } : error switch
             {
@@ -1072,6 +1146,15 @@ public sealed class SourceSnapshotCache
 
         [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
         private static extern int FStat(int descriptor, out LinuxStat information);
+
+        [DllImport("libc", EntryPoint = "open", SetLastError = true, CharSet = CharSet.Ansi)]
+        private static extern int OpenMac(string path, int flags);
+
+        [DllImport("libc", EntryPoint = "openat", SetLastError = true, CharSet = CharSet.Ansi)]
+        private static extern int OpenAtMac(int directoryDescriptor, string path, int flags);
+
+        [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
+        private static extern int FStatMac(int descriptor, out DarwinStat information);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct ByHandleFileInformation
@@ -1119,6 +1202,37 @@ public sealed class SourceSnapshotCache
 
         [StructLayout(LayoutKind.Sequential)]
         internal struct LinuxTimespec
+        {
+            public long Seconds;
+            public long Nanoseconds;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct DarwinStat
+        {
+            public uint Device;
+            public ushort Mode;
+            public ushort LinkCount;
+            public ulong Inode;
+            public uint UserId;
+            public uint GroupId;
+            public uint SpecialDevice;
+            public DarwinTimespec AccessTime;
+            public DarwinTimespec ModificationTime;
+            public DarwinTimespec ChangeTime;
+            public DarwinTimespec BirthTime;
+            public long Size;
+            public long Blocks;
+            public int BlockSize;
+            public uint Flags;
+            public uint Generation;
+            public int Spare;
+            public long Reserved0;
+            public long Reserved1;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct DarwinTimespec
         {
             public long Seconds;
             public long Nanoseconds;
