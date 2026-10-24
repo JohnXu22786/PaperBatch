@@ -47,6 +47,25 @@ class PythonCiDiagnosticsTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(output, "success-output\n")
 
+    def test_run_command_bounds_decoded_invalid_utf8_output(self) -> None:
+        script = (
+            "import os; "
+            "os.write(1, b'failure-start\\n' + b'\\xff' * 2000 + b'\\nfailure-end')"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, output = run_python_unit_tests_ci.run_command(
+                [sys.executable, "-c", script],
+                cwd=directory,
+                max_capture_bytes=512,
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertLessEqual(len(output.encode("utf-8")), 512)
+        self.assertIn("failure-start", output)
+        self.assertIn("failure-end", output)
+        self.assertIn("middle omitted", output)
+        self.assertIn("\ufffd", output)
+
     def test_sanitize_output_redacts_runner_and_profile_paths(self) -> None:
         output = (
             r"D:\a\PaperBatch\PaperBatch\tests\test_sample.py "

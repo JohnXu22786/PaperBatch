@@ -66,6 +66,7 @@ class BoundedCapture:
         self._head = bytearray()
         self._tail = bytearray()
         self._marker = marker
+        self._max_bytes = max_bytes
         self._truncated = False
 
     def append(self, chunk: bytes) -> None:
@@ -90,7 +91,17 @@ class BoundedCapture:
         if self._truncated:
             output += self._marker
         output += bytes(self._tail)
-        return output.decode("utf-8", errors="replace")
+        decoded = output.decode("utf-8", errors="replace")
+        encoded = decoded.encode("utf-8")
+        if len(encoded) <= self._max_bytes:
+            return decoded
+
+        available = self._max_bytes - len(self._marker)
+        head_bytes = available // 3
+        tail_bytes = available - head_bytes
+        head = encoded[:head_bytes].decode("utf-8", errors="ignore")
+        tail = encoded[-tail_bytes:].decode("utf-8", errors="ignore")
+        return head + self._marker.decode("ascii") + tail
 
 
 def run_command(
