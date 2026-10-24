@@ -113,8 +113,8 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          physical_temp_root="$(cd /private/tmp && pwd -P)"
-          test_temp="$physical_temp_root/paperbatch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          physical_workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          test_temp="$physical_workspace/.paperbatch-ci-tmp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -m 700 "$test_temp"
           printf 'TMPDIR=%s\n' "$test_temp" >> "$GITHUB_ENV"
           printf 'PAPERBATCH_CI_TEST_TEMP=%s\n' "$test_temp" >> "$GITHUB_ENV"
