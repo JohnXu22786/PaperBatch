@@ -1,0 +1,627 @@
+{
+  "schemaVersion": "paperbatch.u9-final-evidence.v1",
+  "sourceMainCommit": "700adaffa5f4ab38a23eda27de8b3fea400290d2",
+  "retrievedAt": "2026-10-24",
+  "artifactReview": {
+    "metadata": "GitHub Actions API lists each artifact name, size, ID, and expiration state for the runs below; all were unexpired when queried.",
+    "contents": "Not inspected. Ordinary gh downloads returned Forbidden from Actions artifact storage in this environment."
+  },
+  "units": [
+    {
+      "unit": "U1",
+      "task": "u9_simulation_matrix_ci",
+      "pr": 33,
+      "merge": "69e98641e833bbc1b118441d8ece8875daee18a2",
+      "ciRun": 39871418376,
+      "simulationRun": 39871418429,
+      "ci": "success",
+      "simulation": "success",
+      "artifacts": [
+        "paperbatch-windows-x64-lite",
+        "synthetic-ooxml-libreoffice-report",
+        "windows-pdfium-community-proof",
+        "windows-print-runner-evidence",
+        "u9-simulation-aggregate"
+      ],
+      "artifactMetadata": {
+        "CI": [
+          {
+            "id": 12467200633,
+            "name": "paperbatch-windows-x64-lite",
+            "sizeBytes": 152902521,
+            "expired": false
+          },
+          {
+            "id": 12466761773,
+            "name": "synthetic-ooxml-libreoffice-report",
+            "sizeBytes": 15891,
+            "expired": false
+          },
+          {
+            "id": 12466173255,
+            "name": "windows-pdfium-community-proof",
+            "sizeBytes": 2903,
+            "expired": false
+          },
+          {
+            "id": 12465858802,
+            "name": "windows-print-runner-evidence",
+            "sizeBytes": 2530,
+            "expired": false
+          }
+        ],
+        "U9 simulation matrix": [
+          {
+            "id": 12466930981,
+            "name": "u9-simulation-aggregate",
+            "sizeBytes": 1091,
+            "expired": false
+          }
+        ]
+      }
+    },
+    {
+      "unit": "U2",
+      "task": "u9_package_session_coverage",
+      "pr": 34,
+      "merge": "f9faecf9cd12af11f872ec1f8b1ab33727644708",
+      "ciRun": 39952651075,
+      "simulationRun": 39952650984,
+      "ci": "success",
+      "simulation": "success",
+      "artifacts": [
+        "paperbatch-windows-x64-lite",
+        "u9-windows-package-session-report",
+        "synthetic-ooxml-libreoffice-report",
+        "windows-pdfium-community-proof",
+        "windows-print-runner-evidence",
+        "u9-simulation-aggregate"
+      ],
+      "artifactMetadata": {
+        "CI": [
+          {
+            "id": 12501775829,
+            "name": "synthetic-ooxml-libreoffice-report",
+            "sizeBytes": 15936,
+            "expired": false
+          },
+          {
+            "id": 12501636237,
+            "name": "windows-print-runner-evidence",
+            "sizeBytes": 7183,
+            "expired": false
+          },
+          {
+            "id": 12501107112,
+            "name": "paperbatch-windows-x64-lite",
+            "sizeBytes": 152902519,
+            "expired": false
+          },
+          {
+            "id": 12500848085,
+            "name": "u9-windows-package-session-report",
+            "sizeBytes": 1124,
+            "expired": false
+          },
+          {
+            "id": 12500847891,
+            "name": "windows-pdfium-community-proof",
+            "sizeBytes": 2904,
+            "expired": false
+          },
+          {
+            "id": 12500769251,
+            "name": "windows-print-runner-evidence",
+            "sizeBytes": 2531,
+            "expired": false
+          }
+        ],
+        "U9 simulation matrix": [
+          {
+            "id": 12500319924,
+            "name": "u9-simulation-aggregate",
+            "sizeBytes": 1099,
+            "expired": false
+          }
+        ]
+      }
+    },
+    {
+      "unit": "U3",
+      "task": "u9_upgrade_migration_simulation",
+      "pr": 35,
+      "merge": "405111589a56dab2730b8bf6698ee6d860c0c799",
+      "ciRun": 39954854949,
+      "simulationRun": 39954855055,
+      "ci": "success",
+      "simulation": "success",
+      "artifacts": [
+        "paperbatch-windows-x64-lite",
+        "u9-windows-package-session-report",
+        "synthetic-ooxml-libreoffice-report",
+        "windows-pdfium-community-proof",
+        "windows-print-runner-evidence",
+        "u9-simulation-aggregate"
+      ],
+      "artifactMetadata": {
+        "CI": [
+          {
+            "id": 12502680412,
+            "name": "synthetic-ooxml-libreoffice-report",
+            "sizeBytes": 15858,
+            "expired": false
+          },
+          {
+            "id": 12502322225,
+            "name": "u9-windows-package-session-report",
+            "sizeBytes": 1524,
+            "expired": false
+          },
+          {
+            "id": 12502290879,
+            "name": "windows-pdfium-community-proof",
+            "sizeBytes": 2904,
+            "expired": false
+          },
+          {
+            "id": 12502186318,
+            "name": "u9-windows-package-session-report",
+            "sizeBytes": 1533,
+            "expired": false
+          },
+          {
+            "id": 12502038441,
+            "name": "paperbatch-windows-x64-lite",
+            "sizeBytes": 152902594,
+            "expired": false
+          },
+          {
+            "id": 12501624102,
+            "name": "windows-print-runner-evidence",
+            "sizeBytes": 2532,
+            "expired": false
+          }
+        ],
+        "U9 simulation matrix": [
+          {
+            "id": 12501762657,
+            "name": "u9-simulation-aggregate",
+            "sizeBytes": 1098,
+            "expired": false
+          }
+        ]
+      }
+    },
+    {
+      "unit": "U4",
+      "task": "u9_ipp_cross_platform_matrix",
+      "pr": 36,
+      "merge": "ca88b086b04eb00d7360b91c6d1c160dab24fe3c",
+      "ciRun": 39965358306,
+      "simulationRun": 39965358414,
+      "ci": "success",
+      "simulation": "success",
+      "artifacts": [
+        "paperbatch-windows-x64-lite",
+        "u9-windows-package-session-report",
+        "synthetic-ooxml-libreoffice-report",
+        "windows-pdfium-community-proof",
+        "windows-print-runner-evidence",
+        "u9-simulation-aggregate"
+      ],
+      "artifactMetadata": {
+        "CI": [
+          {
+            "id": 12507660422,
+            "name": "synthetic-ooxml-libreoffice-report",
+            "sizeBytes": 15920,
+            "expired": false
+          },
+          {
+            "id": 12507140461,
+            "name": "windows-pdfium-community-proof",
+            "sizeBytes": 2903,
+            "expired": false
+          },
+          {
+            "id": 12506463119,
+            "name": "paperbatch-windows-x64-lite",
+            "sizeBytes": 152902568,
+            "expired": false
+          },
+          {
+            "id": 12506363323,
+            "name": "u9-windows-package-session-report",
+            "sizeBytes": 1522,
+            "expired": false
+          },
+          {
+            "id": 12506133024,
+            "name": "windows-print-runner-evidence",
+            "sizeBytes": 2533,
+            "expired": false
+          }
+        ],
+        "U9 simulation matrix": [
+          {
+            "id": 12505999047,
+            "name": "u9-simulation-aggregate",
+            "sizeBytes": 1233,
+            "expired": false
+          }
+        ]
+      }
+    },
+    {
+      "unit": "U5",
+      "task": "u9_office_wps_lab",
+      "pr": 37,
+      "merge": "a29a875baa6e380b210bc7f6a6aa9f26414409fe",
+      "ciRun": 39979366268,
+      "simulationRun": 39979366356,
+      "ci": "success",
+      "simulation": "success",
+      "artifacts": [
+        "paperbatch-windows-x64-lite",
+        "u9-windows-package-session-report",
+        "synthetic-ooxml-libreoffice-report",
+        "windows-pdfium-community-proof",
+        "windows-print-runner-evidence",
+        "u9-simulation-aggregate"
+      ],
+      "artifactMetadata": {
+        "CI": [
+          {
+            "id": 12513650133,
+            "name": "paperbatch-windows-x64-lite",
+            "sizeBytes": 152902565,
+            "expired": false
+          },
+          {
+            "id": 12513136239,
+            "name": "windows-print-runner-evidence",
+            "sizeBytes": 2531,
+            "expired": false
+          },
+          {
+            "id": 12513056610,
+            "name": "synthetic-ooxml-libreoffice-report",
+            "sizeBytes": 15874,
+            "expired": false
+          },
+          {
+            "id": 12512119067,
+            "name": "windows-pdfium-community-proof",
+            "sizeBytes": 2903,
+            "expired": false
+          },
+          {
+            "id": 12511669710,
+            "name": "u9-windows-package-session-report",
+            "sizeBytes": 1520,
+            "expired": false
+          }
+        ],
+        "U9 simulation matrix": [
+          {
+            "id": 12511844129,
+            "name": "u9-simulation-aggregate",
+            "sizeBytes": 1345,
+            "expired": false
+          }
+        ]
+      }
+    },
+    {
+      "unit": "U6",
+      "task": "u9_document_pipeline_simulation",
+      "pr": 38,
+      "merge": "34404bf5a3a902adeb681c984cd8d09649f72efd",
+      "ciRun": 40050212215,
+      "simulationRun": 40050212260,
+      "ci": "success",
+      "simulation": "success",
+      "artifacts": [
+        "paperbatch-windows-x64-lite",
+        "u9-windows-package-session-report",
+        "synthetic-ooxml-libreoffice-report",
+        "windows-pdfium-community-proof",
+        "windows-print-runner-evidence",
+        "u9-simulation-aggregate"
+      ],
+      "artifactMetadata": {
+        "CI": [
+          {
+            "id": 12543430272,
+            "name": "windows-pdfium-community-proof",
+            "sizeBytes": 2903,
+            "expired": false
+          },
+          {
+            "id": 12543345711,
+            "name": "u9-windows-package-session-report",
+            "sizeBytes": 1522,
+            "expired": false
+          },
+          {
+            "id": 12543301076,
+            "name": "windows-print-runner-evidence",
+            "sizeBytes": 2530,
+            "expired": false
+          },
+          {
+            "id": 12543236760,
+            "name": "synthetic-ooxml-libreoffice-report",
+            "sizeBytes": 14541,
+            "expired": false
+          },
+          {
+            "id": 12542504970,
+            "name": "paperbatch-windows-x64-lite",
+            "sizeBytes": 152902620,
+            "expired": false
+          }
+        ],
+        "U9 simulation matrix": [
+          {
+            "id": 12542677743,
+            "name": "u9-simulation-aggregate",
+            "sizeBytes": 1351,
+            "expired": false
+          }
+        ]
+      }
+    },
+    {
+      "unit": "U7",
+      "task": "u9_fault_security_stress",
+      "pr": 39,
+      "merge": "700adaffa5f4ab38a23eda27de8b3fea400290d2",
+      "ciRun": 40052115422,
+      "simulationRun": 40052115383,
+      "ci": "success",
+      "simulation": "success",
+      "artifacts": [
+        "paperbatch-windows-x64-lite",
+        "u9-windows-package-session-report",
+        "synthetic-ooxml-libreoffice-report",
+        "windows-pdfium-community-proof",
+        "windows-print-runner-evidence",
+        "u9-fault-security-stress-ubuntu-latest",
+        "u9-fault-security-stress-windows-latest",
+        "u9-simulation-aggregate",
+        "pdfium-verification-diagnostics"
+      ],
+      "artifactMetadata": {
+        "CI": [
+          {
+            "id": 12544345057,
+            "name": "pdfium-verification-diagnostics",
+            "sizeBytes": 4757,
+            "expired": false
+          },
+          {
+            "id": 12544101237,
+            "name": "u9-windows-package-session-report",
+            "sizeBytes": 1520,
+            "expired": false
+          },
+          {
+            "id": 12544077431,
+            "name": "windows-print-runner-evidence",
+            "sizeBytes": 2532,
+            "expired": false
+          },
+          {
+            "id": 12544066536,
+            "name": "paperbatch-windows-x64-lite",
+            "sizeBytes": 152902504,
+            "expired": false
+          },
+          {
+            "id": 12544012152,
+            "name": "windows-print-runner-evidence",
+            "sizeBytes": 2531,
+            "expired": false
+          },
+          {
+            "id": 12543932631,
+            "name": "windows-print-runner-evidence",
+            "sizeBytes": 2529,
+            "expired": false
+          },
+          {
+            "id": 12543902157,
+            "name": "windows-pdfium-community-proof",
+            "sizeBytes": 2901,
+            "expired": false
+          },
+          {
+            "id": 12543878349,
+            "name": "pdfium-verification-diagnostics",
+            "sizeBytes": 4757,
+            "expired": false
+          },
+          {
+            "id": 12543792743,
+            "name": "u9-fault-security-stress-ubuntu-latest",
+            "sizeBytes": 1595,
+            "expired": false
+          },
+          {
+            "id": 12543786776,
+            "name": "u9-fault-security-stress-windows-latest",
+            "sizeBytes": 1608,
+            "expired": false
+          },
+          {
+            "id": 12543712006,
+            "name": "synthetic-ooxml-libreoffice-report",
+            "sizeBytes": 14577,
+            "expired": false
+          },
+          {
+            "id": 12543703790,
+            "name": "u9-fault-security-stress-windows-latest",
+            "sizeBytes": 1608,
+            "expired": false
+          },
+          {
+            "id": 12543509796,
+            "name": "u9-fault-security-stress-windows-latest",
+            "sizeBytes": 1608,
+            "expired": false
+          }
+        ],
+        "U9 simulation matrix": [
+          {
+            "id": 12543747717,
+            "name": "u9-simulation-aggregate",
+            "sizeBytes": 1351,
+            "expired": false
+          }
+        ]
+      }
+    }
+  ],
+  "domains": [
+    {
+      "id": "Q1",
+      "name": "Package provenance and archive safety",
+      "status": "passed",
+      "limit": "Unsigned development artifact; no publisher attestation or clean consumer-PC evidence."
+    },
+    {
+      "id": "Q2",
+      "name": "Isolated Windows session and offline behavior",
+      "status": "partial",
+      "limit": "Ephemeral hosted runner, selected roots and registry only, two coordinator executables firewall-blocked, GUI not launched; not client-clean evidence."
+    },
+    {
+      "id": "Q3",
+      "name": "Upgrade, migration and rollback",
+      "status": "partial",
+      "limit": "Two extracted trees use the same current package; no historical package, installer/updater, or application-version rollback lifecycle."
+    },
+    {
+      "id": "Q4",
+      "name": "Document pipeline and renderer boundary",
+      "status": "passed",
+      "limit": "Synthetic fixtures and test-only renderer; no human fidelity review or Office/WPS compatibility."
+    },
+    {
+      "id": "Q5",
+      "name": "Printer and IPP protocol",
+      "status": "partial",
+      "limit": "No PaperBatch macOS support, Windows real-queue submission, or physical output evidence."
+    },
+    {
+      "id": "Q6",
+      "name": "Failure and bounded stress",
+      "status": "passed",
+      "limit": "Synthetic bounded matrix only; no arbitrary fleet-scale, power-loss, or physical-device claim."
+    },
+    {
+      "id": "Q7",
+      "name": "License and release boundary",
+      "status": "partial",
+      "limit": "Tracked metadata and notices are not legal review or a complete binary SBOM; artifact contents were not inspected."
+    },
+    {
+      "id": "office_wps_native",
+      "name": "Licensed Office/WPS compatibility",
+      "status": "blocked",
+      "limit": "No already available licensed disposable Windows 11 VM/snapshot or native Office/WPS run."
+    },
+    {
+      "id": "macos_product",
+      "name": "PaperBatch macOS product support",
+      "status": "unsupported",
+      "limit": "macOS hosted protocol smoke only; no macOS PaperBatch product implementation evidence."
+    },
+    {
+      "id": "physical_output",
+      "name": "Physical print output",
+      "status": "not_run",
+      "limit": "No physical print job was submitted."
+    },
+    {
+      "id": "U10",
+      "name": "Real-user trials",
+      "status": "not_run",
+      "limit": "Deferred by the approved plan and outside U8 scope."
+    }
+  ],
+  "licenseInventory": {
+    "project": "AGPL-3.0-only",
+    "lockedGraphs": [
+      {
+        "path": "src/PaperBatch.Core/packages.lock.json",
+        "sha256": "83d43c94497ad0d0e81fef752db5080e92e5a42d4689da912f0ae45fe0487a1d",
+        "licenseEvidence": "docs/dependencies/core-runtime.md: Microsoft.Data.Sqlite MIT; SQLitePCLRaw Apache-2.0.",
+        "uniqueExternalPackages": 6,
+        "targetEntries": 7
+      },
+      {
+        "path": "src/PaperBatch.Desktop/packages.lock.json",
+        "sha256": "8cb8a61fcf84483be0ba188722fe5040ba5bb5e3b056339a30e9065d3388bb17",
+        "licenseEvidence": "docs/dependencies/desktop-ui.md: Avalonia and runtime dependencies declared MIT; ANGLE native package BSD-3-Clause; exact versions and content hashes are in the lockfile.",
+        "uniqueExternalPackages": 31,
+        "targetEntries": 41
+      },
+      {
+        "path": "tests/PaperBatch.Desktop.Tests/packages.lock.json",
+        "sha256": "fd0ae407673ff26695a18c59125204c62785fa9ded709255be5662633b71b99a",
+        "licenseEvidence": "Test-only graph; not shipped.",
+        "uniqueExternalPackages": 33,
+        "targetEntries": 35
+      }
+    ],
+    "packageNotices": [
+      "LICENSE (AGPL-3.0-only)",
+      "THIRD-PARTY-UI-NOTICES.md",
+      "THIRD-PARTY-CORE-NOTICES.md",
+      "DOTNET-THIRD-PARTY-NOTICES.txt"
+    ],
+    "excludedFromLitePackage": [
+      "Microsoft Office",
+      "WPS Office",
+      "LibreOffice",
+      "PDFium",
+      "printer drivers",
+      "proprietary fonts"
+    ],
+    "boundary": "Lock and notice metadata is not a legal opinion or complete binary-level SBOM. Do not infer unknown license or redistribution rights."
+  },
+  "decision": {
+    "result": "NO_GO_FOR_END_USER_BETA_OR_PUBLIC_RELEASE",
+    "basis": "Retain an unsigned development candidate and evidence package. Q2, Q3 and Q5 remain partial; native Office/WPS is blocked; U10 real-user trials are deferred. Prior exact-commit CI is green, but artifact contents were not downloadable for this review.",
+    "allowedClaims": [
+      "U1-U7 exact-commit CI and listed synthetic/protocol workflows concluded successfully.",
+      "The Windows x64 package is an unsigned development candidate with tracked dependency lockfiles and required notice checks."
+    ],
+    "prohibitedClaims": [
+      "public or signed release readiness",
+      "clean consumer PC or supported installer/updater",
+      "Office/WPS compatibility",
+      "PaperBatch macOS support",
+      "OEM driver compatibility",
+      "physical pages or print quality",
+      "fleet-scale or power-loss guarantees"
+    ],
+    "reconsiderWhen": [
+      "Review exact-run artifact contents.",
+      "Complete Q2 clean-client evidence or keep that boundary.",
+      "Exercise a distinct historical package and product migration lifecycle for Q3 or keep that boundary.",
+      "Complete applicable Q5 evidence without inferring physical output.",
+      "Separately authorize U10 before real-user trials."
+    ],
+    "excluded": [
+      "release or tag",
+      "paid commitment",
+      "certificate purchase",
+      "physical printing",
+      "U10 implementation or trials"
+    ]
+  }
+}
