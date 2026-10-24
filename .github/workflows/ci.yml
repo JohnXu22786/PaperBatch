@@ -109,6 +109,14 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Use a non-symlink test temp directory on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          test_temp="$GITHUB_WORKSPACE/.paperbatch-ci-tmp"
+          mkdir -m 700 "$test_temp"
+          printf 'TMPDIR=%s\n' "$test_temp" >> "$GITHUB_ENV"
+
       - name: Build core contracts and run-state store
         run: dotnet build src/PaperBatch.Core/PaperBatch.Core.csproj -p:NuGetAudit=false
 
@@ -393,7 +401,29 @@ jobs:
           else
             test_project='tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj'
           fi
-          if dotnet run --project "$test_project" -p:NuGetAudit=false >"$test_log" 2>&1; then
+          if python3 - "$test_project" "$test_log" <<'PYCODE'
+          import os
+          import signal
+          import subprocess
+          import sys
+
+          command = 'set -o pipefail; dotnet run --project "$1" -p:NuGetAudit=false 2>&1 | tail -c 200000 > "$2"'
+          process = subprocess.Popen(['bash', '-c', command, 'bash', sys.argv[1], sys.argv[2]], start_new_session=True)
+          try:
+              exit_code = process.wait(timeout=300)
+          except subprocess.TimeoutExpired:
+              os.killpg(process.pid, signal.SIGTERM)
+              try:
+                  process.wait(timeout=5)
+              except subprocess.TimeoutExpired:
+                  os.killpg(process.pid, signal.SIGKILL)
+                  process.wait()
+              with open(sys.argv[2], 'a', encoding='utf-8') as output:
+                  output.write('Diagnostic test retry timed out after 300 seconds.\n')
+              exit_code = 124
+          raise SystemExit(exit_code)
+          PYCODE
+          then
             test_exit_code=0
           else
             test_exit_code=$?
