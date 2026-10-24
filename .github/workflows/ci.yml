@@ -109,15 +109,15 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Use a non-symlink test temp directory on macOS
+      - name: Use an isolated physical test temp directory on macOS
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          physical_workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
-          test_temp="$physical_workspace/.paperbatch-ci-tmp"
+          physical_temp_root="$(cd /private/tmp && pwd -P)"
+          test_temp="$physical_temp_root/paperbatch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -m 700 "$test_temp"
           printf 'TMPDIR=%s\n' "$test_temp" >> "$GITHUB_ENV"
-          printf 'PAPERBATCH_CI_PHYSICAL_WORKSPACE=%s\n' "$physical_workspace" >> "$GITHUB_ENV"
+          printf 'PAPERBATCH_CI_TEST_TEMP=%s\n' "$test_temp" >> "$GITHUB_ENV"
 
       - name: Build core contracts and run-state store
         run: dotnet build src/PaperBatch.Core/PaperBatch.Core.csproj -p:NuGetAudit=false
@@ -432,12 +432,12 @@ jobs:
           fi
           diagnostic_log="$RUNNER_TEMP/macos-managed-test-diagnostics.txt"
           failure_log="$RUNNER_TEMP/macos-managed-test-failures.txt"
-          python3 - "$test_log" "$diagnostic_log" "$failure_log" "$GITHUB_WORKSPACE" "$PAPERBATCH_CI_PHYSICAL_WORKSPACE" "$RUNNER_TEMP" <<'PYCODE'
+          python3 - "$test_log" "$diagnostic_log" "$failure_log" "$GITHUB_WORKSPACE" "$PAPERBATCH_CI_TEST_TEMP" "$RUNNER_TEMP" <<'PYCODE'
           import sys
           from pathlib import Path
 
           raw = Path(sys.argv[1]).read_text(encoding='utf-8', errors='replace')
-          for path, replacement in ((sys.argv[2], '[DIAGNOSTICS]'), (sys.argv[3], '[FAILURES]'), (sys.argv[4], '[WORKSPACE]'), (sys.argv[5], '[WORKSPACE]'), (sys.argv[6], '[RUNNER_TEMP]')):
+          for path, replacement in ((sys.argv[2], '[DIAGNOSTICS]'), (sys.argv[3], '[FAILURES]'), (sys.argv[4], '[WORKSPACE]'), (sys.argv[5], '[TEST_TEMP]'), (sys.argv[6], '[RUNNER_TEMP]')):
               raw = raw.replace(path, replacement)
           lines = raw.splitlines()
           failures = [line for line in lines if line.startswith('FAIL ')]
