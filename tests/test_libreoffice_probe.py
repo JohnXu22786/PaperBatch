@@ -260,14 +260,7 @@ def run_pinned_probe(executable: Path) -> tuple[dict[str, object], int]:
             ),
             engine_file_identity=engine_identity,
         )
-        with (
-            mock.patch.object(probe_libreoffice_export, "open_pinned_engine", return_value=pinned_engine),
-            mock.patch.object(
-                probe_libreoffice_export,
-                "open_readonly_regular_file",
-                side_effect=lambda path: path.open("rb"),
-            ),
-        ):
+        with mock.patch.object(probe_libreoffice_export, "open_pinned_engine", return_value=pinned_engine):
             return probe_libreoffice_export.run_probe(
                 None,
                 timeout_seconds=5,
@@ -1136,17 +1129,35 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
 
             self.assertTrue(replaced)
 
-    def test_non_linux_unix_file_inspection_rejects_before_open(self):
-        with tempfile.TemporaryDirectory(prefix="paperbatch-unix-file-inspection-test-") as directory:
-            candidate = Path(directory) / "candidate"
+    @unittest.skipUnless(sys.platform == "darwin", "macOS O_NOFOLLOW file-open behavior")
+    def test_macos_file_inspection_opens_regular_files_without_following_symlinks(self):
+        with tempfile.TemporaryDirectory(prefix="paperbatch-macos-file-inspection-test-") as directory:
+            root = Path(directory)
+            candidate = root / "candidate"
             candidate.write_bytes(b"candidate")
+            symlink = root / "candidate-link"
+            symlink.symlink_to(candidate)
+            fifo = root / "candidate-pipe"
+            os.mkfifo(fifo)
             with (
                 mock.patch.object(probe_libreoffice_export.sys, "platform", "darwin"),
                 mock.patch.object(probe_libreoffice_export.os, "name", "posix"),
-                mock.patch.object(Path, "open", side_effect=AssertionError("unsupported Unix paths must not be opened")),
+                mock.patch.object(Path, "open", side_effect=AssertionError("Mac safe open must use the no-follow descriptor path")),
             ):
-                with self.assertRaises(probe_libreoffice_export.PinnedEngineError):
-                    probe_libreoffice_export.open_readonly_regular_file(candidate)
+                with probe_libreoffice_export.open_readonly_regular_file(candidate) as stream:
+                    self.assertEqual(b"candidate", stream.read())
+                with self.assertRaises(OSError):
+                    probe_libreoffice_export.open_readonly_regular_file(symlink)
+                real_open = os.open
+
+                def check_nonblocking_fifo(path, flags, *args, **kwargs):
+                    if Path(path) == fifo:
+                        self.assertTrue(flags & os.O_NONBLOCK)
+                    return real_open(path, flags, *args, **kwargs)
+
+                with mock.patch.object(os, "open", side_effect=check_nonblocking_fifo):
+                    with self.assertRaises(probe_libreoffice_export.PinnedEngineError):
+                        probe_libreoffice_export.open_readonly_regular_file(fifo)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux O_PATH race regression")
     def test_readonly_file_open_pins_regular_file_before_content_open(self):
