@@ -212,6 +212,21 @@ jobs:
         id: managed-test-runner
         run: dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false
 
+      - name: Run bounded U7 fault, security, and stress matrix
+        shell: bash
+        run: |
+          report="$RUNNER_TEMP/paperbatch-u9-fault-security-stress.json"
+          dotnet run --project tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj -p:NuGetAudit=false -- --fault-security-stress --report "$report"
+
+      - name: Upload bounded U7 fault, security, and stress report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: u9-fault-security-stress-${{ matrix.os }}
+          path: ${{ runner.temp }}/paperbatch-u9-fault-security-stress.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Convert bounded synthetic OOXML corpus with pinned LibreOffice
         if: runner.os == 'Linux'
         shell: bash
