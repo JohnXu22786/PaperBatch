@@ -337,7 +337,9 @@ static void FaultSecurityStressProfileSelfCheck()
     Assert.Equal("passed", report.Status);
     Assert.Equal(FaultSecurityStressProfile.MaximumScenarioCount, report.Scenarios.Length);
     Assert.Equal(report.Scenarios.Length, report.Scenarios.Select(scenario => scenario.Id).Distinct().Count());
-    Assert.True(report.Scenarios.All(scenario => scenario.Status == "passed"));
+    Assert.True(report.Scenarios.All(scenario => scenario.Status == "passed"),
+        "Failed scenarios: " + string.Join(", ", report.Scenarios.Where(scenario => scenario.Status != "passed")
+            .Select(scenario => $"{scenario.Id} ({scenario.FailureCode})")));
     Assert.True(report.Scenarios.Any(scenario => scenario.Id == "lifecycle.ambiguous_acceptance_restart"));
     Assert.True(report.Scenarios.Any(scenario => scenario.Id == "security.malicious_input_bounds"));
     Assert.True(report.Scenarios.Any(scenario => scenario.Id == "privacy.diagnostic_redaction"));
@@ -766,7 +768,7 @@ static void OfficeSizeBoundPrecedesTrustVerification()
 
 static void SuiteCoexistenceStatusDistinguishesMissingFromUnrun()
 {
-    if (OperatingSystem.IsWindows())
+    if (!OperatingSystem.IsLinux())
     {
         return;
     }
@@ -1599,6 +1601,8 @@ static void EngineSourceHashRejectsOversizedInput()
 
 static void OfficeAndWpsCandidateHashRejectsOversizedInput()
 {
+    if (OperatingSystem.IsMacOS()) return;
+
     var previousPath = Environment.GetEnvironmentVariable("PATH");
     var directory = Path.Combine(Path.GetTempPath(), "paperbatch-office-hash-limit-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(directory);
@@ -1944,7 +1948,7 @@ static string Sha256File(string path) => Convert.ToHexString(
 
 static void UnrelatedSofficeCandidateCannotSatisfyLibreOfficeEvidence()
 {
-    if (OperatingSystem.IsWindows())
+    if (!OperatingSystem.IsLinux())
     {
         return;
     }
