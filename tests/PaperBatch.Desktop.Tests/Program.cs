@@ -297,8 +297,18 @@ static void CancelledRendererBatchReleasesEverySnapshot()
     var sources = new ProductionPresentationSources(new SourceIntakeService(cache), renderer, cache, rendererAvailable: true);
     try
     {
-        Assert.Throws<OperationCanceledException>(() => sources.ImportAsync([firstPath, secondPath], cancellation.Token)
-            .GetAwaiter().GetResult());
+        var cancellationThrown = false;
+        try
+        {
+            sources.ImportAsync([firstPath, secondPath], cancellation.Token).GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            cancellationThrown = true;
+        }
+        var intakeDiagnostics = sources.GetQueueItems().SelectMany(item => sources.GetFindings(item.Id))
+            .Select(finding => finding.Title + ": " + finding.Detail);
+        Assert.True(cancellationThrown, string.Join("; ", intakeDiagnostics));
         var metadata = Directory.EnumerateDirectories(cacheRoot, "snap_*", SearchOption.TopDirectoryOnly)
             .Select(directory => JsonDocument.Parse(File.ReadAllBytes(Path.Combine(directory, "metadata.json"))))
             .ToArray();
@@ -527,6 +537,8 @@ static void ChangedSourceAfterPreflightCreatesNoPreparedArtifact()
             artifacts: artifacts, runStore: store, preparationAvailable: true,
             coordinatorTransport: new PreparedArtifactTestTransport(coordinator));
         var queueItem = sources.ImportAsync([path]).GetAwaiter().GetResult().Single();
+        Assert.True(queueItem.Status.StartsWith("Ready to prepare", StringComparison.Ordinal),
+            string.Join("; ", sources.GetFindings(queueItem.Id).Select(finding => finding.Title + ": " + finding.Detail)));
         File.AppendAllText(path, "\n% changed after preflight\n");
 
         var result = sources.PrepareQueueAsync(
@@ -600,7 +612,10 @@ static void RecipeDeviceConflictCreatesNoRunOrFinalArtifact()
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
             artifacts: artifacts, runStore: store, preparationAvailable: true,
             coordinatorTransport: new PreparedArtifactTestTransport(coordinator));
-        sources.ImportAsync([firstPath, secondPath]).GetAwaiter().GetResult();
+        var imported = sources.ImportAsync([firstPath, secondPath]).GetAwaiter().GetResult();
+        Assert.True(imported.All(item => item.Status.StartsWith("Ready to prepare", StringComparison.Ordinal)),
+            string.Join("; ", imported.SelectMany(item => sources.GetFindings(item.Id))
+                .Select(finding => finding.Title + ": " + finding.Detail)));
         var recipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "r", "conflict",
             [new RecipeSource("first", firstPath), new RecipeSource("second", secondPath)],
             new RecipePrintSettings(1, ColorMode.Color, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter"))
@@ -1132,6 +1147,14 @@ static class Assert
         if (!condition)
         {
             throw new InvalidOperationException("Expected true.");
+        }
+    }
+
+    public static void True(bool condition, string message)
+    {
+        if (!condition)
+        {
+            throw new InvalidOperationException($"Expected true. {message}");
         }
     }
 
