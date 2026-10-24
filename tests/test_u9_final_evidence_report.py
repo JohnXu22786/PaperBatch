@@ -11,6 +11,11 @@ import build_u9_final_evidence_report as report_builder
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def canonical_text_sha256(contents: str) -> str:
+    """Hash tracked text consistently when Git checks it out with CRLF."""
+    return hashlib.sha256(contents.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+
+
 class FinalEvidenceReportTests(unittest.TestCase):
     def setUp(self):
         self.evidence = json.loads(
@@ -35,8 +40,13 @@ class FinalEvidenceReportTests(unittest.TestCase):
     def test_license_inventory_hashes_match_tracked_lockfiles(self):
         for item in self.evidence["licenseInventory"]["lockedGraphs"]:
             with self.subTest(path=item["path"]):
-                actual = hashlib.sha256((ROOT / item["path"]).read_bytes()).hexdigest()
+                actual = canonical_text_sha256((ROOT / item["path"]).read_text(encoding="utf-8"))
                 self.assertEqual(item["sha256"], actual)
+
+    def test_lockfile_digest_is_stable_across_windows_line_endings(self):
+        lf = "{\"packages\": [\"one\", \"two\"]}\n"
+        crlf = lf.replace("\n", "\r\n")
+        self.assertEqual(canonical_text_sha256(lf), canonical_text_sha256(crlf))
 
     def test_report_preserves_partial_and_excluded_scenarios(self):
         domains = {item["id"]: item for item in self.evidence["domains"]}
