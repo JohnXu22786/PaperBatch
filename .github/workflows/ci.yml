@@ -113,9 +113,11 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          test_temp="$GITHUB_WORKSPACE/.paperbatch-ci-tmp"
+          physical_workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          test_temp="$physical_workspace/.paperbatch-ci-tmp"
           mkdir -m 700 "$test_temp"
           printf 'TMPDIR=%s\n' "$test_temp" >> "$GITHUB_ENV"
+          printf 'PAPERBATCH_CI_PHYSICAL_WORKSPACE=%s\n' "$physical_workspace" >> "$GITHUB_ENV"
 
       - name: Build core contracts and run-state store
         run: dotnet build src/PaperBatch.Core/PaperBatch.Core.csproj -p:NuGetAudit=false
@@ -429,18 +431,20 @@ jobs:
             test_exit_code=$?
           fi
           diagnostic_log="$RUNNER_TEMP/macos-managed-test-diagnostics.txt"
-          python3 - "$test_log" "$diagnostic_log" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" <<'PYCODE'
+          failure_log="$RUNNER_TEMP/macos-managed-test-failures.txt"
+          python3 - "$test_log" "$diagnostic_log" "$failure_log" "$GITHUB_WORKSPACE" "$PAPERBATCH_CI_PHYSICAL_WORKSPACE" "$RUNNER_TEMP" <<'PYCODE'
           import sys
           from pathlib import Path
 
           raw = Path(sys.argv[1]).read_text(encoding='utf-8', errors='replace')
-          for path, replacement in ((sys.argv[2], '[DIAGNOSTICS]'), (sys.argv[3], '[WORKSPACE]'), (sys.argv[4], '[RUNNER_TEMP]')):
+          for path, replacement in ((sys.argv[2], '[DIAGNOSTICS]'), (sys.argv[3], '[FAILURES]'), (sys.argv[4], '[WORKSPACE]'), (sys.argv[5], '[WORKSPACE]'), (sys.argv[6], '[RUNNER_TEMP]')):
               raw = raw.replace(path, replacement)
           lines = raw.splitlines()
           failures = [line for line in lines if line.startswith('FAIL ')]
           selected = failures[:20] if failures else lines[-20:]
           bounded = '\n'.join(line[:500] for line in selected)
           Path(sys.argv[2]).write_text(bounded[:10000], encoding='utf-8')
+          Path(sys.argv[3]).write_text('\n'.join(line[:500] for line in failures[:20])[:10000], encoding='utf-8')
           PYCODE
           {
             echo '### macOS managed test runner diagnostic retry'
@@ -459,7 +463,7 @@ jobs:
             diagnostic=${diagnostic//$'\r'/'%0D'}
             diagnostic=${diagnostic//$'\n'/'%0A'}
             printf '::error title=Managed test failure::%s\n' "$diagnostic"
-          done < "$diagnostic_log"
+          done < "$failure_log"
 
       - name: Remove temporary Linux renderer runtimes
         if: always() && runner.os == 'Linux'
