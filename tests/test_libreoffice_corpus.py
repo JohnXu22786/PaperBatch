@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import io
 import os
 import platform
 import shutil
@@ -11,6 +12,7 @@ import zipfile
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest import mock
 from pathlib import Path
@@ -173,6 +175,47 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertTrue(result.stdout.endswith("[truncated]"))
         self.assertTrue(result.stderr.endswith("[truncated]"))
 
+    def test_result_manifest_redacts_secrets_and_absolute_paths_from_engine_logs(self):
+        fixture = {
+            "id": "docx_variant_000",
+            "path": "variants/docx_000.docx",
+            "sha256": "a" * 64,
+            "size_bytes": 123,
+        }
+        result = run_libreoffice_corpus.result_record(
+            fixture,
+            status="failed",
+            input_sha256="a" * 64,
+            output_bytes=None,
+            output_sha256=None,
+            page_count=None,
+            command={
+                "exitCode": 1,
+                "timedOut": False,
+                "stdout": "auth_token=synthetic-secret credential=synthetic-credential credentials=synthetic-credentials password=\"synthetic password phrase\" Authorization: Bearer synthetic-bearer /home/alice/private/input.docx\npath:/home/alice/private.docx\npassword=/home/Jane Doe/private.docx\nC:\\Users\\Jane Doe\\private\\secret file.docx\n/home/alice/private,account.docx",
+                "stderr": "Authorization: Basic synthetic-basic-credential failed",
+                "identityVerified": False,
+                "identityFailure": "runtime token=identity-secret changed at /home/alice/runtime",
+            },
+        )
+
+        serialized = json.dumps(result)
+        self.assertNotIn("synthetic-secret", serialized)
+        self.assertNotIn("synthetic-credential", serialized)
+        self.assertNotIn("synthetic-credentials", serialized)
+        self.assertNotIn("password phrase", serialized)
+        self.assertNotIn("synthetic-bearer", serialized)
+        self.assertNotIn("synthetic-basic-credential", serialized)
+        self.assertNotIn("identity-secret", serialized)
+        self.assertNotIn("/home/alice", serialized)
+        self.assertNotIn("/home/Jane", serialized)
+        self.assertNotIn("Doe/private.docx", serialized)
+        self.assertNotIn("Jane Doe", serialized)
+        self.assertNotIn("secret file.docx", serialized)
+        self.assertNotIn("account.docx", serialized)
+        self.assertIn("[REDACTED]", serialized)
+        self.assertIn("[PATH]", serialized)
+
     def test_selection_rejects_manifest_digest_mismatch_and_invalid_packages(self):
         manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
         fixture = next(item for item in manifest["fixtures"] if item["id"] == "docx_variant_000")
@@ -180,6 +223,73 @@ class LibreOfficeCorpusTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "digest"):
             run_libreoffice_corpus.select_fixtures(manifest, CORPUS_DIR)
+
+    def test_skipped_manifest_paths_are_redacted(self):
+        corpus_manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
+        source_fixture = next(item for item in corpus_manifest["fixtures"] if item["id"] == "docx_variant_000")
+
+        for path in ("/home/Jane Doe/private/document.docx", "C:\\Users\\Jane Doe\\private\\document.docx"):
+            with self.subTest(path=path):
+                fixture = {**source_fixture, "path": path}
+                manifest = {
+                    "synthetic": True,
+                    "evidence_class": "synthetic",
+                    "simulation_only": True,
+                    "fixtures": [fixture],
+                }
+                selected, skipped = run_libreoffice_corpus.select_fixtures(manifest, CORPUS_DIR)
+
+                self.assertEqual(selected, [])
+                self.assertEqual(len(skipped), 1)
+                self.assertNotIn("Jane Doe", skipped[0]["path"])
+                self.assertIn("[PATH]", skipped[0]["path"])
+
+    def test_selected_windows_manifest_path_is_redacted_in_results(self):
+        windows_path = "C:\\Users\\Jane Doe\\document.docx"
+        selected_fixture = {
+            "id": "docx_variant_000", "path": windows_path, "sha256": "a" * 64, "size_bytes": 123,
+        }
+        result = run_libreoffice_corpus.result_record(
+            selected_fixture, status="failed", input_sha256=selected_fixture["sha256"], output_bytes=None,
+            output_sha256=None, page_count=None, command=None,
+        )
+        self.assertNotIn("Jane Doe", result["inputPath"])
+        self.assertIn("[PATH]", result["inputPath"])
+
+    def test_blocked_cli_report_redacts_missing_engine_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corpus = root / "corpus"
+            corpus.mkdir()
+            (corpus / "manifest.json").write_text(json.dumps({
+                "synthetic": True,
+                "evidence_class": "synthetic",
+                "simulation_only": True,
+                "fixtures": [],
+            }), encoding="utf-8")
+            missing_engine = root / "Jane Doe" / "missing-engine"
+            output = io.StringIO()
+
+            with (
+                mock.patch.object(run_libreoffice_corpus.sys, "platform", "linux"),
+                mock.patch.object(run_libreoffice_corpus.probe, "open_pinned_engine") as open_engine,
+                mock.patch.object(run_libreoffice_corpus.probe, "invoke") as invoke,
+                redirect_stdout(output),
+            ):
+                exit_code = run_libreoffice_corpus.main([
+                    "--engine-binary", str(missing_engine),
+                    "--expected-engine-sha256", "a" * 64,
+                    "--corpus-dir", str(corpus),
+                ])
+
+            open_engine.assert_not_called()
+            invoke.assert_not_called()
+
+        report_text = output.getvalue()
+        report = json.loads(report_text)
+        self.assertEqual(exit_code, 1)
+        self.assertNotIn(directory, report_text)
+        self.assertIn("[PATH]", report["reason"])
 
     def test_report_classification_never_promotes_rendering_to_compatibility_evidence(self):
         report = run_libreoffice_corpus.classify_report(
