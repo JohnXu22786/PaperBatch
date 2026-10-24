@@ -237,43 +237,41 @@ requires_pinned_engine_inspection = unittest.skipUnless(
 )
 
 
+def mocked_pinned_engine_patch(executable: Path):
+    if sys.platform != "darwin":
+        return contextlib.nullcontext()
+
+    # The mocked-process tests exercise export/PDF reporting, not the native
+    # pinned-engine inspection implementation which is limited to Windows/Linux.
+    engine_status = executable.stat()
+    engine_identity = (engine_status.st_dev, engine_status.st_ino)
+    pinned_engine = probe_libreoffice_export.PinnedEngine(
+        stream=executable.open("rb"),
+        launch_target=str(executable),
+        launch_kwargs={},
+        sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+        engine_path=str(executable),
+        identity_binding="test-only mocked engine",
+        runtime_directory_path=str(executable.parent),
+        runtime_directory_sha256=probe_libreoffice_export.runtime_directory_sha256(
+            executable.parent,
+            executable.name,
+            engine_identity,
+        ),
+        engine_file_identity=engine_identity,
+    )
+    return mock.patch.object(probe_libreoffice_export, "open_pinned_engine", return_value=pinned_engine)
+
+
 def run_pinned_probe(executable: Path) -> tuple[dict[str, object], int]:
     digest = hashlib.sha256(executable.read_bytes()).hexdigest()
-    if sys.platform == "darwin":
-        # macOS does not implement the production pinned-engine inspection path.
-        # These fixture tests mock the process invocation and exercise export/PDF
-        # reporting, so provide a test-only pinned-engine contract for that path.
-        engine_status = executable.stat()
-        engine_identity = (engine_status.st_dev, engine_status.st_ino)
-        pinned_engine = probe_libreoffice_export.PinnedEngine(
-            stream=executable.open("rb"),
-            launch_target=str(executable),
-            launch_kwargs={},
-            sha256=digest,
-            engine_path=str(executable),
-            identity_binding="test-only mocked engine",
-            runtime_directory_path=str(executable.parent),
-            runtime_directory_sha256=probe_libreoffice_export.runtime_directory_sha256(
-                executable.parent,
-                executable.name,
-                engine_identity,
-            ),
-            engine_file_identity=engine_identity,
+    with mocked_pinned_engine_patch(executable):
+        return probe_libreoffice_export.run_probe(
+            None,
+            timeout_seconds=5,
+            engine_binary=str(executable),
+            expected_engine_sha256=digest,
         )
-        with mock.patch.object(probe_libreoffice_export, "open_pinned_engine", return_value=pinned_engine):
-            return probe_libreoffice_export.run_probe(
-                None,
-                timeout_seconds=5,
-                engine_binary=str(executable),
-                expected_engine_sha256=digest,
-            )
-
-    return probe_libreoffice_export.run_probe(
-        None,
-        timeout_seconds=5,
-        engine_binary=str(executable),
-        expected_engine_sha256=digest,
-    )
 
 
 def fixture_classic_xref_is_valid(
@@ -2050,6 +2048,7 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
 
             output = io.StringIO()
             with (
+                mocked_pinned_engine_patch(executable),
                 mock.patch.dict(probe_libreoffice_export.os.environ, {"PAPERBATCH_PROBE_ENVIRONMENT_ID": "lab-42"}),
                 mock.patch.object(probe_libreoffice_export, "invoke", side_effect=fake_invoke),
                 contextlib.redirect_stdout(output),
