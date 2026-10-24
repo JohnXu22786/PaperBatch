@@ -374,7 +374,12 @@ jobs:
 
       # The unit suite uses fixtures; pinned-engine LibreOffice export stays opt-in/local.
       - name: Run Python unit tests
+        if: runner.os != 'Windows'
         run: python -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Run Python unit tests with bounded diagnostics (Windows)
+        if: runner.os == 'Windows'
+        run: python tools/run_python_unit_tests_ci.py
 
       - name: Capture Windows runner spooler and queue evidence
         if: runner.os == 'Windows' && always()
