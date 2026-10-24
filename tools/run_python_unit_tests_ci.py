@@ -11,6 +11,7 @@ from pathlib import Path
 
 MAX_DIAGNOSTIC_CHARS = 12_000
 MAX_CAPTURE_BYTES = 12_000
+MAX_RUN_OUTPUT_BYTES = 256_000
 MAX_WORKFLOW_ANNOTATION_BYTES = 12_000
 OMISSION_MARKER = "\n[... middle omitted ...]\n"
 WORKFLOW_OMISSION_MARKER = "%0A[... middle omitted ...]%0A"
@@ -179,11 +180,22 @@ class BoundedCapture:
         return head + self._marker.decode("ascii") + tail
 
 
+def summarize_unittest_failures(output: str) -> str:
+    """Return a compact failure list from unittest's standard traceback report."""
+    summaries: list[str] = []
+    for section in re.split(r"(?m)^={7,}\s*$", output):
+        lines = [line.strip() for line in section.splitlines() if line.strip()]
+        if not lines or not lines[0].startswith(("ERROR: ", "FAIL: ")):
+            continue
+        summaries.append(f"{lines[0]} — {lines[-1]}")
+    return "\n".join(summaries)
+
+
 def run_command(
     command: list[str],
     *,
     cwd: Path | str,
-    max_capture_bytes: int = MAX_CAPTURE_BYTES,
+    max_capture_bytes: int = MAX_RUN_OUTPUT_BYTES,
 ) -> tuple[int, str]:
     """Drain merged child output continuously into a fixed-size memory buffer."""
     capture = BoundedCapture(max_capture_bytes)
@@ -239,6 +251,9 @@ def main() -> int:
         test_temp=os.environ.get("PAPERBATCH_CI_TEST_TEMP"),
         home=str(Path.home()),
     )
+    failure_summary = summarize_unittest_failures(sanitized) if exit_code else ""
+    if failure_summary:
+        sanitized = "Failed tests:\n" + failure_summary + "\n\nCaptured test output:\n" + sanitized
     diagnostic = bound_utf8_output(bound_output(sanitized))
     if exit_code:
         _write_failure_summary(exit_code, diagnostic)

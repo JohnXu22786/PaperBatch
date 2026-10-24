@@ -82,6 +82,18 @@ class PythonCiDiagnosticsTests(unittest.TestCase):
         self.assertIn("failure-end", bounded)
         self.assertIn("middle omitted", bounded)
 
+    def test_unittest_failure_summary_keeps_each_test_and_root_error(self) -> None:
+        output = (
+            "=======\nERROR: test_one (suite.Tests)\nTraceback (most recent call last):\n"
+            "RuntimeError: first failure\n=======\nFAIL: test_two (suite.Tests)\n"
+            "Traceback (most recent call last):\nAssertionError: second failure\n"
+        )
+
+        summary = run_python_unit_tests_ci.summarize_unittest_failures(output)
+
+        self.assertIn("ERROR: test_one (suite.Tests) — RuntimeError: first failure", summary)
+        self.assertIn("FAIL: test_two (suite.Tests) — AssertionError: second failure", summary)
+
     def test_sanitize_output_redacts_runner_and_profile_paths(self) -> None:
         test_temp = "/private/tmp/pb-ci-123-1"
         output = (

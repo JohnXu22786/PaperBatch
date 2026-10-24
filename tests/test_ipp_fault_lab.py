@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import ipp_fault_lab
 
 
-@unittest.skipUnless(shutil.which("ippeveprinter"), "run inside the pinned IPP lab image")
+@unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("ippeveprinter"), "run inside the pinned Linux IPP lab image")
 class IPPFaultLabTests(unittest.TestCase):
     def test_synthetic_job_has_receipt_query_and_cancel_evidence(self):
         result = ipp_fault_lab.run_scenario("success", timeout_seconds=1)
