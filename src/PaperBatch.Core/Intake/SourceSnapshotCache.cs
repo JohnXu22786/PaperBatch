@@ -361,7 +361,7 @@ public sealed class SourceSnapshotCache
         var path = Path.Combine(_rootPath, MutationLockName);
         if (OperatingSystem.IsMacOS())
         {
-            var options = new FileStreamOptions
+            var macOptions = new FileStreamOptions
             {
                 Mode = FileMode.OpenOrCreate,
                 Access = FileAccess.ReadWrite,
@@ -370,7 +370,7 @@ public sealed class SourceSnapshotCache
                 Options = FileOptions.None,
                 UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite
             };
-            return new FileStream(path, options);
+            return new FileStream(path, macOptions);
         }
 
         if (OperatingSystem.IsLinux())
