@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import sys
 import tempfile
 import unittest
@@ -107,6 +108,60 @@ class PythonCiDiagnosticsTests(unittest.TestCase):
         self.assertIn("failure-start", bounded)
         self.assertIn("failure-end", bounded)
         self.assertIn("middle omitted", bounded)
+
+    def test_failure_emits_bounded_escaped_annotation_and_sanitized_summary(self) -> None:
+        workspace = r"D:\a\PaperBatch\PaperBatch"
+        runner_temp = r"D:\a\_temp"
+        profile = r"C:\Users\Jane Doe"
+        child_output = (
+            "FAILED (errors=1)\nTraceback (most recent call last):\n"
+            f"  File '{workspace}\\tests\\test_sample.py', line 8\n"
+            f"  temp '{runner_temp}\\capture.txt' profile '{profile}\\profile.dat'\n"
+            "::error title=forged::failure%detail\r\n"
+            + ("é" * 6000)
+            + "\nAssertionError: synthetic failing test\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            summary_path = Path(directory) / "summary.md"
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(
+                    "os.environ",
+                    {
+                        "GITHUB_WORKSPACE": workspace,
+                        "RUNNER_TEMP": runner_temp,
+                        "GITHUB_STEP_SUMMARY": str(summary_path),
+                    },
+                    clear=True,
+                ),
+                mock.patch.object(run_python_unit_tests_ci.Path, "home", return_value=Path(profile)),
+                mock.patch.object(run_python_unit_tests_ci, "run_command", return_value=(1, child_output)),
+                mock.patch.object(run_python_unit_tests_ci.sys, "stdout", stdout),
+            ):
+                exit_code = run_python_unit_tests_ci.main()
+
+            annotation = stdout.getvalue()
+            summary = summary_path.read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 1)
+        self.assertLessEqual(
+            len(annotation.encode("utf-8")),
+            run_python_unit_tests_ci.MAX_WORKFLOW_ANNOTATION_BYTES,
+        )
+        self.assertTrue(annotation.startswith("::error::"))
+        self.assertEqual(annotation.count("\n"), 1)
+        self.assertIn("FAILED (errors=1)%0ATraceback", annotation)
+        self.assertIn("AssertionError: synthetic failing test", annotation)
+        self.assertIn("[... middle omitted ...]", annotation)
+        self.assertIn("%25detail%0D%0A", annotation)
+        self.assertIn("::error title=forged::failure%25detail%0D%0A", annotation)
+        for raw_path in (workspace, runner_temp, profile, "Jane Doe"):
+            self.assertNotIn(raw_path, annotation)
+            self.assertNotIn(raw_path, summary)
+        self.assertIn("[WORKSPACE]", annotation)
+        self.assertIn("[RUNNER_TEMP]", annotation)
+        self.assertIn("[USER_HOME]", annotation)
+        self.assertIn("AssertionError: synthetic failing test", summary)
 
 
 if __name__ == "__main__":

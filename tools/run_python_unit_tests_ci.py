@@ -11,7 +11,9 @@ from pathlib import Path
 
 MAX_DIAGNOSTIC_CHARS = 12_000
 MAX_CAPTURE_BYTES = 12_000
+MAX_WORKFLOW_ANNOTATION_BYTES = 12_000
 OMISSION_MARKER = "\n[... middle omitted ...]\n"
+WORKFLOW_OMISSION_MARKER = "%0A[... middle omitted ...]%0A"
 
 
 def sanitize_output(
@@ -68,6 +70,59 @@ def bound_utf8_output(output: str, max_bytes: int = MAX_CAPTURE_BYTES) -> str:
     head = encoded[:head_bytes].decode("utf-8", errors="ignore")
     tail = encoded[-tail_bytes:].decode("utf-8", errors="ignore")
     return head + marker.decode("ascii") + tail
+
+
+def escape_workflow_command_data(value: str) -> list[str]:
+    """Escape data characters so child output cannot add Actions commands."""
+    replacements = {"%": "%25", "\r": "%0D", "\n": "%0A"}
+    return [replacements.get(character, character) for character in value]
+
+
+def bound_workflow_command_data(value: str, max_bytes: int) -> str:
+    """Escape and byte-bound annotation data without cutting an escape token."""
+    tokens = escape_workflow_command_data(value)
+    if sum(len(token.encode("utf-8")) for token in tokens) <= max_bytes:
+        return "".join(tokens)
+
+    marker_bytes = len(WORKFLOW_OMISSION_MARKER.encode("ascii"))
+    if max_bytes <= marker_bytes:
+        raise ValueError("max_bytes is too small for the workflow omission marker")
+
+    available = max_bytes - marker_bytes
+    head_budget = available // 3
+    tail_budget = available - head_budget
+    head: list[str] = []
+    used = 0
+    for token in tokens:
+        token_size = len(token.encode("utf-8"))
+        if used + token_size > head_budget:
+            break
+        head.append(token)
+        used += token_size
+
+    tail: list[str] = []
+    used = 0
+    for token in reversed(tokens):
+        token_size = len(token.encode("utf-8"))
+        if used + token_size > tail_budget:
+            break
+        tail.append(token)
+        used += token_size
+
+    return "".join(head) + WORKFLOW_OMISSION_MARKER + "".join(reversed(tail))
+
+
+def format_workflow_annotation(exit_code: int, diagnostic: str) -> str:
+    """Format a bounded Actions error command containing sanitized diagnostics."""
+    prefix = f"::error::Windows Python unit tests failed (exit code {exit_code})%0A"
+    terminator = "\n"
+    content_budget = (
+        MAX_WORKFLOW_ANNOTATION_BYTES
+        - len(prefix.encode("utf-8"))
+        - len(terminator.encode("utf-8"))
+    )
+    message = bound_workflow_command_data(diagnostic, content_budget)
+    return prefix + message + terminator
 
 
 class BoundedCapture:
@@ -161,6 +216,7 @@ def _write_failure_summary(exit_code: int, diagnostic: str) -> None:
         f"{escaped}\n"
         "```\n"
     )
+    sys.stdout.write(format_workflow_annotation(exit_code, diagnostic))
     if summary_path:
         with Path(summary_path).open("a", encoding="utf-8", newline="\n") as summary:
             summary.write(report)
