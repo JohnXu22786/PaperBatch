@@ -52,6 +52,24 @@ def bound_output(output: str, max_chars: int = MAX_DIAGNOSTIC_CHARS) -> str:
     return output[:head_length] + OMISSION_MARKER + output[-tail_length:]
 
 
+def bound_utf8_output(output: str, max_bytes: int = MAX_CAPTURE_BYTES) -> str:
+    """Keep sanitized diagnostic text within a UTF-8 byte budget."""
+    marker = OMISSION_MARKER.encode("ascii")
+    if max_bytes <= len(marker):
+        raise ValueError("max_bytes is too small for the omission marker")
+
+    encoded = output.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return output
+
+    available = max_bytes - len(marker)
+    head_bytes = available // 3
+    tail_bytes = available - head_bytes
+    head = encoded[:head_bytes].decode("utf-8", errors="ignore")
+    tail = encoded[-tail_bytes:].decode("utf-8", errors="ignore")
+    return head + marker.decode("ascii") + tail
+
+
 class BoundedCapture:
     """Retain bounded output from the beginning and end of a child process."""
 
@@ -162,7 +180,7 @@ def main() -> int:
         runner_temp=os.environ.get("RUNNER_TEMP"),
         home=str(Path.home()),
     )
-    diagnostic = bound_output(sanitized)
+    diagnostic = bound_utf8_output(bound_output(sanitized))
     if exit_code:
         _write_failure_summary(exit_code, diagnostic)
     else:

@@ -66,6 +66,20 @@ class PythonCiDiagnosticsTests(unittest.TestCase):
         self.assertIn("middle omitted", output)
         self.assertIn("\ufffd", output)
 
+    def test_sanitized_multibyte_output_stays_within_byte_limit(self) -> None:
+        output = r"D:\a" + ("é" * 6000) + "failure-end"
+        sanitized = run_python_unit_tests_ci.sanitize_output(output, workspace=r"D:\a")
+
+        self.assertLess(len(sanitized), run_python_unit_tests_ci.MAX_DIAGNOSTIC_CHARS)
+        self.assertGreater(len(sanitized.encode("utf-8")), run_python_unit_tests_ci.MAX_CAPTURE_BYTES)
+
+        bounded = run_python_unit_tests_ci.bound_utf8_output(sanitized)
+
+        self.assertLessEqual(len(bounded.encode("utf-8")), run_python_unit_tests_ci.MAX_CAPTURE_BYTES)
+        self.assertIn("[WORKSPACE]", bounded)
+        self.assertIn("failure-end", bounded)
+        self.assertIn("middle omitted", bounded)
+
     def test_sanitize_output_redacts_runner_and_profile_paths(self) -> None:
         output = (
             r"D:\a\PaperBatch\PaperBatch\tests\test_sample.py "
