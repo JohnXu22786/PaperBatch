@@ -26,6 +26,7 @@ var tests = new (string Name, Action Run)[]
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
     ("intentional duplicate sources have independent queue row identities", IntentionalDuplicateQueueRowsRemainIndependent),
     ("cancelled renderer batch releases every captured snapshot", CancelledRendererBatchReleasesEverySnapshot),
+    ("macOS safely captures a regular source file", MacSourceCaptureUsesSafeNativeIdentity),
     ("file picker reports all skipped and mixed local selections", FilePickerClassifiesSkippedSelections),
     ("headless shell identifies demo data and has no print action", HeadlessShellIsExplicitlyDemoOnly),
     ("production presentation exposes unavailable production capabilities without demo rows", ProductionPresentationIsExplicitlyUnavailable),
@@ -315,6 +316,44 @@ static void CancelledRendererBatchReleasesEverySnapshot()
         Assert.Equal(2, metadata.Length);
         Assert.True(metadata.All(document => !document.RootElement.GetProperty("Retained").GetBoolean()));
         foreach (var document in metadata) document.Dispose();
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
+static void MacSourceCaptureUsesSafeNativeIdentity()
+{
+    if (!OperatingSystem.IsMacOS()) return;
+
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-macos-source-capture-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var source = Path.Combine(root, "source.pdf");
+        var content = TestOnePagePdf();
+        File.WriteAllBytes(source, content);
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+        SourceSnapshot snapshot;
+        try
+        {
+            snapshot = cache.CaptureAsync(source).GetAwaiter().GetResult();
+        }
+        catch (SourceIntakeException exception)
+        {
+            var inner = exception.InnerException is null
+                ? "none"
+                : $"{exception.InnerException.GetType().Name}: {exception.InnerException.Message}";
+            throw new InvalidOperationException($"{exception.Diagnostic.Code}: {exception.Diagnostic.Message}; inner exception: {inner}", exception);
+        }
+
+        Assert.Equal(content.LongLength, snapshot.LengthBytes);
+        using var captured = cache.OpenRead(snapshot.SnapshotId);
+        using var copy = new MemoryStream();
+        captured.CopyTo(copy);
+        Assert.True(content.SequenceEqual(copy.ToArray()));
+        cache.Release(snapshot.SnapshotId);
     }
     finally
     {
