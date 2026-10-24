@@ -15,6 +15,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-dotnet@v6
         with:
@@ -93,6 +95,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-dotnet@v6
         with:
@@ -437,6 +441,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-dotnet@v6
         with:
@@ -459,5 +465,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Run pinned CUPS/IPP fault lab
         run: tools/run_ipp_fault_lab.sh test
+
+  u9-final-evidence-report:
+    name: Bind U9 evidence to exact candidate and CI run
+    if: always()
+    needs:
+      - windows-x64-lite-package
+      - build-and-test
+      - windows-pdfium-community-proof
+      - ipp-protocol-fault-lab
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Generate exact-candidate U9 evidence report
+        env:
+          U9_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          U9_JOB_WINDOWS_X64_LITE_PACKAGE_RESULT: ${{ needs.windows-x64-lite-package.result }}
+          U9_JOB_BUILD_AND_TEST_RESULT: ${{ needs.build-and-test.result }}
+          U9_JOB_WINDOWS_PDFIUM_COMMUNITY_PROOF_RESULT: ${{ needs.windows-pdfium-community-proof.result }}
+          U9_JOB_IPP_PROTOCOL_FAULT_LAB_RESULT: ${{ needs.ipp-protocol-fault-lab.result }}
+        run: python tools/build_u9_final_evidence_report.py --output u9-final-evidence-report.json
+      - name: Upload exact-candidate U9 evidence report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: u9-final-evidence-report
+          path: u9-final-evidence-report.json
+          if-no-files-found: error
+          retention-days: 14

@@ -1,6 +1,6 @@
 # U9 simulation qualification matrix
 
-This matrix defines reproducible package and workflow checks for the unsigned Windows x64 lite beta candidate. Evidence from hosted runners, local containers, synthetic files, and simulated receivers is simulation evidence only. It does not close G1, G3 physical printing, or G4 real-use qualification. Observed results must be read from the exact commit's CI logs and retained artifacts; this document records the planned checks and known limits, not a generated per-run report.
+This matrix defines reproducible package and workflow checks for the unsigned Windows x64 lite beta candidate. Evidence from hosted runners, local containers, synthetic files, and simulated receivers is simulation evidence only. It does not close G1, G3 physical printing, or G4 real-use qualification. The [U9 final evidence report](u9-final-evidence.md) records exact source commits and workflow run IDs; CI also emits a machine-readable report bound to each candidate SHA and CI run. The report distinguishes workflow conclusions from scenario status and preserves these evidence limits.
 
 | ID | Command / workflow | Pass criteria | Evidence limits |
 |---|---|---|---|
