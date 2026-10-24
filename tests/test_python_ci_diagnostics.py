@@ -1,4 +1,4 @@
-"""Tests for bounded, sanitized Windows Python CI failure diagnostics."""
+"""Tests for bounded, sanitized Python CI failure diagnostics."""
 
 from __future__ import annotations
 
@@ -83,21 +83,25 @@ class PythonCiDiagnosticsTests(unittest.TestCase):
         self.assertIn("middle omitted", bounded)
 
     def test_sanitize_output_redacts_runner_and_profile_paths(self) -> None:
+        test_temp = "/private/tmp/pb-ci-123-1"
         output = (
             r"D:\a\PaperBatch\PaperBatch\tests\test_sample.py "
             r"C:\Users\Jane Doe\AppData\Local\Temp\failure.log "
-            r"D:\a\_temp\trace.txt"
+            r"D:\a\_temp\trace.txt " + test_temp + "/fixture.txt"
         )
 
         sanitized = run_python_unit_tests_ci.sanitize_output(
             output,
             workspace=r"D:\a\PaperBatch\PaperBatch",
             runner_temp=r"D:\a\_temp",
+            test_temp=test_temp,
         )
 
         self.assertIn("[WORKSPACE]", sanitized)
         self.assertIn("[RUNNER_TEMP]", sanitized)
         self.assertIn(r"C:\Users\[USER]\AppData", sanitized)
+        self.assertIn("[TEST_TEMP]/fixture.txt", sanitized)
+        self.assertNotIn(test_temp, sanitized)
         self.assertNotIn("Jane Doe", sanitized)
 
     def test_bound_output_keeps_start_and_end_within_limit(self) -> None:

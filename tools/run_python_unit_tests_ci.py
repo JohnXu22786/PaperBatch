@@ -1,4 +1,4 @@
-"""Run the Windows CI Python suite and expose bounded, sanitized failures."""
+"""Run the CI Python suite and expose bounded, sanitized failures."""
 
 from __future__ import annotations
 
@@ -21,12 +21,14 @@ def sanitize_output(
     *,
     workspace: str | None = None,
     runner_temp: str | None = None,
+    test_temp: str | None = None,
     home: str | None = None,
 ) -> str:
     """Hide runner-specific paths and profile names from test output."""
     path_replacements = (
         (workspace, "[WORKSPACE]"),
         (runner_temp, "[RUNNER_TEMP]"),
+        (test_temp, "[TEST_TEMP]"),
         (home, "[USER_HOME]"),
     )
     for path, replacement in path_replacements:
@@ -114,7 +116,7 @@ def bound_workflow_command_data(value: str, max_bytes: int) -> str:
 
 def format_workflow_annotation(exit_code: int, diagnostic: str) -> str:
     """Format a bounded Actions error command containing sanitized diagnostics."""
-    prefix = f"::error::Windows Python unit tests failed (exit code {exit_code})%0A"
+    prefix = f"::error::Python unit tests failed (exit code {exit_code})%0A"
     terminator = "\n"
     content_budget = (
         MAX_WORKFLOW_ANNOTATION_BYTES
@@ -210,7 +212,7 @@ def _write_failure_summary(exit_code: int, diagnostic: str) -> None:
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     escaped = diagnostic.replace("```", "` ` `")
     report = (
-        "### Windows Python unit test diagnostics\n\n"
+        "### Python unit test diagnostics\n\n"
         f"Exit code: {exit_code}\n\n"
         "```text\n"
         f"{escaped}\n"
@@ -234,6 +236,7 @@ def main() -> int:
         output,
         workspace=os.environ.get("GITHUB_WORKSPACE"),
         runner_temp=os.environ.get("RUNNER_TEMP"),
+        test_temp=os.environ.get("PAPERBATCH_CI_TEST_TEMP"),
         home=str(Path.home()),
     )
     diagnostic = bound_utf8_output(bound_output(sanitized))
