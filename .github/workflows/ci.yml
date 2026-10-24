@@ -119,6 +119,7 @@ jobs:
         run: dotnet build src/PaperBatch.Desktop/PaperBatch.Desktop.csproj --no-restore -p:NuGetAudit=false
 
       - name: Run focused headless presentation tests
+        id: headless-desktop-tests
         run: dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
 
       - name: Download and verify temporary PDFium fixture runtime
@@ -381,6 +382,54 @@ jobs:
             diagnostic=${diagnostic//$'\n'/'%0A'}
             printf '::error title=Managed test failure::%s\n' "$diagnostic"
           done < <(grep '^FAIL ' "$test_log" || true)
+
+      - name: Expose macOS managed test failure details
+        if: failure() && runner.os == 'macOS' && (steps.headless-desktop-tests.outcome == 'failure' || steps.managed-test-runner.outcome == 'failure')
+        shell: bash
+        run: |
+          test_log="$RUNNER_TEMP/macos-managed-test-retry.log"
+          if [ '${{ steps.headless-desktop-tests.outcome }}' = 'failure' ]; then
+            test_project='tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj'
+          else
+            test_project='tests/PaperBatch.CompatibilityProbe.Tests/PaperBatch.CompatibilityProbe.Tests.csproj'
+          fi
+          if dotnet run --project "$test_project" -p:NuGetAudit=false >"$test_log" 2>&1; then
+            test_exit_code=0
+          else
+            test_exit_code=$?
+          fi
+          diagnostic_log="$RUNNER_TEMP/macos-managed-test-diagnostics.txt"
+          python3 - "$test_log" "$diagnostic_log" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" <<'PYCODE'
+          import sys
+          from pathlib import Path
+
+          raw = Path(sys.argv[1]).read_text(encoding='utf-8', errors='replace')
+          for path, replacement in ((sys.argv[2], '[DIAGNOSTICS]'), (sys.argv[3], '[WORKSPACE]'), (sys.argv[4], '[RUNNER_TEMP]')):
+              raw = raw.replace(path, replacement)
+          lines = raw.splitlines()
+          failures = [line for line in lines if line.startswith('FAIL ')]
+          selected = failures[:20] if failures else lines[-20:]
+          bounded = '\n'.join(line[:500] for line in selected)
+          Path(sys.argv[2]).write_text(bounded[:10000], encoding='utf-8')
+          PYCODE
+          {
+            echo '### macOS managed test runner diagnostic retry'
+            echo '```text'
+            echo "Exit code: $test_exit_code"
+            cat "$diagnostic_log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          failure_count=0
+          while IFS= read -r diagnostic; do
+            [ -n "$diagnostic" ] || continue
+            failure_count=$((failure_count + 1))
+            [ "$failure_count" -le 20 ] || break
+            diagnostic=${diagnostic//'%'/'%25'}
+            diagnostic=${diagnostic//':'/'%3A'}
+            diagnostic=${diagnostic//$'\r'/'%0D'}
+            diagnostic=${diagnostic//$'\n'/'%0A'}
+            printf '::error title=Managed test failure::%s\n' "$diagnostic"
+          done < "$diagnostic_log"
 
       - name: Remove temporary Linux renderer runtimes
         if: always() && runner.os == 'Linux'
