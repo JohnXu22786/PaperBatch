@@ -62,9 +62,43 @@ def build_report(
     }
 
 
+def render_step_summary(report: dict[str, Any], *, max_bytes: int = 12_000) -> str:
+    """Render the exact-run report without relying on artifact download access."""
+    current = report.get("currentRun")
+    if not isinstance(current, dict):
+        raise ValueError("step summary requires exact CI run context")
+    lines = [
+        "## U9 exact-candidate evidence report",
+        "",
+        f"Source commit: `{current['candidateCommit']}`",
+        f"Workflow run: `{current['workflow']}` / `{current['runId']}` / attempt {current['runAttempt']}",
+        f"Exact-head CI outcome: `{current['exactHeadCiOutcome']}`",
+        "",
+        "### Required job conclusions",
+        "",
+        "| Job | Conclusion |",
+        "|---|---|",
+    ]
+    for name, result in current["jobResults"].items():
+        lines.append(f"| `{name}` | `{result}` |")
+    lines.extend([
+        "",
+        "### Evidence limits",
+        "",
+        "- The checked-in U9 evidence records artifact metadata; artifact contents were not inspected by this workflow.",
+        "- Job conclusions and source identity are read from this exact workflow run. Missing reports or unsuccessful jobs are not treated as passes.",
+        "- These hosted checks do not establish native Office/WPS compatibility, general device support, or physical paper output.",
+    ])
+    text = "\n".join(lines) + "\n"
+    if len(text.encode("utf-8")) > max_bytes:
+        raise ValueError("U9 exact-run summary exceeds its byte limit")
+    return text
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--summary", type=Path)
     args = parser.parse_args()
 
     evidence = json.loads(SOURCE.read_text(encoding="utf-8"))
@@ -81,6 +115,8 @@ def main() -> int:
         job_results=job_results,
     )
     args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if args.summary:
+        args.summary.write_text(render_step_summary(report), encoding="utf-8")
     return 0
 
 

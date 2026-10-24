@@ -24,7 +24,16 @@ jobs:
           python-version: '3.12'
       - name: Run Linux runner HTTP scenario
         id: run
+        env:
+          PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: python tools/simulation_matrix.py --lane linux --output simulation-report.json --publish-output
+      - name: Publish bounded exact-run lane summary
+        if: always()
+        env:
+          PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          PB_JOB_RESULT: ${{ job.status }}
+          PB_JOB_NAME: Linux synthetic IPP smoke
+        run: python tools/build_ci_job_summary.py --title "Linux synthetic IPP smoke" --report simulation-report.json --report-required
 
   windows-synthetic-smoke:
     name: Windows synthetic IPP smoke
@@ -40,7 +49,16 @@ jobs:
           python-version: '3.12'
       - name: Run Windows runner HTTP scenario
         id: run
+        env:
+          PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: python tools/simulation_matrix.py --lane windows --output simulation-report.json --publish-output
+      - name: Publish bounded exact-run lane summary
+        if: always()
+        env:
+          PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          PB_JOB_RESULT: ${{ job.status }}
+          PB_JOB_NAME: Windows synthetic IPP smoke
+        run: python tools/build_ci_job_summary.py --title "Windows synthetic IPP smoke" --report simulation-report.json --report-required
 
   macos-synthetic-smoke:
     name: macOS synthetic IPP smoke
@@ -56,7 +74,16 @@ jobs:
           python-version: '3.12'
       - name: Run macOS runner HTTP scenario
         id: run
+        env:
+          PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: python tools/simulation_matrix.py --lane macos --output simulation-report.json --publish-output
+      - name: Publish bounded exact-run lane summary
+        if: always()
+        env:
+          PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          PB_JOB_RESULT: ${{ job.status }}
+          PB_JOB_NAME: macOS synthetic IPP smoke
+        run: python tools/build_ci_job_summary.py --title "macOS synthetic IPP smoke" --report simulation-report.json --report-required
 
   aggregate-simulation-evidence:
     name: Record lane outcomes and report availability
@@ -70,6 +97,7 @@ jobs:
       U9_WINDOWS_RESULT: ${{ needs.windows-synthetic-smoke.result }}
       U9_MACOS_REPORT: ${{ needs.macos-synthetic-smoke.outputs.report }}
       U9_MACOS_RESULT: ${{ needs.macos-synthetic-smoke.result }}
+      PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -87,6 +115,13 @@ jobs:
           path: simulation-report.json
           if-no-files-found: warn
           retention-days: 14
+      - name: Publish bounded exact-run aggregate summary
+        if: always()
+        env:
+          PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          PB_JOB_RESULT: ${{ job.status }}
+          PB_JOB_NAME: Record lane outcomes and report availability
+        run: python tools/build_ci_job_summary.py --title "U9 simulation aggregate" --report simulation-report.json --report-required
 
   simulation-unit-tests:
     name: Scenario report contract tests

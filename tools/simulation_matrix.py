@@ -60,6 +60,9 @@ def build_report(
     runner_image_version: str,
     python_version: str,
     additional_tool_versions: dict[str, str] | None = None,
+    workflow: str | None = None,
+    run_id: str | None = None,
+    run_attempt: str | None = None,
 ) -> dict:
     if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
         raise ValueError("report commit must be a full hexadecimal Git SHA")
@@ -68,7 +71,13 @@ def build_report(
     for scenario in scenarios:
         if not scenario.get("scenarioId") or scenario.get("outcome") not in OUTCOMES or not scenario.get("evidenceLimit"):
             raise ValueError("each scenario needs an ID, known outcome, and evidence limit")
-    return {
+    run_values = (workflow, run_id, run_attempt)
+    if any(value is not None for value in run_values):
+        if not all(isinstance(value, str) and value for value in run_values):
+            raise ValueError("workflow, run ID, and attempt must be provided together")
+        if not run_id.isdecimal() or not run_attempt.isdecimal():
+            raise ValueError("workflow run ID and attempt must be numeric")
+    report = {
         "schemaVersion": 1,
         "commit": commit,
         "os": os_name,
@@ -79,6 +88,9 @@ def build_report(
         "generatedAtUtc": datetime.now(timezone.utc).isoformat(),
         "scenarios": scenarios,
     }
+    if all(run_values):
+        report["runIdentity"] = {"workflow": workflow, "runId": run_id, "runAttempt": run_attempt}
+    return report
 
 
 def _valid_get_printer_attributes_request(body: bytes) -> bool:
@@ -318,6 +330,9 @@ def native_runner_stub() -> dict:
 
 
 def _commit() -> str:
+    source_commit = os.environ.get("PB_SOURCE_COMMIT")
+    if source_commit:
+        return source_commit
     value = os.environ.get("GITHUB_SHA")
     if value:
         return value
@@ -327,7 +342,13 @@ def _commit() -> str:
         raise RuntimeError("cannot determine the report commit SHA")
 
 
-def aggregate_scenarios(lane_reports: dict[str, str], job_results: dict[str, str], *, commit: str) -> list[dict]:
+def aggregate_scenarios(
+    lane_reports: dict[str, str],
+    job_results: dict[str, str],
+    *,
+    commit: str,
+    run_identity: dict[str, str] | None = None,
+) -> list[dict]:
     scenarios = []
     for lane in ("linux", "windows", "macos"):
         lane_config = _manifest()["lanes"][lane]
@@ -341,6 +362,8 @@ def aggregate_scenarios(lane_reports: dict[str, str], job_results: dict[str, str
                     raise ValueError("lane report has an invalid shape")
                 if lane_report.get("commit") != commit or len(lane_report["scenarios"]) != len(expected_scenarios):
                     raise ValueError("lane report commit or scenario count is invalid")
+                if run_identity is not None and lane_report.get("runIdentity") != run_identity:
+                    raise ValueError("lane report workflow run identity is invalid")
                 required_provenance = ("os", "runner", "runnerImage", "runnerImageVersion")
                 if any(not isinstance(lane_report.get(key), str) or not lane_report[key] for key in required_provenance):
                     raise ValueError("lane report is missing OS or runner provenance")
@@ -398,7 +421,7 @@ def aggregate_scenarios(lane_reports: dict[str, str], job_results: dict[str, str
 
 
 def _aggregate_exit_code(scenarios: list[dict]) -> int:
-    failed_results = {"failure", "cancelled", "timed_out", "action_required", "invalid_report"}
+    failed_results = {"failure", "cancelled", "skipped", "timed_out", "action_required", "invalid_report"}
     return 1 if any(scenario.get("outcome") == "failed" or scenario.get("jobResult") in failed_results for scenario in scenarios) else 0
 
 
@@ -410,10 +433,18 @@ def main() -> int:
     parser.add_argument("--aggregate", action="store_true")
     parser.add_argument("--publish-output", action="store_true")
     args = parser.parse_args()
+    workflow = os.environ.get("GITHUB_WORKFLOW")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT")
     if args.aggregate:
         reports = {lane: os.environ.get(f"U9_{lane.upper()}_REPORT", "") for lane in ("linux", "windows", "macos")}
         results = {lane: os.environ.get(f"U9_{lane.upper()}_RESULT", "unknown") for lane in ("linux", "windows", "macos")}
-        scenarios = aggregate_scenarios(reports, results, commit=_commit())
+        run_identity = None
+        if any((workflow, run_id, run_attempt)):
+            if not all((workflow, run_id, run_attempt)):
+                raise ValueError("workflow, run ID, and attempt must all be available")
+            run_identity = {"workflow": workflow, "runId": run_id, "runAttempt": run_attempt}
+        scenarios = aggregate_scenarios(reports, results, commit=_commit(), run_identity=run_identity)
         report = build_report(
             scenarios,
             commit=_commit(),
@@ -422,6 +453,9 @@ def main() -> int:
             runner_image=os.environ.get("ImageOS", platform.platform()),
             runner_image_version=os.environ.get("ImageVersion", "unknown"),
             python_version=platform.python_version(),
+            workflow=workflow,
+            run_id=run_id,
+            run_attempt=run_attempt,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
@@ -461,6 +495,9 @@ def main() -> int:
         runner_image_version=os.environ.get("ImageVersion", "unknown"),
         python_version=platform.python_version(),
         additional_tool_versions={"ipptool": ipptool_version} if ipptool_version else None,
+        workflow=workflow,
+        run_id=run_id,
+        run_attempt=run_attempt,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

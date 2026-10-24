@@ -236,8 +236,14 @@ try {
     $beforeRegistryHash = if ($null -ne $beforeRegistry) { Get-SnapshotDigest $beforeRegistry } else { $null }
     $afterRegistryHash = if ($null -ne $afterRegistry) { Get-SnapshotDigest $afterRegistry } else { $null }
     $registryObservationStatus = if ($null -eq $beforeRegistryHash -or $null -eq $afterRegistryHash) { 'blocked' } elseif ($beforeRegistryHash -eq $afterRegistryHash) { 'passed' } else { 'failed' }
+    $sourceCommit = $env:PB_SOURCE_COMMIT
+    if ([string]::IsNullOrWhiteSpace($sourceCommit)) { $sourceCommit = (& git -C $repoRoot rev-parse HEAD).Trim() }
+    $runIdentity = $null
+    if ($env:GITHUB_WORKFLOW -and $env:GITHUB_RUN_ID -and $env:GITHUB_RUN_ATTEMPT) {
+        $runIdentity = [ordered]@{ workflow = $env:GITHUB_WORKFLOW; runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT }
+    }
     $report = [ordered]@{
-        schemaVersion = 1; commit = (& git -C $repoRoot rev-parse HEAD).Trim()
+        schemaVersion = 1; commit = $sourceCommit; runIdentity = $runIdentity
         runner = [ordered]@{ os = [string](Get-CimInstance Win32_OperatingSystem).Caption; image = $env:ImageOS; name = $env:RUNNER_NAME; powershell = $PSVersionTable.PSVersion.ToString() }
         packageManifestSha256 = $beforeManifest; generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         packageTreeComparison = [ordered]@{
