@@ -66,6 +66,8 @@ if ($sessionName -eq 'Services') {
 }
 $evidence = [ordered]@{
     schemaVersion = '1.0'
+    commit = if ($env:PB_SOURCE_COMMIT) { $env:PB_SOURCE_COMMIT } else { (& git rev-parse HEAD).Trim() }
+    runIdentity = if ($env:GITHUB_WORKFLOW -and $env:GITHUB_RUN_ID -and $env:GITHUB_RUN_ATTEMPT) { [ordered]@{ workflow = $env:GITHUB_WORKFLOW; runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT } } else { $null }
     generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
     runner = [ordered]@{
         osStatus = if ($null -ne $os) { 'Verified' } else { $osStatus }

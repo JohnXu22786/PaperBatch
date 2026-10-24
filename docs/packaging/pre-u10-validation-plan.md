@@ -51,5 +51,6 @@ Dispatch these units in order. Each later unit depends on the earlier evidence a
 ## Execution record
 
 - Unit 1 is implemented in `.github/workflows/ci.yml` by adding macOS to the existing `build-and-test` matrix. Linux-only renderer/corpus work and Windows-only packaging, PDFium, diagnostics, and spooler evidence remain conditionally scoped to their operating systems.
-- Units 2–5 are ordered future gates; this plan does not implement their work, enable a self-hosted runner, or conduct native software or real-user trials.
+- Unit 2 implementation adds bounded exact-run summaries and workflow/run/attempt identity to CI evidence reports. Its remote exact-head CI and review gates remain pending until this unit is reviewed and merged.
+- Units 3–5 remain ordered future gates; this plan does not enable a self-hosted runner or conduct native software or real-user trials.
 - Native Office/WPS lane status in this environment: **blocked**. The environment is a Linux container and exposes no VM/hypervisor device or licensed isolated Windows VM.

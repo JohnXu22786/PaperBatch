@@ -121,6 +121,8 @@ function Write-ProofReport {
     }
     $report = [ordered]@{
         schemaVersion = '1.0'
+        commit = if ($env:PB_SOURCE_COMMIT) { $env:PB_SOURCE_COMMIT } else { (& git rev-parse HEAD).Trim() }
+        runIdentity = if ($env:GITHUB_WORKFLOW -and $env:GITHUB_RUN_ID -and $env:GITHUB_RUN_ATTEMPT) { [ordered]@{ workflow = $env:GITHUB_WORKFLOW; runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT } } else { $null }
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         status = $Status
         scope = 'Hosted Windows x64 CI validation of one pinned community-provided PDFium binary.'

@@ -74,6 +74,26 @@ class FinalEvidenceReportTests(unittest.TestCase):
         self.assertEqual(current["runId"], 12345)
         self.assertEqual(current["exactHeadCiOutcome"], "passed")
 
+    def test_step_summary_lists_exact_run_identity_job_conclusions_and_limits(self):
+        report = report_builder.build_report(
+            self.evidence,
+            candidate_sha="a" * 40,
+            run_id="12345",
+            run_attempt="2",
+            workflow="CI",
+            job_results={name: "success" for name in report_builder.JOB_NAMES},
+        )
+
+        summary = report_builder.render_step_summary(report)
+
+        self.assertIn("a" * 40, summary)
+        self.assertIn("12345", summary)
+        self.assertIn("attempt 2", summary)
+        for job in report_builder.JOB_NAMES:
+            self.assertIn(job, summary)
+            self.assertIn("success", summary)
+        self.assertIn("artifact contents were not inspected", summary.lower())
+
     def test_failed_exact_head_job_never_reports_green(self):
         jobs = {name: "success" for name in report_builder.JOB_NAMES}
         jobs["ipp-protocol-fault-lab"] = "failure"
@@ -118,6 +138,18 @@ class FinalEvidenceReportTests(unittest.TestCase):
                 self.assertTrue(checkouts)
                 for index in checkouts:
                     self.assertTrue(any(expected in line for line in lines[index + 2 : index + 4]))
+
+    def test_relevant_workflows_publish_exact_run_summaries_after_failures(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        simulation = (ROOT / ".github/workflows/u9-simulation-matrix.yml").read_text(encoding="utf-8")
+
+        self.assertIn("--summary \"$GITHUB_STEP_SUMMARY\"", ci)
+        self.assertIn("PB_JOB_RESULT: ${{ job.status }}", ci)
+        self.assertIn("Publish bounded exact-run managed and runner summary", ci)
+        self.assertIn("Publish bounded exact-run package summary", ci)
+        self.assertIn("Publish bounded exact-run lane summary", simulation)
+        self.assertIn("Publish bounded exact-run aggregate summary", simulation)
+        self.assertIn("if: always()", simulation)
 
 
 if __name__ == "__main__":

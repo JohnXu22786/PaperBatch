@@ -10,6 +10,14 @@ import simulation_matrix
 
 
 class SimulationMatrixTests(unittest.TestCase):
+    def test_ci_source_commit_prefers_pr_head_over_workflow_merge_sha(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"PB_SOURCE_COMMIT": "a" * 40, "GITHUB_SHA": "b" * 40},
+            clear=True,
+        ):
+            self.assertEqual(simulation_matrix._commit(), "a" * 40)
+
     def test_report_requires_provenance_and_known_outcome(self):
         base = {
             "scenarioId": "ipp.fake_loopback_endpoint.linux_runner_python_http_client.smoke",
@@ -21,6 +29,19 @@ class SimulationMatrixTests(unittest.TestCase):
         )
         self.assertEqual(report["commit"], "a" * 40)
         self.assertEqual(report["scenarios"][0]["outcome"], "passed")
+        bound_report = simulation_matrix.build_report(
+            [base], commit="a" * 40, os_name="Linux", runner="runner", runner_image="image",
+            runner_image_version="version", python_version="3.12", workflow="U9 simulation matrix",
+            run_id="12345", run_attempt="2",
+        )
+        self.assertEqual(bound_report["runIdentity"], {
+            "workflow": "U9 simulation matrix", "runId": "12345", "runAttempt": "2"
+        })
+        with self.assertRaisesRegex(ValueError, "provided together"):
+            simulation_matrix.build_report(
+                [base], commit="a" * 40, os_name="Linux", runner="runner", runner_image="image",
+                runner_image_version="version", python_version="3.12", workflow="CI",
+            )
         for change in ({"outcome": "success"}, {"scenarioId": ""}, {"evidenceLimit": ""}):
             with self.subTest(change=change):
                 with self.assertRaises(ValueError):
@@ -124,7 +145,7 @@ class SimulationMatrixTests(unittest.TestCase):
         self.assertEqual(simulation_matrix._aggregate_exit_code([failed_lane]), 1)
         self.assertEqual(scenarios[1]["jobResult"], "invalid_report")
         self.assertEqual(simulation_matrix._aggregate_exit_code([scenarios[1], scenarios[2]]), 1)
-        self.assertEqual(simulation_matrix._aggregate_exit_code([scenarios[0], scenarios[3]]), 0)
+        self.assertEqual(simulation_matrix._aggregate_exit_code([scenarios[0], scenarios[3]]), 1)
         incomplete_report = {**linux_report, "runner": ""}
         invalid_lane = simulation_matrix.aggregate_scenarios(
             {"linux": json.dumps(incomplete_report)}, {"linux": "success"}, commit="a" * 40
@@ -132,6 +153,33 @@ class SimulationMatrixTests(unittest.TestCase):
         self.assertEqual(invalid_lane["outcome"], "not_run")
         self.assertEqual(invalid_lane["jobResult"], "invalid_report")
         self.assertEqual(simulation_matrix._aggregate_exit_code([invalid_lane]), 1)
+
+    def test_aggregate_rejects_lane_report_from_another_workflow_attempt(self):
+        manifest = simulation_matrix._manifest()
+        lane_report = {
+            "commit": "a" * 40,
+            "runIdentity": {"workflow": "U9 simulation matrix", "runId": "12345", "runAttempt": "1"},
+            "os": "Linux", "runner": "linux-hosted", "runnerImage": "ubuntu-24.04",
+            "runnerImageVersion": "2026.10", "toolVersions": {"python": "3.12.0"},
+            "scenarios": [{
+                "scenarioId": manifest["lanes"]["linux"]["scenarioId"], "outcome": "passed",
+                "endpoint": "fake_loopback_endpoint", "client": "python_stdlib_http_client_on_linux_runner",
+                "evidenceLimit": "Synthetic loopback only.",
+            }],
+        }
+
+        scenario = simulation_matrix.aggregate_scenarios(
+            {"linux": json.dumps(lane_report)}, {"linux": "success"}, commit="a" * 40,
+            run_identity={"workflow": "U9 simulation matrix", "runId": "12345", "runAttempt": "2"},
+        )[0]
+
+        self.assertEqual(scenario["outcome"], "not_run")
+        self.assertEqual(scenario["jobResult"], "invalid_report")
+
+    def test_skipped_lane_without_a_report_fails_aggregate(self):
+        scenario = {"outcome": "unsupported", "jobResult": "skipped"}
+
+        self.assertEqual(simulation_matrix._aggregate_exit_code([scenario]), 1)
 
     def test_ipp_smoke_rejects_incomplete_or_unsuccessful_responses(self):
         self.assertTrue(simulation_matrix._valid_get_printer_attributes_response(simulation_matrix.RESPONSE))

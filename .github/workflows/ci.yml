@@ -13,6 +13,8 @@ jobs:
   windows-x64-lite-package:
     name: Windows x64 lite packaging prototype
     runs-on: windows-latest
+    env:
+      PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -27,10 +29,12 @@ jobs:
           python-version: '3.12'
 
       - name: Publish lite package and provenance manifest
+        id: package
         shell: pwsh
         run: ./tools/package_windows_x64.ps1
 
       - name: Verify package manifest and archive
+        id: verify-package
         shell: pwsh
         run: |
           $manifestPath = 'artifacts/windows-x64-lite/package-manifest.json'
@@ -66,6 +70,7 @@ jobs:
           python tools/verify_windows_package.py artifacts/windows-x64-lite artifacts/windows-x64-lite/PaperBatch-windows-x64-lite.zip
 
       - name: Simulate isolated startup, offline behavior, and package tree rollback
+        id: package-session
         shell: pwsh
         run: ./tools/simulate_windows_package_session.ps1 -PackageDirectory artifacts/windows-x64-lite -PackageArchive artifacts/windows-x64-lite/PaperBatch-windows-x64-lite.zip
 
@@ -86,9 +91,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Publish bounded exact-run package summary
+        if: always()
+        env:
+          PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          PB_JOB_RESULT: ${{ job.status }}
+          PB_JOB_NAME: Windows x64 lite packaging prototype
+          PB_STEP_OUTCOMES: '{"package":"${{ steps.package.outcome }}","verify":"${{ steps.verify-package.outcome }}","session":"${{ steps.package-session.outcome }}"}'
+        run: python tools/build_ci_job_summary.py --title "Windows package and session evidence" --report u9-windows-package-session-report.json --report-required
+
   build-and-test:
     name: ${{ matrix.os }} / .NET 10, Avalonia, and Python
     runs-on: ${{ matrix.os }}
+    env:
+      PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -103,6 +119,7 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Restore locked desktop dependencies
+        id: restore
         run: dotnet restore tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --locked-mode -p:NuGetAudit=false
 
       - uses: actions/setup-python@v7
@@ -119,12 +136,15 @@ jobs:
           printf 'PAPERBATCH_CI_TEST_TEMP=%s\n' "$test_temp" >> "$GITHUB_ENV"
 
       - name: Build core contracts and run-state store
+        id: build-core
         run: dotnet build src/PaperBatch.Core/PaperBatch.Core.csproj -p:NuGetAudit=false
 
       - name: Build compatibility probe
+        id: build-probe
         run: dotnet build src/PaperBatch.CompatibilityProbe/PaperBatch.CompatibilityProbe.csproj -p:NuGetAudit=false
 
       - name: Build Avalonia desktop shell
+        id: build-desktop
         run: dotnet build src/PaperBatch.Desktop/PaperBatch.Desktop.csproj --no-restore -p:NuGetAudit=false
 
       - name: Run focused headless presentation tests
@@ -471,22 +491,27 @@ jobs:
           rm -f "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz" "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz.asc" "$RUNNER_TEMP/tdf-release-key.asc" "$RUNNER_TEMP/tdf-release-key.gpg" "$RUNNER_TEMP/tdf-signature-status.txt" "$RUNNER_TEMP/pdfium-linux-x64.tgz"
 
       - name: Compile Python sources
+        id: compile-python
         run: python -m compileall -q tools tests
 
       # The unit suite uses fixtures; pinned-engine LibreOffice export stays opt-in/local.
       - name: Run Python unit tests
         if: runner.os == 'Linux'
+        id: python-tests-linux
         run: python -m unittest discover -s tests -p 'test_*.py'
 
       - name: Run Python unit tests with bounded diagnostics (macOS)
         if: runner.os == 'macOS'
+        id: python-tests-macos
         run: python tools/run_python_unit_tests_ci.py
 
       - name: Run Python unit tests with bounded diagnostics (Windows)
         if: runner.os == 'Windows'
+        id: python-tests-windows
         run: python tools/run_python_unit_tests_ci.py
 
       - name: Capture Windows runner spooler and queue evidence
+        id: windows-runner-capture
         if: runner.os == 'Windows' && always()
         shell: pwsh
         run: |
@@ -503,6 +528,7 @@ jobs:
             windows-print-probe-report.json
             windows-managed-test-retry.log
           if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload bounded PDFium failure details
         if: failure() && runner.os == 'Windows' && steps.pdfiumverify.outcome == 'failure'
@@ -522,9 +548,20 @@ jobs:
           Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification.txt')
           Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-pdfium-verification-raw.txt')
 
+      - name: Publish bounded exact-run managed and runner summary
+        if: always()
+        env:
+          PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          PB_JOB_RESULT: ${{ job.status }}
+          PB_JOB_NAME: ${{ matrix.os }} / .NET 10, Avalonia, and Python
+          PB_STEP_OUTCOMES: '{"restore":"${{ steps.restore.outcome }}","build_core":"${{ steps.build-core.outcome }}","build_probe":"${{ steps.build-probe.outcome }}","build_desktop":"${{ steps.build-desktop.outcome }}","headless_tests":"${{ steps.headless-desktop-tests.outcome }}","managed_tests":"${{ steps.managed-test-runner.outcome }}","python_compile":"${{ steps.compile-python.outcome }}","python_tests_linux":"${{ steps.python-tests-linux.outcome }}","python_tests_macos":"${{ steps.python-tests-macos.outcome }}","python_tests_windows":"${{ steps.python-tests-windows.outcome }}","windows_runner_capture":"${{ steps.windows-runner-capture.outcome }}"}'
+        run: python tools/build_ci_job_summary.py --title "Managed tests and runner evidence" --report windows-print-runner-evidence.json
+
   windows-pdfium-community-proof:
     name: Windows hosted PDFium community proof
     runs-on: windows-latest
+    env:
+      PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -545,6 +582,14 @@ jobs:
           name: windows-pdfium-community-proof
           path: ${{ runner.temp }}/paperbatch-pdfium-proof/report.json
           if-no-files-found: warn
+          retention-days: 14
+      - name: Publish bounded exact-run PDFium summary
+        if: always()
+        env:
+          PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          PB_JOB_RESULT: ${{ job.status }}
+          PB_JOB_NAME: Windows hosted PDFium community proof
+        run: python tools/build_ci_job_summary.py --title "Windows PDFium runner evidence" --report "${{ runner.temp }}/paperbatch-pdfium-proof/report.json" --report-required
 
   ipp-protocol-fault-lab:
     name: Linux CUPS and IPP protocol simulation
@@ -555,6 +600,13 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Run pinned CUPS/IPP fault lab
         run: tools/run_ipp_fault_lab.sh test
+      - name: Publish bounded exact-run protocol summary
+        if: always()
+        env:
+          PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          PB_JOB_RESULT: ${{ job.status }}
+          PB_JOB_NAME: Linux CUPS and IPP protocol simulation
+        run: python tools/build_ci_job_summary.py --title "CUPS and IPP protocol simulation"
 
   u9-final-evidence-report:
     name: Bind U9 evidence to exact candidate and CI run
@@ -579,7 +631,7 @@ jobs:
           U9_JOB_BUILD_AND_TEST_RESULT: ${{ needs.build-and-test.result }}
           U9_JOB_WINDOWS_PDFIUM_COMMUNITY_PROOF_RESULT: ${{ needs.windows-pdfium-community-proof.result }}
           U9_JOB_IPP_PROTOCOL_FAULT_LAB_RESULT: ${{ needs.ipp-protocol-fault-lab.result }}
-        run: python tools/build_u9_final_evidence_report.py --output u9-final-evidence-report.json
+        run: python tools/build_u9_final_evidence_report.py --output u9-final-evidence-report.json --summary "$GITHUB_STEP_SUMMARY"
       - name: Upload exact-candidate U9 evidence report
         if: always()
         uses: actions/upload-artifact@v4
@@ -588,3 +640,10 @@ jobs:
           path: u9-final-evidence-report.json
           if-no-files-found: error
           retention-days: 14
+      - name: Publish bounded exact-run report-job summary
+        if: always()
+        env:
+          PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          PB_JOB_RESULT: ${{ job.status }}
+          PB_JOB_NAME: Bind U9 evidence to exact candidate and CI run
+        run: python tools/build_ci_job_summary.py --title "Exact-run report job status" --report u9-final-evidence-report.json --report-required
