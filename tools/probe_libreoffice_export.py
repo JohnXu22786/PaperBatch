@@ -39,6 +39,9 @@ MAX_PDF_TOTAL_CMAP_BYTES = MAX_PDF_DECODED_STREAM_BYTES
 MAX_ENGINE_SNAPSHOT_BYTES = 512 * 1024 * 1024
 MAX_RUNTIME_DIRECTORY_BYTES = 4 * 1024 * 1024 * 1024
 MAX_RUNTIME_DIRECTORY_ENTRIES = 100_000
+MAX_RUNTIME_DIAGNOSTIC_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_RUNTIME_DIAGNOSTIC_COMPONENTS = 3
+MAX_RUNTIME_DIAGNOSTIC_NAME_CHARS = 96
 PDF_WHITESPACE = b"\x00\x09\x0a\x0c\x0d\x20"
 PDF_WHITESPACE_PATTERN = rb"[\x00\x09\x0a\x0c\x0d\x20]"
 PDF_OBJECT_MARKER_TERMINATOR_PATTERN = (
@@ -238,6 +241,7 @@ class PinnedEngine:
     runtime_directory_sha256: str = ""
     engine_file_identity: tuple[int, int] | None = None
     source_stream: Any = None
+    runtime_directory_manifest: dict[str, str] | None = None
 
     def close(self) -> None:
         try:
@@ -251,18 +255,26 @@ class PinnedEngine:
                 if self.runtime_directory_descriptor is not None:
                     os.close(self.runtime_directory_descriptor)
                     self.runtime_directory_descriptor = None
+                self.runtime_directory_manifest = None
 
     def verify_runtime_directory(self, *, verify_engine_image: bool = False) -> str:
         if self.runtime_directory_path is None:
             raise PinnedEngineError("The selected engine has no validated runtime directory.")
-        observed = runtime_directory_sha256(
+        observed, observed_manifest = _runtime_directory_fingerprint(
             Path(self.runtime_directory_path),
             Path(self.engine_path).name,
             self.engine_file_identity,
+            include_manifest=self.runtime_directory_manifest is not None,
         )
         if observed != self.runtime_directory_sha256:
+            changed = _changed_runtime_components(self.runtime_directory_manifest, observed_manifest)
+            details = ""
+            if changed:
+                safe_names = [_safe_runtime_component_name(name) for name in changed[:MAX_RUNTIME_DIAGNOSTIC_COMPONENTS]]
+                details = "; changed relative components: " + ", ".join(name for name in safe_names if name)
             raise PinnedEngineError(
                 "LibreOffice runtime components changed while the process was running; version/export evidence is blocked."
+                + details
             )
         if verify_engine_image and sys.platform in ("linux", "darwin"):
             engine_path = Path(self.runtime_directory_path) / Path(self.engine_path).name
@@ -314,17 +326,33 @@ class PinnedEngine:
         return overlay_launcher
 
 
-def runtime_directory_sha256(
+def _runtime_directory_fingerprint(
     directory: Path,
     excluded_engine_name: str,
     excluded_file_identity: tuple[int, int] | None = None,
-) -> str:
-    """Hash a bounded program-directory tree, excluding the separately pinned engine image."""
+    *,
+    include_manifest: bool = False,
+) -> tuple[str, dict[str, str] | None]:
+    """Hash a bounded program tree and optionally retain a bounded diagnostic component manifest."""
     digest = hashlib.sha256()
     entries_seen = 0
     bytes_seen = 0
+    manifest: dict[str, str] | None = {} if include_manifest else None
+    manifest_bytes = 0
     pending = [(directory, "")]
     excluded = excluded_engine_name.casefold() if os.name == "nt" else excluded_engine_name
+
+    def record_component(relative_path: str, identity: str) -> None:
+        nonlocal manifest, manifest_bytes
+        if manifest is None:
+            return
+        estimated_bytes = len(relative_path.encode("utf-8")) + len(identity) + 64
+        if manifest_bytes + estimated_bytes > MAX_RUNTIME_DIAGNOSTIC_MANIFEST_BYTES:
+            manifest = None
+            manifest_bytes = 0
+            return
+        manifest[relative_path] = identity
+        manifest_bytes += estimated_bytes
 
     while pending:
         current, relative_directory = pending.pop()
@@ -351,17 +379,20 @@ def runtime_directory_sha256(
                 if sys.platform == "darwin" and stat.S_ISLNK(metadata.st_mode):
                     link_target = os.readlink(child.path)
                     digest.update(b"L\0" + relative.replace(os.sep, "/").encode("utf-8") + b"\0" + link_target.encode("utf-8", "strict") + b"\0")
+                    record_component(relative, f"L:{link_target}")
                     continue
                 raise PinnedEngineError("The LibreOffice runtime directory contains a symbolic link or reparse point that cannot be safely fingerprinted.")
             encoded_path = relative.replace(os.sep, "/").encode("utf-8", "strict")
             if stat.S_ISDIR(metadata.st_mode):
+                mode = str(stat.S_IMODE(metadata.st_mode))
                 digest.update(
                     b"D\0"
                     + encoded_path
                     + b"\0"
-                    + str(stat.S_IMODE(metadata.st_mode)).encode("ascii")
+                    + mode.encode("ascii")
                     + b"\0"
                 )
+                record_component(relative, f"D:{mode}")
                 pending.append((Path(child.path), relative))
                 continue
             if not stat.S_ISREG(metadata.st_mode):
@@ -405,33 +436,75 @@ def runtime_directory_sha256(
                         or (current_path.st_dev, current_path.st_ino) != excluded_file_identity
                     ):
                         raise PinnedEngineError("The pinned engine directory entry changed while its identity was being inspected.")
+                    record_component(relative, "P:separately-pinned-engine")
                     continue
 
+                mode = str(stat.S_IMODE(opened.st_mode))
                 digest.update(
                     b"F\0"
                     + encoded_path
                     + b"\0"
-                    + str(stat.S_IMODE(opened.st_mode)).encode("ascii")
+                    + mode.encode("ascii")
                     + b"\0"
                     + str(opened.st_size).encode("ascii")
                     + b"\0"
                 )
                 component_bytes = 0
+                component_digest = hashlib.sha256() if manifest is not None else None
                 with os.fdopen(descriptor, "rb", closefd=False) as stream:
                     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                         component_bytes += len(chunk)
                         if component_bytes > metadata.st_size or bytes_seen + component_bytes > MAX_RUNTIME_DIRECTORY_BYTES:
                             raise PinnedEngineError("The LibreOffice runtime directory changed or exceeded the 4 GiB content inspection limit.")
                         digest.update(chunk)
+                        if component_digest is not None:
+                            component_digest.update(chunk)
                 after = os.fstat(descriptor)
                 if after.st_size != opened.st_size or after.st_mtime_ns != opened.st_mtime_ns or component_bytes != opened.st_size:
                     raise PinnedEngineError("A LibreOffice runtime component changed while its identity was being inspected.")
                 bytes_seen += component_bytes
                 digest.update(b"\0")
+                if component_digest is not None:
+                    record_component(relative, f"F:{mode}:{opened.st_size}:{component_digest.hexdigest()}")
             finally:
                 os.close(descriptor)
 
-    return digest.hexdigest()
+    return digest.hexdigest(), manifest
+
+
+def runtime_directory_sha256(
+    directory: Path,
+    excluded_engine_name: str,
+    excluded_file_identity: tuple[int, int] | None = None,
+) -> str:
+    return _runtime_directory_fingerprint(directory, excluded_engine_name, excluded_file_identity)[0]
+
+
+def _changed_runtime_components(
+    baseline: dict[str, str] | None,
+    observed: dict[str, str] | None,
+) -> list[str]:
+    if baseline is None or observed is None:
+        return []
+    return [
+        name for name in sorted(set(baseline) | set(observed))
+        if baseline.get(name) != observed.get(name)
+    ]
+
+
+def _safe_runtime_component_name(relative_name: str) -> str:
+    normalized = relative_name.replace("\\", "/")
+    safe = re.sub(r"[^A-Za-z0-9._/-]", "_", normalized)
+    safe = "/".join(part for part in safe.split("/") if part not in {"", ".", ".."})
+    return safe[:MAX_RUNTIME_DIAGNOSTIC_NAME_CHARS] or "[component]"
+
+
+def runtime_directory_binding_description(platform_name: str, operating_system: str) -> str:
+    if platform_name.startswith("linux"):
+        return "sibling program directory held by an open Linux descriptor; a bounded content manifest is checked after each command"
+    if operating_system == "nt":
+        return "engine path resolved from a read-only Win32 handle; a bounded sibling program-directory content manifest is checked after each command"
+    return "read-only macOS engine handle; a bounded sibling program-directory content manifest is checked after each command"
 
 
 def open_readonly_regular_file(path: Path):
@@ -671,10 +744,11 @@ def open_pinned_engine(executable: Path, expected_sha256: str):
             raise PinnedEngineError("The opened engine image does not match the trusted SHA-256 pin.", observed_sha256)
         if runtime_directory_path is None:
             raise PinnedEngineError("The selected engine has no runtime directory for component verification.")
-        runtime_sha256 = runtime_directory_sha256(
+        runtime_sha256, runtime_manifest = _runtime_directory_fingerprint(
             runtime_directory_path,
             Path(opened_engine_path).name,
             engine_file_identity,
+            include_manifest=os.name == "nt",
         )
         identity_binding = (
             "sealed Linux memfd engine snapshot; sibling runtime directory held by descriptor and fingerprinted after each command"
@@ -695,6 +769,7 @@ def open_pinned_engine(executable: Path, expected_sha256: str):
             runtime_sha256,
             engine_file_identity,
             source_stream,
+            runtime_manifest,
         )
         stream = None
         runtime_directory_descriptor = None
@@ -1243,8 +1318,7 @@ def run_probe(
     report["libreOffice"].update({
         "engineBinaryPath": pinned_engine.engine_path,
         "engineSha256": pinned_engine.sha256,
-        "runtimeDirectoryBinding": "sibling program directory held by an open Linux descriptor; a bounded content manifest is checked after each command"
-        if sys.platform.startswith("linux") else "engine path resolved from a read-only Win32 handle; a bounded sibling program-directory content manifest is checked after each command",
+        "runtimeDirectoryBinding": runtime_directory_binding_description(sys.platform, os.name),
     })
     try:
         return run_export_with_pinned_engine(

@@ -299,6 +299,17 @@ def fixture_classic_xref_is_valid(
 
 
 class LibreOfficeProbeFixtureTests(unittest.TestCase):
+    def test_runtime_directory_binding_description_matches_platform_handle(self):
+        descriptions = {
+            "linux": probe_libreoffice_export.runtime_directory_binding_description("linux", "posix"),
+            "windows": probe_libreoffice_export.runtime_directory_binding_description("win32", "nt"),
+            "macos": probe_libreoffice_export.runtime_directory_binding_description("darwin", "posix"),
+        }
+
+        self.assertIn("Linux descriptor", descriptions["linux"])
+        self.assertIn("Win32 handle", descriptions["windows"])
+        self.assertIn("macOS engine handle", descriptions["macos"])
+
     @unittest.skipUnless(sys.platform.startswith("linux") and os.uname().machine.lower() in {"x86_64", "amd64"}, "Linux x86_64 seccomp regression")
     def test_launcher_mode_uses_verified_runtime_wrapper_under_no_network_sandbox(self):
         with tempfile.TemporaryDirectory(prefix="paperbatch-lo-launcher-mode-test-") as directory:
@@ -1019,6 +1030,27 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
         self.assertFalse(result["identityVerified"])
         self.assertIn("runtime components changed", result["identityFailure"].lower())
         run_mock.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows runtime-component identity regression")
+    def test_windows_runtime_component_mutation_is_named_and_still_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="paperbatch-windows-runtime-component-test-") as directory:
+            program_directory = Path(directory) / "program"
+            program_directory.mkdir()
+            executable = program_directory / "soffice.com"
+            executable.write_bytes(b"pinned Windows launcher fixture")
+            component = program_directory / "fundamental.ini"
+            component.write_bytes(b"trusted runtime component")
+            expected_sha256 = hashlib.sha256(executable.read_bytes()).hexdigest()
+            pinned = probe_libreoffice_export.open_pinned_engine(executable, expected_sha256)
+            try:
+                component.write_bytes(b"externally changed runtime component")
+                with self.assertRaises(probe_libreoffice_export.PinnedEngineError) as raised:
+                    pinned.verify_runtime_directory()
+            finally:
+                pinned.close()
+
+        self.assertIn("changed relative components: fundamental.ini", str(raised.exception))
+        self.assertNotIn(directory, str(raised.exception))
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux runtime-component timeout regression")
     def test_timeout_reports_runtime_mutation_as_unverified(self):
