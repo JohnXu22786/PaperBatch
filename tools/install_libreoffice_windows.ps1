@@ -6,7 +6,9 @@ $packageName = "LibreOffice_${version}_Win_x86-64.msi"
 $package = Join-Path $env:RUNNER_TEMP $packageName
 $signature = "$package.asc"
 $key = Join-Path $env:RUNNER_TEMP 'tdf-release-key.asc'
-$keyring = Join-Path $env:RUNNER_TEMP 'tdf-release-key.gpg'
+$keyringHome = Join-Path $env:RUNNER_TEMP 'paperbatch-gpg-home'
+$keyringName = 'tdf-release-key.gpg'
+$keyring = Join-Path $keyringHome $keyringName
 $status = Join-Path $env:RUNNER_TEMP 'tdf-signature-status.txt'
 
 $gpg = (Get-Command gpg -ErrorAction SilentlyContinue).Source
@@ -23,9 +25,10 @@ Invoke-WebRequest -Uri "$base/$packageName.asc" -OutFile $signature
 Invoke-WebRequest -Uri 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xF434A1EFAFEEAEA3' -OutFile $key
 $keyListing = & $gpg --batch --show-keys --with-colons $key
 if ($LASTEXITCODE -ne 0 -or -not ($keyListing -match "fpr:::::::::${fingerprint}:")) { throw 'The downloaded Document Foundation signing key fingerprint is invalid.' }
+New-Item -ItemType Directory -Path $keyringHome -Force | Out-Null
 & $gpg --batch --yes --dearmor --output $keyring $key
 if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the pinned Document Foundation signing key.' }
-$verification = @(& $gpgv --status-fd=1 --keyring $keyring $signature $package 2>&1 | ForEach-Object { [string]$_ })
+$verification = @(& $gpgv --homedir $keyringHome --status-fd=1 --keyring $keyringName $signature $package 2>&1 | ForEach-Object { [string]$_ })
 $verificationExitCode = $LASTEXITCODE
 $verificationText = $verification -join [Environment]::NewLine
 $verificationText | Set-Content -Encoding utf8 $status

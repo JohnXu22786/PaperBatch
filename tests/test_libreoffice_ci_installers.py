@@ -53,7 +53,7 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertIn("aa2815afe97e45dc02e446c43e24232f1d78941aee1081c95d871e05d74062e8", workflow)
         self.assertLess(workflow.index("gpgv --status-fd=1"), workflow.index('tar -xzf "$lo_archive_path"'))
         self.assertIn("C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3", windows)
-        self.assertLess(windows.index("$gpgv --status-fd=1"), windows.index("Start-Process -FilePath 'msiexec.exe'"))
+        self.assertLess(windows.index("$gpgv --homedir"), windows.index("Start-Process -FilePath 'msiexec.exe'"))
         self.assertIn("C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3", macos)
         self.assertLess(macos.index("gpgv --status-fd=1"), macos.index("hdiutil attach"))
 
@@ -67,6 +67,18 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertIn("$details.Substring(0, 600)", windows)
         self.assertIn("$observedText.Substring(0, 200)", windows)
         self.assertLess(windows.index("if ($verificationExitCode -ne 0)"), windows.index("Start-Process -FilePath 'msiexec.exe'"))
+
+    def test_windows_gpgv_uses_relative_keyring_in_private_home(self):
+        windows = (ROOT / "tools/install_libreoffice_windows.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("$keyringHome = Join-Path $env:RUNNER_TEMP 'paperbatch-gpg-home'", windows)
+        self.assertIn("$keyringName = 'tdf-release-key.gpg'", windows)
+        self.assertIn("$keyring = Join-Path $keyringHome $keyringName", windows)
+        self.assertIn("New-Item -ItemType Directory -Path $keyringHome -Force", windows)
+        self.assertIn("--homedir $keyringHome --status-fd=1 --keyring $keyringName", windows)
+        self.assertNotIn("--status-fd=1 --keyring $keyring ", windows)
+        self.assertLess(windows.index("gpg --batch --yes --dearmor"), windows.index("$gpgv --homedir"))
+        self.assertLess(windows.index("$gpgv --homedir"), windows.index("if ($verificationExitCode -ne 0)"))
 
     def test_macos_engine_resolver_selects_native_main_binary_and_checks_pinned_version(self):
         with tempfile.TemporaryDirectory() as directory:

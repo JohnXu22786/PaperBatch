@@ -23,6 +23,10 @@ import run_libreoffice_corpus
 
 
 CORPUS_DIR = REPOSITORY_ROOT / "tests" / "fixtures" / "synthetic_documents"
+PINNED_XLSX_PPTX_TEST_IDS = frozenset(
+    {f"docx_variant_{index:03d}" for index in range(6)}
+    | {"xlsx_variant_000", "pptx_variant_000"}
+)
 
 
 class LibreOfficeCorpusTests(unittest.TestCase):
@@ -35,11 +39,14 @@ class LibreOfficeCorpusTests(unittest.TestCase):
     )
     def test_pinned_libreoffice_accepts_generated_xlsx_and_pptx(self):
         manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
+        target_ids = {"xlsx_variant_000", "pptx_variant_000"}
+        test_fixture_ids = PINNED_XLSX_PPTX_TEST_IDS
         records = [
             record for record in manifest["fixtures"]
-            if record["id"] in {"xlsx_variant_000", "pptx_variant_000"}
+            if record["id"] in test_fixture_ids
         ]
-        self.assertEqual({record["format"] for record in records}, {"xlsx", "pptx"})
+        self.assertEqual({record["id"] for record in records}, test_fixture_ids)
+        self.assertEqual({record["format"] for record in records}, {"docx", "xlsx", "pptx"})
 
         with tempfile.TemporaryDirectory() as directory:
             corpus = Path(directory)
@@ -61,21 +68,40 @@ class LibreOfficeCorpusTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            report, exit_code = run_libreoffice_corpus.run_corpus(
-                os.environ["PAPERBATCH_LO_ENGINE_PATH"],
-                os.environ["PAPERBATCH_LO_ENGINE_SHA256"],
-                timeout_seconds=60,
-                budget_seconds=180,
-                corpus_dir=corpus,
-            )
+            with mock.patch.object(run_libreoffice_corpus, "EXPECTED_FIXTURE_IDS", frozenset(test_fixture_ids)):
+                report, exit_code = run_libreoffice_corpus.run_corpus(
+                    os.environ["PAPERBATCH_LO_ENGINE_PATH"],
+                    os.environ["PAPERBATCH_LO_ENGINE_SHA256"],
+                    timeout_seconds=60,
+                    budget_seconds=300,
+                    corpus_dir=corpus,
+                )
 
         self.assertEqual(exit_code, 0, report["results"])
-        self.assertEqual(report["counts"]["selectedForLibreOffice"], 2)
-        self.assertEqual(report["counts"]["successfulLibreOfficeConversions"], 2)
-        self.assertEqual({result["inputId"].split("_", 1)[0] for result in report["results"]}, {"xlsx", "pptx"})
+        self.assertEqual(report["counts"]["selectedForLibreOffice"], len(test_fixture_ids))
+        self.assertEqual(report["counts"]["successfulLibreOfficeConversions"], len(test_fixture_ids))
+        self.assertEqual({result["inputId"].split("_", 1)[0] for result in report["results"]}, {"docx", "xlsx", "pptx"})
+        self.assertEqual({result["inputId"] for result in report["results"]} & target_ids, target_ids)
         self.assertTrue(all(result["status"] == "converted" for result in report["results"]))
         self.assertEqual(report["counts"]["humanReviewedFidelity"], 0)
         self.assertEqual(report["counts"]["compatibilityEvidenceCount"], 0)
+
+    def test_xlsx_pptx_runtime_subset_has_complete_accepted_docx_context(self):
+        manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
+        records = [record for record in manifest["fixtures"] if record["id"] in PINNED_XLSX_PPTX_TEST_IDS]
+        subset_manifest = {
+            "synthetic": True,
+            "evidence_class": "synthetic",
+            "simulation_only": True,
+            "fixtures": records,
+        }
+
+        with mock.patch.object(run_libreoffice_corpus, "EXPECTED_FIXTURE_IDS", PINNED_XLSX_PPTX_TEST_IDS):
+            selected, skipped = run_libreoffice_corpus.select_fixtures(subset_manifest, CORPUS_DIR)
+
+        self.assertEqual({item["id"] for item in selected}, PINNED_XLSX_PPTX_TEST_IDS)
+        self.assertEqual({item["format"] for item in selected}, {"docx", "xlsx", "pptx"})
+        self.assertEqual(skipped, [])
 
     def test_selection_is_manifest_bound_and_skips_inert_or_out_of_scope_records(self):
         manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
@@ -392,7 +418,7 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertTrue(metadata["installer"]["sourceUrl"].startswith("https://downloadarchive.documentfoundation.org/"))
         self.assertNotIn("unboundedSecret", metadata["installer"])
 
-    def test_corpus_runner_uses_hosted_windows_and_macos_without_claiming_linux_seccomp(self):
+    def test_corpus_runner_platform_modes_are_linux_macos_windows_specific(self):
         manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
         sample = next(item for item in manifest["fixtures"] if item["id"] == "docx_variant_000")
         with tempfile.TemporaryDirectory() as directory:
@@ -412,7 +438,9 @@ class LibreOfficeCorpusTests(unittest.TestCase):
                 "integrityMethod": "OpenPGP detached signature",
                 "signingKeyFingerprint": "C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3",
             }), encoding="utf-8")
-            for target, expected_network, expected_launcher in (("win32", False, False), ("darwin", False, True)):
+            for target, expected_network, expected_launcher in (
+                ("linux", True, True), ("win32", False, False), ("darwin", False, True),
+            ):
                 with (
                     self.subTest(platform=target),
                     mock.patch.object(run_libreoffice_corpus, "EXPECTED_FIXTURE_IDS", frozenset({sample["id"]})),
@@ -430,7 +458,7 @@ class LibreOfficeCorpusTests(unittest.TestCase):
                 self.assertEqual(exit_code, 0)
                 self.assertEqual(report["status"], "passed")
                 self.assertEqual(report["counts"]["successfulLibreOfficeConversions"], 1)
-                self.assertNotEqual(report["run"]["networkIsolation"], "Linux x86_64 seccomp")
+                self.assertEqual(report["run"]["networkIsolation"].startswith("Linux x86_64 seccomp"), expected_network)
                 self.assertEqual(invoke.call_args.kwargs["disable_network"], expected_network)
                 self.assertEqual(invoke.call_args.kwargs["use_launcher"], expected_launcher)
 
@@ -484,7 +512,8 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertEqual(len(set(profiles)), 3)
         self.assertEqual(len(set(temporary_directories)), 2)
         self.assertTrue(all(path.name == "intermediate" for path in temporary_directories))
-        self.assertEqual(launcher_modes, [False, sys.platform.startswith("linux"), sys.platform.startswith("linux")])
+        expected_launcher = sys.platform in ("linux", "darwin")
+        self.assertEqual(launcher_modes, [False, expected_launcher, expected_launcher])
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "corpus conversion requires the Linux seccomp sandbox")
     def test_exhausted_batch_budget_does_not_launch_version_probe(self):
