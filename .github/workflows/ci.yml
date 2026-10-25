@@ -517,28 +517,6 @@ jobs:
             printf '::error title=Managed test failure::%s\n' "$diagnostic"
           done < "$failure_log"
 
-      - name: Remove temporary Linux renderer runtimes
-        if: always() && runner.os == 'Linux'
-        run: |
-          rm -rf "$RUNNER_TEMP/paperbatch-libreoffice-26.2.2.2" "$RUNNER_TEMP/paperbatch-pdfium-linux"
-          rm -f "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz" "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz.asc" "$RUNNER_TEMP/tdf-release-key.asc" "$RUNNER_TEMP/tdf-release-key.gpg" "$RUNNER_TEMP/tdf-signature-status.txt" "$RUNNER_TEMP/pdfium-linux-x64.tgz"
-
-      - name: Remove temporary Windows LibreOffice runtime
-        if: always() && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-libreoffice-26.2.2.2')
-          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'LibreOffice_26.2.2.2_Win_x86-64.msi')
-          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'LibreOffice_26.2.2.2_Win_x86-64.msi.asc')
-          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'tdf-release-key.asc'), (Join-Path $env:RUNNER_TEMP 'tdf-release-key.gpg'), (Join-Path $env:RUNNER_TEMP 'tdf-signature-status.txt')
-
-      - name: Remove temporary macOS LibreOffice runtime
-        if: always() && runner.os == 'macOS'
-        shell: bash
-        run: |
-          rm -rf "$RUNNER_TEMP/paperbatch-libreoffice-26.2.2.2" "$RUNNER_TEMP/paperbatch-lo-dmg"
-          rm -f "$RUNNER_TEMP/LibreOffice_26.2.2.2_MacOS_$(uname -m | sed 's/arm64/aarch64/; s/x86_64/x86_64/').dmg" "$RUNNER_TEMP/LibreOffice_26.2.2.2_MacOS_$(uname -m | sed 's/arm64/aarch64/; s/x86_64/x86_64/').dmg.asc" "$RUNNER_TEMP/tdf-release-key.asc" "$RUNNER_TEMP/tdf-release-key.gpg" "$RUNNER_TEMP/tdf-signature-status.txt"
-
       - name: Compile Python sources
         id: compile-python
         run: python -m compileall -q tools tests
@@ -587,6 +565,28 @@ jobs:
           path: ${{ runner.temp }}/paperbatch-pdfium-verification.txt
           if-no-files-found: error
           retention-days: 2
+
+      - name: Remove temporary Linux renderer runtimes
+        if: always() && runner.os == 'Linux'
+        run: |
+          rm -rf "$RUNNER_TEMP/paperbatch-libreoffice-26.2.2.2" "$RUNNER_TEMP/paperbatch-pdfium-linux"
+          rm -f "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz" "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz.asc" "$RUNNER_TEMP/tdf-release-key.asc" "$RUNNER_TEMP/tdf-release-key.gpg" "$RUNNER_TEMP/tdf-signature-status.txt" "$RUNNER_TEMP/pdfium-linux-x64.tgz"
+
+      - name: Remove temporary Windows LibreOffice runtime
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-libreoffice-26.2.2.2')
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'LibreOffice_26.2.2.2_Win_x86-64.msi')
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'LibreOffice_26.2.2.2_Win_x86-64.msi.asc')
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'tdf-release-key.asc'), (Join-Path $env:RUNNER_TEMP 'tdf-release-key.gpg'), (Join-Path $env:RUNNER_TEMP 'tdf-signature-status.txt')
+
+      - name: Remove temporary macOS LibreOffice runtime
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          rm -rf "$RUNNER_TEMP/paperbatch-libreoffice-26.2.2.2" "$RUNNER_TEMP/paperbatch-lo-dmg"
+          rm -f "$RUNNER_TEMP/LibreOffice_26.2.2.2_MacOS_$(uname -m | sed 's/arm64/aarch64/; s/x86_64/x86_64/').dmg" "$RUNNER_TEMP/LibreOffice_26.2.2.2_MacOS_$(uname -m | sed 's/arm64/aarch64/; s/x86_64/x86_64/').dmg.asc" "$RUNNER_TEMP/tdf-release-key.asc" "$RUNNER_TEMP/tdf-release-key.gpg" "$RUNNER_TEMP/tdf-signature-status.txt"
 
       - name: Remove temporary PDFium test runtime
         if: always() && runner.os == 'Windows'

@@ -30,6 +30,33 @@ PINNED_XLSX_PPTX_TEST_IDS = frozenset(
 
 
 class LibreOfficeCorpusTests(unittest.TestCase):
+    def test_console_summary_exposes_only_bounded_pdfium_stage_counts(self):
+        report = {
+            "status": "failed",
+            "counts": {
+                "selectedForLibreOffice": 8,
+                "successfulLibreOfficeConversions": 8,
+                "failedLibreOfficeConversions": 0,
+            },
+            "results": [
+                {"pageInspection": {"status": "pinned-pdfium-digest-check-failed-filenotfounderror"}},
+                {"pageInspection": {"status": "pinned-pdfium-digest-check-failed-filenotfounderror"}},
+                {"pageInspection": {"status": "pinned-pdfium"}},
+                {"pageInspection": {"status": "hostile /tmp/private/path and error text"}},
+            ],
+            "reason": "must not be printed",
+        }
+
+        summary = run_libreoffice_corpus.console_summary(report)
+
+        self.assertIn("status=failed selected=8 converted=8 failed=0", summary)
+        self.assertIn("digest-check=2", summary)
+        self.assertIn("passed=1", summary)
+        self.assertIn("other=1", summary)
+        self.assertNotIn("filenotfounderror", summary)
+        self.assertNotIn("/tmp/private/path", summary)
+        self.assertNotIn("must not be printed", summary)
+
     @unittest.skipUnless(
         sys.platform.startswith("linux")
         and os.environ.get("PAPERBATCH_REQUIRE_LIBREOFFICE_TEST") == "1"

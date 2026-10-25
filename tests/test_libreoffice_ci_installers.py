@@ -44,6 +44,26 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertIn("26.2.2.2", windows)
         self.assertIn("26.2.2.2", macos)
 
+    def test_temporary_renderer_runtimes_outlive_python_suites_and_cleanup_is_unconditional(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        python_suites = [
+            workflow.index("id: python-tests-linux"),
+            workflow.index("id: python-tests-macos"),
+            workflow.index("id: python-tests-windows"),
+        ]
+        suite_end = max(python_suites)
+        cleanup_names = (
+            "Remove temporary Linux renderer runtimes",
+            "Remove temporary Windows LibreOffice runtime",
+            "Remove temporary macOS LibreOffice runtime",
+            "Remove temporary PDFium test runtime",
+        )
+        cleanup_positions = [workflow.index(name) for name in cleanup_names]
+
+        self.assertTrue(all(position > suite_end for position in cleanup_positions))
+        self.assertTrue(all("if: always()" in workflow[position:position + 150] for position in cleanup_positions))
+        self.assertLess(max(cleanup_positions), workflow.index("Publish bounded exact-run managed and runner summary"))
+
     def test_vendor_signatures_are_verified_before_each_installer_runs(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         windows = (ROOT / "tools/install_libreoffice_windows.ps1").read_text(encoding="utf-8")

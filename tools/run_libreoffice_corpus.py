@@ -46,6 +46,10 @@ MAX_LOG_CHARS = 2_000
 MAX_PDF_BYTES = 64 * 1024 * 1024
 SUPPORTED_PLATFORMS = ("linux", "win32", "darwin")
 NETWORK_SANDBOX_PLATFORMS = ("linux",)
+PDFIUM_STAGES = frozenset({
+    "digest-check", "read-pdf", "load-library", "resolve-api", "initialize-library",
+    "load-document", "count-pages", "close-document", "destroy-library",
+})
 SECRET_ASSIGNMENT = re.compile(
     r'''(?i)(password|passwd|token|secret|credentials?|api[_-]?key)(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)'''
 )
@@ -60,6 +64,57 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def console_summary(report: dict[str, Any]) -> str:
+    """Return a compact stage/count summary without paths or report contents."""
+    counts = report.get("counts")
+    if not isinstance(counts, dict):
+        counts = {}
+    def safe_count(name: str) -> int:
+        value = counts.get(name)
+        return value if type(value) is int and value >= 0 else 0
+
+    status = report.get("status")
+    if status not in {"passed", "failed", "blocked"}:
+        status = "unknown"
+    results = report.get("results")
+    if not isinstance(results, list):
+        results = []
+    inspection_counts: dict[str, int] = {}
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        inspection = result.get("pageInspection")
+        if not isinstance(inspection, dict):
+            continue
+        inspection_status = inspection.get("status")
+        label = "other"
+        if inspection_status == "pinned-pdfium":
+            label = "passed"
+        elif inspection_status == "pinned-pdfium-rejected-output":
+            label = "rejected-output"
+        elif isinstance(inspection_status, str) and inspection_status.startswith("pinned-pdfium-") and "-failed-" in inspection_status:
+            stage = inspection_status.removeprefix("pinned-pdfium-").split("-failed-", 1)[0]
+            if stage in PDFIUM_STAGES:
+                label = stage
+        elif inspection_status == "pinned-pdfium-unavailable":
+            label = "unavailable"
+        elif inspection_status == "pinned-pdfium-invalid-digest-pin":
+            label = "invalid-digest-pin"
+        elif inspection_status == "pinned-pdfium-digest-mismatch":
+            label = "digest-mismatch"
+        inspection_counts[label] = inspection_counts.get(label, 0) + 1
+    inspection_summary = ",".join(
+        f"{label}={inspection_counts[label]}" for label in sorted(inspection_counts)
+    ) or "none"
+    return (
+        f"LibreOffice corpus status={status} "
+        f"selected={safe_count('selectedForLibreOffice')} "
+        f"converted={safe_count('successfulLibreOfficeConversions')} "
+        f"failed={safe_count('failedLibreOfficeConversions')} "
+        f"PDFium inspection statuses: {inspection_summary}"
+    )
 
 
 def validate_package(path: Path, file_format: str) -> str | None:
@@ -554,6 +609,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output.write_text(output, encoding="utf-8")
     else:
         sys.stdout.write(output)
+    sys.stderr.write(console_summary(report) + "\n")
     return exit_code
 
 
