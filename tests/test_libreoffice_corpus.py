@@ -138,11 +138,65 @@ class LibreOfficeCorpusTests(unittest.TestCase):
 
         self.assertEqual((page_count, inspection_status), (3, "pinned-pdfium"))
         load_arguments = pdfium.FPDF_LoadMemDocument.call_args.args
-        self.assertEqual(bytes(load_arguments[0])[:len(pdf_bytes)], pdf_bytes)
+        self.assertEqual(run_libreoffice_corpus.ctypes.string_at(load_arguments[0], len(pdf_bytes)), pdf_bytes)
         self.assertEqual(load_arguments[1], len(pdf_bytes))
         self.assertIsNone(load_arguments[2])
         pdfium.FPDF_InitLibrary.assert_called_once_with()
         pdfium.FPDF_CloseDocument.assert_called_once_with(1234)
+        pdfium.FPDF_DestroyLibrary.assert_called_once_with()
+
+    def test_pdfium_api_resolution_failure_reports_only_bounded_stage_and_error_type(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = root / "private-runner-path" / "libpdfium.so"
+            library.parent.mkdir()
+            library.write_bytes(b"pinned PDFium fixture bytes")
+            pdf_path = root / "converted.pdf"
+            pdf_path.write_bytes(b"%PDF-1.7\n%%EOF\n")
+            partial_pdfium = SimpleNamespace()
+            library_sha256 = hashlib.sha256(library.read_bytes()).hexdigest()
+
+            with (
+                mock.patch.dict(os.environ, {
+                    "PAPERBATCH_PDFIUM_TEST_PATH": str(library),
+                    "PAPERBATCH_PDFIUM_TEST_SHA256": library_sha256,
+                }),
+                mock.patch.object(run_libreoffice_corpus.ctypes, "CDLL", return_value=partial_pdfium),
+            ):
+                page_count, inspection_status = run_libreoffice_corpus._pdfium_page_count(pdf_path)
+
+        self.assertIsNone(page_count)
+        self.assertEqual(inspection_status, "pinned-pdfium-resolve-api-failed-attributeerror")
+        self.assertNotIn(str(library), inspection_status)
+
+    def test_pdfium_call_failure_reports_the_operation_stage_and_cleans_up(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = root / "libpdfium.so"
+            library.write_bytes(b"pinned PDFium fixture bytes")
+            pdf_path = root / "converted.pdf"
+            pdf_path.write_bytes(b"%PDF-1.7\n%%EOF\n")
+            pdfium = SimpleNamespace(
+                FPDF_InitLibrary=mock.Mock(),
+                FPDF_DestroyLibrary=mock.Mock(),
+                FPDF_LoadMemDocument=mock.Mock(side_effect=run_libreoffice_corpus.ctypes.ArgumentError("private detail")),
+                FPDF_GetPageCount=mock.Mock(),
+                FPDF_CloseDocument=mock.Mock(),
+            )
+            library_sha256 = hashlib.sha256(library.read_bytes()).hexdigest()
+
+            with (
+                mock.patch.dict(os.environ, {
+                    "PAPERBATCH_PDFIUM_TEST_PATH": str(library),
+                    "PAPERBATCH_PDFIUM_TEST_SHA256": library_sha256,
+                }),
+                mock.patch.object(run_libreoffice_corpus.ctypes, "CDLL", return_value=pdfium),
+            ):
+                page_count, inspection_status = run_libreoffice_corpus._pdfium_page_count(pdf_path)
+
+        self.assertIsNone(page_count)
+        self.assertEqual(inspection_status, "pinned-pdfium-load-document-failed-argumenterror")
+        self.assertNotIn("private detail", inspection_status)
         pdfium.FPDF_DestroyLibrary.assert_called_once_with()
 
     def test_pdfium_rejected_pdf_remains_visible_without_fabricated_page_count(self):

@@ -327,32 +327,49 @@ def _pdfium_page_count(pdf_path: Path) -> tuple[int | None, str]:
     if not library or not expected_sha256:
         return None, "pinned-pdfium-unavailable"
     library_path = Path(library)
+    stage = "digest-check"
     try:
         if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256):
             return None, "pinned-pdfium-invalid-digest-pin"
         if file_sha256(library_path) != expected_sha256.lower():
             return None, "pinned-pdfium-digest-mismatch"
+        stage = "read-pdf"
         pdf_bytes = pdf_path.read_bytes()
+        stage = "load-library"
         pdfium = ctypes.CDLL(str(library_path))
-        pdfium.FPDF_InitLibrary()
+        stage = "resolve-api"
+        initialize = pdfium.FPDF_InitLibrary
+        destroy = pdfium.FPDF_DestroyLibrary
+        load_document = pdfium.FPDF_LoadMemDocument
+        get_page_count = pdfium.FPDF_GetPageCount
+        close_document = pdfium.FPDF_CloseDocument
+        load_document.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+        load_document.restype = ctypes.c_void_p
+        get_page_count.argtypes = [ctypes.c_void_p]
+        get_page_count.restype = ctypes.c_int
+        close_document.argtypes = [ctypes.c_void_p]
+        stage = "initialize-library"
+        initialize()
         try:
-            pdfium.FPDF_LoadMemDocument.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
-            pdfium.FPDF_LoadMemDocument.restype = ctypes.c_void_p
-            pdfium.FPDF_GetPageCount.argtypes = [ctypes.c_void_p]
-            pdfium.FPDF_GetPageCount.restype = ctypes.c_int
-            pdfium.FPDF_CloseDocument.argtypes = [ctypes.c_void_p]
             pdf_buffer = ctypes.create_string_buffer(pdf_bytes)
-            document = pdfium.FPDF_LoadMemDocument(pdf_buffer, len(pdf_bytes), None)
+            stage = "load-document"
+            document = load_document(ctypes.cast(pdf_buffer, ctypes.c_void_p), len(pdf_bytes), None)
             if not document:
                 return None, "pinned-pdfium-rejected-output"
             try:
-                return pdfium.FPDF_GetPageCount(document), "pinned-pdfium"
+                stage = "count-pages"
+                return get_page_count(document), "pinned-pdfium"
             finally:
-                pdfium.FPDF_CloseDocument(document)
+                if sys.exc_info()[0] is None:
+                    stage = "close-document"
+                close_document(document)
         finally:
-            pdfium.FPDF_DestroyLibrary()
-    except (OSError, AttributeError, ctypes.ArgumentError):
-        return None, "pinned-pdfium-inspection-failed"
+            if sys.exc_info()[0] is None:
+                stage = "destroy-library"
+            destroy()
+    except (OSError, AttributeError, ctypes.ArgumentError) as error:
+        error_type = type(error).__name__.lower()
+        return None, f"pinned-pdfium-{stage}-failed-{error_type}"
 
 
 def _run_metadata() -> dict[str, Any]:
