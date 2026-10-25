@@ -25,11 +25,22 @@ $keyListing = & $gpg --batch --show-keys --with-colons $key
 if ($LASTEXITCODE -ne 0 -or -not ($keyListing -match "fpr:::::::::${fingerprint}:")) { throw 'The downloaded Document Foundation signing key fingerprint is invalid.' }
 & $gpg --batch --yes --dearmor --output $keyring $key
 if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the pinned Document Foundation signing key.' }
-$verification = & $gpgv --status-fd=1 --keyring $keyring $signature $package 2>&1
+$verification = @(& $gpgv --status-fd=1 --keyring $keyring $signature $package 2>&1 | ForEach-Object { [string]$_ })
 $verificationExitCode = $LASTEXITCODE
-$verification | Set-Content -Encoding utf8 $status
-if ($verificationExitCode -ne 0 -or -not (Select-String -LiteralPath $status -SimpleMatch "[GNUPG:] VALIDSIG $fingerprint ")) {
-  throw 'LibreOffice MSI signature verification failed.'
+$verificationText = $verification -join [Environment]::NewLine
+$verificationText | Set-Content -Encoding utf8 $status
+$validSignatures = @($verification | Where-Object { $_ -match '^\[GNUPG:\] VALIDSIG ([0-9A-Fa-f]+) ' })
+$pinnedSignature = @($validSignatures | Where-Object { $_ -match "^\[GNUPG:\] VALIDSIG $fingerprint " })
+if ($verificationExitCode -ne 0) {
+  $details = (@($verification | Where-Object { $_ -match '^\[GNUPG:\] (ERRSIG|NO_PUBKEY|BADSIG|FAILURE|VALIDSIG)\b|^gpgv:' } | Select-Object -First 4) -join ' | ')
+  if ($details.Length -gt 600) { $details = $details.Substring(0, 600) }
+  throw "LibreOffice MSI signature verifier exited with code $verificationExitCode; expected signing key $fingerprint. Details: $details"
+}
+if ($pinnedSignature.Count -eq 0) {
+  $observed = @($validSignatures | ForEach-Object { if ($_ -match '^\[GNUPG:\] VALIDSIG ([0-9A-Fa-f]+) ') { $Matches[1] } } | Select-Object -Unique)
+  $observedText = if ($observed.Count -gt 0) { $observed -join ', ' } else { 'no VALIDSIG status record' }
+  if ($observedText.Length -gt 200) { $observedText = $observedText.Substring(0, 200) }
+  throw "LibreOffice MSI signature identity mismatch; expected $fingerprint, observed $observedText (gpgv exit code 0)."
 }
 
 $installRoot = Join-Path $env:RUNNER_TEMP "paperbatch-libreoffice-$version"

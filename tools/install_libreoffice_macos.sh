@@ -46,10 +46,8 @@ source_app="$(find "$mountpoint" -maxdepth 3 -type d -name 'LibreOffice.app' -pr
 ditto "$source_app" "$app"
 hdiutil detach "$mountpoint" -quiet
 mounted=0
-engine="$app/Contents/MacOS/soffice.bin"
-launcher="$app/Contents/MacOS/soffice"
-[[ -f "$engine" && -x "$engine" && -f "$launcher" && -x "$launcher" ]]
 codesign --verify --deep --strict "$app"
+engine="$(python3 tools/resolve_macos_libreoffice_engine.py --app-bundle "$app" --expected-version "$version")"
 engine_hash="$(shasum -a 256 "$engine" | awk '{print $1}')"
 package_hash="$(shasum -a 256 "$package" | awk '{print $1}')"
 provenance="$RUNNER_TEMP/paperbatch-lo-installer-provenance.json"

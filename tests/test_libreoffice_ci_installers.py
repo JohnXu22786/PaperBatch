@@ -6,12 +6,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import build_libreoffice_ci_summary
 import build_application_import_ci_summary
+import resolve_macos_libreoffice_engine
 
 
 class LibreOfficeCiInstallerTests(unittest.TestCase):
@@ -36,6 +38,9 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertNotIn("releases/latest", windows)
         self.assertIn("downloadarchive.documentfoundation.org/libreoffice/old/$version/win/x86_64", windows)
         self.assertIn("downloadarchive.documentfoundation.org/libreoffice/old/${version}/mac/${architecture}", macos)
+        self.assertIn("tools/resolve_macos_libreoffice_engine.py", macos)
+        self.assertNotIn("Contents/MacOS/soffice.bin", macos)
+        self.assertLess(macos.index("codesign --verify --deep --strict"), macos.index("resolve_macos_libreoffice_engine.py"))
         self.assertIn("26.2.2.2", windows)
         self.assertIn("26.2.2.2", macos)
 
@@ -51,6 +56,70 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertLess(windows.index("$gpgv --status-fd=1"), windows.index("Start-Process -FilePath 'msiexec.exe'"))
         self.assertIn("C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3", macos)
         self.assertLess(macos.index("gpgv --status-fd=1"), macos.index("hdiutil attach"))
+
+    def test_windows_signature_verifier_distinguishes_exit_and_identity_failures(self):
+        windows = (ROOT / "tools/install_libreoffice_windows.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("$verificationExitCode = $LASTEXITCODE", windows)
+        self.assertRegex(windows, r"(?s)if \(\$verificationExitCode -ne 0\).*?verifier exited with code", msg=windows)
+        self.assertIn("signature identity mismatch; expected $fingerprint, observed $observedText", windows)
+        self.assertIn("^\\[GNUPG:\\] VALIDSIG $fingerprint ", windows)
+        self.assertIn("$details.Substring(0, 600)", windows)
+        self.assertIn("$observedText.Substring(0, 200)", windows)
+        self.assertLess(windows.index("if ($verificationExitCode -ne 0)"), windows.index("Start-Process -FilePath 'msiexec.exe'"))
+
+    def test_macos_engine_resolver_selects_native_main_binary_and_checks_pinned_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "LibreOffice.app"
+            engine = app / "Contents" / "MacOS" / "soffice"
+            engine.parent.mkdir(parents=True)
+            engine.write_bytes(b"fixture Mach-O engine")
+            engine.chmod(0o755)
+
+            def run(command, **kwargs):
+                if command[0] == "/usr/bin/file":
+                    return SimpleNamespace(returncode=0, stdout="Mach-O 64-bit executable arm64", stderr="")
+                self.assertEqual(command, [str(engine), "--version"])
+                return SimpleNamespace(returncode=0, stdout="LibreOffice 26.2.2.2 Build 2", stderr="")
+
+            resolved = resolve_macos_libreoffice_engine.resolve_engine(app, "26.2.2.2", run=run)
+
+        self.assertEqual(resolved, engine)
+
+    def test_macos_engine_resolver_rejects_wrappers_missing_binaries_and_wrong_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "LibreOffice.app"
+            engine = app / "Contents" / "MacOS" / "soffice"
+            engine.parent.mkdir(parents=True)
+            engine.write_text("#!/bin/sh\nexec ./soffice.bin\n", encoding="utf-8")
+            engine.chmod(0o755)
+
+            wrapper_probe = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout="POSIX shell script", stderr=""))
+            with self.assertRaisesRegex(RuntimeError, "not a native Mach-O"):
+                resolve_macos_libreoffice_engine.resolve_engine(app, "26.2.2.2", run=wrapper_probe)
+            wrapper_probe.assert_called_once()
+
+            engine.unlink()
+            with self.assertRaisesRegex(RuntimeError, "missing executable"):
+                resolve_macos_libreoffice_engine.resolve_engine(app, "26.2.2.2", run=mock.Mock())
+
+            engine.write_bytes(b"fixture Mach-O engine")
+            engine.chmod(0o755)
+            def wrong_version(command, **kwargs):
+                if command[0] == "/usr/bin/file":
+                    return SimpleNamespace(returncode=0, stdout="Mach-O 64-bit executable arm64", stderr="")
+                return SimpleNamespace(returncode=0, stdout="LibreOffice 26.8.1 Build 1", stderr="")
+
+            with self.assertRaisesRegex(RuntimeError, "did not report pinned version 26.2.2.2"):
+                resolve_macos_libreoffice_engine.resolve_engine(app, "26.2.2.2", run=wrong_version)
+
+            def shared_prefix_version(command, **kwargs):
+                if command[0] == "/usr/bin/file":
+                    return SimpleNamespace(returncode=0, stdout="Mach-O 64-bit executable arm64", stderr="")
+                return SimpleNamespace(returncode=0, stdout="LibreOffice 26.2.2.20 Build 1", stderr="")
+
+            with self.assertRaisesRegex(RuntimeError, "did not report pinned version 26.2.2.2"):
+                resolve_macos_libreoffice_engine.resolve_engine(app, "26.2.2.2", run=shared_prefix_version)
 
     def test_summary_fails_closed_for_missing_report_and_keeps_exact_run_context(self):
         context = {
