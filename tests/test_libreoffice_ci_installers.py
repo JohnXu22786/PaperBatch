@@ -120,16 +120,17 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
             engine.parent.mkdir(parents=True)
             engine.write_bytes(b"fixture Mach-O engine")
             engine.chmod(0o755)
+            expected_engine = engine.resolve(strict=True)
 
             def run(command, **kwargs):
                 if command[0] == "/usr/bin/file":
                     return SimpleNamespace(returncode=0, stdout="Mach-O 64-bit executable arm64", stderr="")
-                self.assertEqual(command, [str(engine), "--version"])
+                self.assertEqual(Path(command[0]).resolve(strict=True), expected_engine)
+                self.assertEqual(command[1:], ["--version"])
                 return SimpleNamespace(returncode=0, stdout="LibreOffice 26.2.2.2 Build 2", stderr="")
 
             resolved = resolve_macos_libreoffice_engine.resolve_engine(app, "26.2.2.2", run=run)
-
-        self.assertEqual(resolved, engine)
+            self.assertEqual(resolved.resolve(strict=True), expected_engine)
 
     def test_macos_engine_resolver_rejects_wrappers_missing_binaries_and_wrong_versions(self):
         with tempfile.TemporaryDirectory() as directory:
