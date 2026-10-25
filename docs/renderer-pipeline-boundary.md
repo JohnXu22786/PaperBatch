@@ -6,7 +6,11 @@ isolated LibreOffice command-line adapter. Production composition registers the
 PDF and built-in image adapters for background rendering. LibreOffice remains
 unregistered and unavailable to production until the tested engine is included
 in the application's trusted offline runtime. CI pins LibreOffice 26.2.2.2 for
-an Ubuntu x86_64 adapter integration check. PDF pass-through validates the cached
+an Ubuntu x86_64 adapter integration check and a separate three-OS synthetic
+engine corpus. Neither LibreOffice lane exercises PaperBatch's production file
+import. The production queue-import test records PDF/PNG acceptance and artifact
+creation, OOXML's unsupported renderer result, and malformed OOXML rejection.
+PDF pass-through validates the cached
 snapshot with source preflight checks, verifies the snapshot digest and length,
 stores the bytes under a content-derived ID, and verifies that ID again when
 opening the artifact. Pass-through does not claim that the document was

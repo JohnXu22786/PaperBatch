@@ -264,7 +264,7 @@ class PinnedEngine:
             raise PinnedEngineError(
                 "LibreOffice runtime components changed while the process was running; version/export evidence is blocked."
             )
-        if verify_engine_image and sys.platform.startswith("linux"):
+        if verify_engine_image and sys.platform in ("linux", "darwin"):
             engine_path = Path(self.runtime_directory_path) / Path(self.engine_path).name
             with open_readonly_regular_file(engine_path) as engine_stream:
                 if sha256_stream(engine_stream).casefold() != self.sha256.casefold():
@@ -348,6 +348,10 @@ def runtime_directory_sha256(
                 & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
             )
             if stat.S_ISLNK(metadata.st_mode) or is_reparse_point:
+                if sys.platform == "darwin" and stat.S_ISLNK(metadata.st_mode):
+                    link_target = os.readlink(child.path)
+                    digest.update(b"L\0" + relative.replace(os.sep, "/").encode("utf-8") + b"\0" + link_target.encode("utf-8", "strict") + b"\0")
+                    continue
                 raise PinnedEngineError("The LibreOffice runtime directory contains a symbolic link or reparse point that cannot be safely fingerprinted.")
             encoded_path = relative.replace(os.sep, "/").encode("utf-8", "strict")
             if stat.S_ISDIR(metadata.st_mode):
@@ -640,8 +644,20 @@ def open_pinned_engine(executable: Path, expected_sha256: str):
                 "cwd": str(runtime_directory_path),
                 "env": child_environment,
             }
+        elif sys.platform == "darwin":
+            source_stream = open_readonly_regular_file(executable)
+            opened_stat = os.fstat(source_stream.fileno())
+            if opened_stat.st_nlink != 1:
+                raise PinnedEngineError("The selected engine must have one installed directory entry before resolving sibling runtime files.")
+            engine_file_identity = (opened_stat.st_dev, opened_stat.st_ino)
+            opened_engine_path = str(executable.resolve(strict=True))
+            runtime_directory_path = Path(opened_engine_path).parent
+            stream = source_stream
+            source_stream = None
+            launch_target = opened_engine_path
+            launch_kwargs = {"cwd": str(runtime_directory_path), "env": os.environ.copy()}
         else:
-            raise PinnedEngineError("Pinned engine launch is supported only on Linux and Windows.")
+            raise PinnedEngineError("Pinned engine launch is supported only on Linux, Windows, and macOS.")
 
         pinned_stat = os.fstat(stream.fileno())
         if not stat.S_ISREG(pinned_stat.st_mode):
@@ -664,6 +680,8 @@ def open_pinned_engine(executable: Path, expected_sha256: str):
             "sealed Linux memfd engine snapshot; sibling runtime directory held by descriptor and fingerprinted after each command"
             if sys.platform.startswith("linux")
             else "final engine path resolved from read-only Win32 handle; sibling runtime directory fingerprinted after each command"
+            if os.name == "nt"
+            else "read-only macOS engine handle; sibling runtime directory fingerprinted after each command"
         )
         result = PinnedEngine(
             stream,
@@ -773,6 +791,8 @@ def run_bounded_process(
     })
     if os.name == "posix":
         popen_kwargs["start_new_session"] = True
+    elif os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process = subprocess.Popen(command, **popen_kwargs)
     streams["stdout"] = process.stdout
     streams["stderr"] = process.stderr
@@ -808,7 +828,13 @@ def run_bounded_process(
             except ProcessLookupError:
                 pass
         else:
-            process.kill()
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                process.kill()
         process.wait()
     for reader in readers:
         reader.join()
@@ -863,11 +889,17 @@ def invoke(
         pinned_engine.verify_runtime_directory(verify_engine_image=use_launcher)
         launch_kwargs = dict(pinned_engine.launch_kwargs)
         if use_launcher:
-            if not sys.platform.startswith("linux") or pinned_engine.runtime_directory_path is None:
-                raise PinnedEngineError("The LibreOffice launcher is supported only in a verified Linux runtime directory.")
-            if temporary_directory is None:
-                raise PinnedEngineError("The LibreOffice launcher requires an isolated temporary directory.")
-            launcher_path = pinned_engine.create_launcher_overlay(temporary_directory / "lo-program")
+            if pinned_engine.runtime_directory_path is None:
+                raise PinnedEngineError("The LibreOffice launcher requires a verified runtime directory.")
+            if sys.platform.startswith("linux"):
+                if temporary_directory is None:
+                    raise PinnedEngineError("The Linux LibreOffice launcher requires an isolated temporary directory.")
+                launcher_path = pinned_engine.create_launcher_overlay(temporary_directory / "lo-program")
+            elif sys.platform == "darwin":
+                pinned_engine.verify_runtime_directory(verify_engine_image=True)
+                launcher_path = Path(pinned_engine.runtime_directory_path) / "soffice"
+            else:
+                raise PinnedEngineError("The LibreOffice launcher is supported only on Linux and macOS.")
             launcher_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
             launcher_fd = os.open(launcher_path, launcher_flags)
             try:
@@ -886,8 +918,8 @@ def invoke(
                 child_environment[variable] = str(temporary_directory.resolve())
             launch_kwargs["env"] = child_environment
         if disable_network and not sys.platform.startswith("linux"):
-            raise PinnedEngineError("The corpus conversion requires the Linux no-network sandbox.")
-        if (max_output_file_bytes is not None and sys.platform.startswith("linux")) or disable_network:
+            raise PinnedEngineError("The no-network sandbox is supported only on Linux.")
+        if (max_output_file_bytes is not None and os.name == "posix") or disable_network:
             def prepare_child() -> None:
                 if max_output_file_bytes is not None:
                     import resource

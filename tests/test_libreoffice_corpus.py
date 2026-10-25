@@ -224,6 +224,26 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "digest"):
             run_libreoffice_corpus.select_fixtures(manifest, CORPUS_DIR)
 
+    def test_manifest_byte_and_fixture_count_limits_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_bytes(b" " * (run_libreoffice_corpus.MAX_MANIFEST_BYTES + 1))
+            with self.assertRaisesRegex(ValueError, "byte limit"):
+                run_libreoffice_corpus.read_manifest(path)
+
+        manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
+        fixture = next(item for item in manifest["fixtures"] if item["id"] == "docx_variant_000")
+        manifest["fixtures"] = [fixture] * (run_libreoffice_corpus.MAX_MANIFEST_FIXTURES + 1)
+        with self.assertRaisesRegex(ValueError, "fixture count"):
+            run_libreoffice_corpus.select_fixtures(manifest, CORPUS_DIR)
+
+    def test_selection_fails_closed_when_any_required_accepted_variant_is_missing(self):
+        manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
+        manifest["fixtures"] = [item for item in manifest["fixtures"] if item["id"] != "pptx_variant_029"]
+
+        with self.assertRaisesRegex(ValueError, "missing required accepted synthetic fixtures.*pptx_variant_029"):
+            run_libreoffice_corpus.select_fixtures(manifest, CORPUS_DIR)
+
     def test_skipped_manifest_paths_are_redacted(self):
         corpus_manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
         source_fixture = next(item for item in corpus_manifest["fixtures"] if item["id"] == "docx_variant_000")
@@ -237,7 +257,7 @@ class LibreOfficeCorpusTests(unittest.TestCase):
                     "simulation_only": True,
                     "fixtures": [fixture],
                 }
-                selected, skipped = run_libreoffice_corpus.select_fixtures(manifest, CORPUS_DIR)
+                selected, skipped = run_libreoffice_corpus.select_fixtures(manifest, CORPUS_DIR, require_complete=False)
 
                 self.assertEqual(selected, [])
                 self.assertEqual(len(skipped), 1)
@@ -272,6 +292,7 @@ class LibreOfficeCorpusTests(unittest.TestCase):
 
             with (
                 mock.patch.object(run_libreoffice_corpus.sys, "platform", "linux"),
+                mock.patch.object(run_libreoffice_corpus, "EXPECTED_FIXTURE_IDS", frozenset()),
                 mock.patch.object(run_libreoffice_corpus.probe, "open_pinned_engine") as open_engine,
                 mock.patch.object(run_libreoffice_corpus.probe, "invoke") as invoke,
                 redirect_stdout(output),
@@ -308,7 +329,111 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertEqual(report["counts"]["compatibilityEvidenceCount"], 0)
         self.assertEqual(report["evidenceGates"], {"G1": "open", "G3": "open", "G4": "open", "U8NativeDeviceCleanPc": "open"})
 
-    @unittest.skipUnless(sys.platform.startswith("linux"), "corpus conversion requires the Linux seccomp sandbox")
+    def test_report_records_bounded_runner_and_signed_installer_provenance(self):
+        report = run_libreoffice_corpus.classify_report(
+            selected=[], skipped=[], results=[],
+            engine={"version": "LibreOffice 26.2.2.2", "binarySha256": "a" * 64},
+            run_metadata={
+                "os": "macOS", "runner": "GitHub Actions 42", "runnerImage": "macos-15",
+                "runnerImageVersion": "20261020.1",
+                "installer": {
+                    "version": "26.2.2.2", "source": "Document Foundation archive",
+                    "sourceUrl": "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.2.2/mac/x86_64/LibreOffice.dmg",
+                    "package": "LibreOffice.dmg", "packageSha256": "b" * 64,
+                    "integrityMethod": "OpenPGP detached signature",
+                    "signingKeyFingerprint": "C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3",
+                },
+            },
+        )
+
+        self.assertEqual(report["run"]["os"], "macOS")
+        self.assertEqual(report["run"]["runnerImage"], "macos-15")
+        self.assertEqual(report["run"]["installer"]["packageSha256"], "b" * 64)
+        self.assertEqual(report["run"]["installer"]["signingKeyFingerprint"], "C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3")
+        self.assertEqual(report["counts"]["compatibilityEvidenceCount"], 0)
+        self.assertIn("does not establish Office/WPS compatibility", report["classification"])
+
+    def test_report_blocks_a_successful_conversion_when_installer_provenance_is_unverified(self):
+        report = run_libreoffice_corpus.classify_report(
+            selected=[{"id": "docx_variant_000"}], skipped=[],
+            results=[{"id": "docx_variant_000", "status": "converted"}],
+            engine={"version": "LibreOffice 26.2.2.2", "binarySha256": "a" * 64},
+            run_metadata={"installer": {"status": "invalid"}},
+        )
+
+        self.assertEqual(report["status"], "blocked")
+        self.assertEqual(report["counts"]["successfulLibreOfficeConversions"], 1)
+
+    def test_installer_provenance_rejects_oversized_and_malformed_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "installer.json"
+            with mock.patch.dict(os.environ, {"PAPERBATCH_LO_INSTALLER_PROVENANCE": str(path)}):
+                path.write_text("{}", encoding="utf-8")
+                self.assertEqual(run_libreoffice_corpus._run_metadata()["installer"], {"status": "invalid"})
+                path.write_bytes(b" " * 4097)
+                self.assertEqual(run_libreoffice_corpus._run_metadata()["installer"], {"status": "invalid"})
+
+    def test_installer_provenance_accepts_only_bounded_hash_and_signer_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "installer.json"
+            path.write_text(json.dumps({
+                "version": "26.2.2.2", "source": "Document Foundation official archive",
+                "sourceUrl": "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.2.2/win/x86_64/LibreOffice.msi",
+                "package": "signed-installer", "packageSha256": "b" * 64,
+                "integrityMethod": "OpenPGP detached signature",
+                "signingKeyFingerprint": "C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3",
+                "unboundedSecret": "must-not-be-copied",
+            }), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"PAPERBATCH_LO_INSTALLER_PROVENANCE": str(path)}, clear=True):
+                metadata = run_libreoffice_corpus._run_metadata()
+
+        self.assertEqual(metadata["installer"]["status"], "verified")
+        self.assertEqual(metadata["installer"]["packageSha256"], "b" * 64)
+        self.assertTrue(metadata["installer"]["sourceUrl"].startswith("https://downloadarchive.documentfoundation.org/"))
+        self.assertNotIn("unboundedSecret", metadata["installer"])
+
+    def test_corpus_runner_uses_hosted_windows_and_macos_without_claiming_linux_seccomp(self):
+        manifest = json.loads((CORPUS_DIR / "manifest.json").read_text(encoding="utf-8"))
+        sample = next(item for item in manifest["fixtures"] if item["id"] == "docx_variant_000")
+        with tempfile.TemporaryDirectory() as directory:
+            corpus = Path(directory) / "corpus"
+            corpus.mkdir()
+            shutil.copyfile(CORPUS_DIR / sample["path"], corpus / "sample.docx")
+            sample = {**sample, "path": "sample.docx"}
+            (corpus / "manifest.json").write_text(json.dumps({**manifest, "fixtures": [sample]}), encoding="utf-8")
+            engine = Path(directory) / "soffice.bin"
+            engine.write_bytes(b"trusted test placeholder")
+            pinned = SimpleNamespace(sha256="a" * 64, runtime_directory_sha256="b" * 64, close=lambda: None)
+            provenance = Path(directory) / "installer.json"
+            provenance.write_text(json.dumps({
+                "version": "26.2.2.2", "source": "Document Foundation official archive",
+                "sourceUrl": "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.2.2/test.pkg",
+                "package": "pinned.pkg", "packageSha256": "b" * 64,
+                "integrityMethod": "OpenPGP detached signature",
+                "signingKeyFingerprint": "C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3",
+            }), encoding="utf-8")
+            for target, expected_network, expected_launcher in (("win32", False, False), ("darwin", False, True)):
+                with (
+                    self.subTest(platform=target),
+                    mock.patch.object(run_libreoffice_corpus, "EXPECTED_FIXTURE_IDS", frozenset({sample["id"]})),
+                    mock.patch.dict(os.environ, {"PAPERBATCH_LO_INSTALLER_PROVENANCE": str(provenance)}),
+                    mock.patch.object(run_libreoffice_corpus.sys, "platform", target),
+                    mock.patch.object(run_libreoffice_corpus.probe, "open_pinned_engine", return_value=pinned),
+                    mock.patch.object(run_libreoffice_corpus.probe, "invoke", side_effect=[
+                        {"stdout": "LibreOffice 26.2.2.2", "stderr": "", "exitCode": 0, "timedOut": False, "identityVerified": True},
+                        {"stdout": "", "stderr": "", "exitCode": 0, "timedOut": False, "identityVerified": True},
+                    ]) as invoke,
+                    mock.patch.object(run_libreoffice_corpus.probe, "inspect_pdf", return_value=(100, True, True, False, "c" * 64)),
+                ):
+                    report, exit_code = run_libreoffice_corpus.run_corpus(str(engine), "a" * 64, 60, 180, corpus)
+
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(report["status"], "passed")
+                self.assertEqual(report["counts"]["successfulLibreOfficeConversions"], 1)
+                self.assertNotEqual(report["run"]["networkIsolation"], "Linux x86_64 seccomp")
+                self.assertEqual(invoke.call_args.kwargs["disable_network"], expected_network)
+                self.assertEqual(invoke.call_args.kwargs["use_launcher"], expected_launcher)
+
     def test_batch_continues_after_one_file_failure_with_separate_profiles(self):
         with tempfile.TemporaryDirectory() as directory:
             corpus = Path(directory) / "corpus"
@@ -346,6 +471,7 @@ class LibreOfficeCorpusTests(unittest.TestCase):
                 return {"stdout": "", "stderr": "failure" if exit_code else "", "exitCode": exit_code, "timedOut": False, "identityVerified": True}
 
             with (
+                mock.patch.object(run_libreoffice_corpus, "EXPECTED_FIXTURE_IDS", frozenset({"docx_variant_000", "docx_variant_001"})),
                 mock.patch.object(run_libreoffice_corpus.probe, "open_pinned_engine", return_value=pinned),
                 mock.patch.object(run_libreoffice_corpus.probe, "invoke", side_effect=invoke),
                 mock.patch.object(run_libreoffice_corpus.probe, "inspect_pdf", return_value=(100, True, True, False, "c" * 64)),
@@ -358,7 +484,7 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertEqual(len(set(profiles)), 3)
         self.assertEqual(len(set(temporary_directories)), 2)
         self.assertTrue(all(path.name == "intermediate" for path in temporary_directories))
-        self.assertEqual(launcher_modes, [False, True, True])
+        self.assertEqual(launcher_modes, [False, sys.platform.startswith("linux"), sys.platform.startswith("linux")])
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "corpus conversion requires the Linux seccomp sandbox")
     def test_exhausted_batch_budget_does_not_launch_version_probe(self):
@@ -381,6 +507,7 @@ class LibreOfficeCorpusTests(unittest.TestCase):
             pinned = SimpleNamespace(sha256="a" * 64, runtime_directory_sha256="b" * 64, close=lambda: None)
 
             with (
+                mock.patch.object(run_libreoffice_corpus, "EXPECTED_FIXTURE_IDS", frozenset({"docx_variant_000"})),
                 mock.patch.object(run_libreoffice_corpus.probe, "open_pinned_engine", return_value=pinned),
                 mock.patch.object(run_libreoffice_corpus.probe, "invoke") as invoke,
             ):
@@ -390,10 +517,13 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertEqual(report["results"][0]["status"], "failed")
 
-    def test_runner_fails_closed_with_explicit_unsupported_platform_error(self):
+    def test_runner_accepts_supported_host_platforms_and_keeps_linux_sandbox_specific(self):
         with mock.patch.object(run_libreoffice_corpus.sys, "platform", "win32"):
-            with self.assertRaisesRegex(ValueError, "requires Linux for its no-network process sandbox"):
-                run_libreoffice_corpus.run_corpus("unused", "a" * 64, 60, 900, Path("."))
+            self.assertIn("win32", run_libreoffice_corpus.SUPPORTED_PLATFORMS)
+        with mock.patch.object(run_libreoffice_corpus.sys, "platform", "darwin"):
+            self.assertIn("darwin", run_libreoffice_corpus.SUPPORTED_PLATFORMS)
+        self.assertNotIn("win32", run_libreoffice_corpus.NETWORK_SANDBOX_PLATFORMS)
+        self.assertIn("linux", run_libreoffice_corpus.NETWORK_SANDBOX_PLATFORMS)
 
     def test_manifest_provenance_is_recorded_without_pdf_byte_stability_claim(self):
         with tempfile.TemporaryDirectory() as directory:

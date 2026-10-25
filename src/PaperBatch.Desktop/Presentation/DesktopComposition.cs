@@ -52,10 +52,7 @@ internal static class DesktopComposition
         });
         var intake = new SourceIntakeService(cache);
         var artifactStore = new RenderArtifactStore(Path.Combine(root, "RenderArtifacts"));
-        var renderer = new RendererCoordinator([
-            new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifactStore)),
-            new BuiltInImageRendererAdapter(cache, artifactStore)
-        ]);
+        var renderer = CreateProductionRenderer(cache, artifactStore);
         var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
         store.Initialize();
         var printerBackend = OperatingSystem.IsWindows() ? new WindowsGdiNativeAdapter() : null;
@@ -95,6 +92,11 @@ internal static class DesktopComposition
                         ? "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Read-only local printer capability inspection is Windows-only; Office conversion and desktop print submission are unavailable."
                         : "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Explicit Windows queue selection and a deliberate Print click submit the persisted PDF through the shared per-user coordinator; displayed states are OS spooler reports, not confirmation of paper output.", false));
     }
+
+    internal static RendererCoordinator CreateProductionRenderer(SourceSnapshotCache cache, RenderArtifactStore artifacts) => new RendererCoordinator([
+        new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts)),
+        new BuiltInImageRendererAdapter(cache, artifacts)
+    ]);
 }
 
 internal sealed class ProductionPresentationSources :

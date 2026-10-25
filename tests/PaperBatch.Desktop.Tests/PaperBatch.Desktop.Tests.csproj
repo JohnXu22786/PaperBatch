@@ -12,4 +12,11 @@
   <ItemGroup>
     <ProjectReference Include="../../src/PaperBatch.Desktop/PaperBatch.Desktop.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="../fixtures/synthetic_documents/synthetic_two_page.pdf" Link="Fixtures/synthetic_two_page.pdf" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../fixtures/synthetic_documents/synthetic_sections_table.docx" Link="Fixtures/synthetic_sections_table.docx" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../fixtures/synthetic_documents/synthetic_mixed_page_sizes.xlsx" Link="Fixtures/synthetic_mixed_page_sizes.xlsx" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../fixtures/synthetic_documents/synthetic_two_slides.pptx" Link="Fixtures/synthetic_two_slides.pptx" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../fixtures/synthetic_documents/synthetic_truncated_package.docx" Link="Fixtures/synthetic_truncated_package.docx" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

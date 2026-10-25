@@ -24,6 +24,7 @@ var tests = new (string Name, Action Run)[]
     ("queue ordering and removal are actionable and clear prepared previews", QueueEditsPreserveSelectionAndInvalidateRemovedPreview),
     ("language selection localizes desktop section labels", LanguageSelectionLocalizesSectionLabels),
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
+    ("real production queue import reports per-format intake and renderer outcomes", ApplicationImportEvidenceTests.ProductionQueueImportReportsFormatOutcomes),
     ("intentional duplicate sources have independent queue row identities", IntentionalDuplicateQueueRowsRemainIndependent),
     ("cancelled renderer batch releases every captured snapshot", CancelledRendererBatchReleasesEverySnapshot),
     ("macOS safely captures a regular source file", MacSourceCaptureUsesSafeNativeIdentity),
