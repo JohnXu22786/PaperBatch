@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -80,7 +81,7 @@ def render(report_path: Path) -> tuple[str, int]:
         and isinstance(installer, dict) and installer.get("status") == "verified"
         and installer.get("version") == "26.2.2.2"
         and installer.get("signingKeyFingerprint") == "C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3"
-        and isinstance(engine, dict) and str(engine.get("version", "")).startswith("LibreOffice 26.2.2.2")
+        and isinstance(engine, dict) and re.match(r"^LibreOffice\s+26\.2\.2\.2(?:\s|$)", str(engine.get("version", "")))
         and report.get("commit") == os.environ.get("PB_SOURCE_COMMIT")
         and run_identity.get("workflow") == os.environ.get("GITHUB_WORKFLOW")
         and run_identity.get("runId") == os.environ.get("GITHUB_RUN_ID")

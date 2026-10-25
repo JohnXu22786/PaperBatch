@@ -229,7 +229,7 @@ jobs:
           lo_engine='/opt/libreoffice26.2/program/soffice.bin'
           test -x "$lo_engine"
           lo_version_output="$(LD_LIBRARY_PATH=/opt/libreoffice26.2/program URE_BOOTSTRAP=file:///opt/libreoffice26.2/program/fundamentalrc "$lo_engine" --version)"
-          [[ "$lo_version_output" == 'LibreOffice 26.2.2.2'* ]]
+          [[ "$lo_version_output" =~ ^LibreOffice[[:space:]]+26\.2\.2\.2([[:space:]]|$) ]]
           [[ "$(sha256sum "$lo_engine" | cut -d ' ' -f 1)" == 'bcfd617b90f741cd9aa778e70d6aa317ec6c8971e238f602f3f69ea0ad210c0a' ]]
           pdfium_archive="$RUNNER_TEMP/pdfium-linux-x64.tgz"
           pdfium_root="$RUNNER_TEMP/paperbatch-pdfium-linux"

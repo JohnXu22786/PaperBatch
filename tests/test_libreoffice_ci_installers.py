@@ -44,6 +44,14 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertIn("26.2.2.2", windows)
         self.assertIn("26.2.2.2", macos)
 
+    def test_windows_and_linux_installer_version_checks_require_a_token_boundary(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        windows = (ROOT / "tools/install_libreoffice_windows.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("$versionPattern = '^LibreOffice\\s+' + [regex]::Escape($version) + '(?=\\s|$)'", windows)
+        self.assertIn('$versionOutput -notmatch $versionPattern', windows)
+        self.assertIn(r'[[ "$lo_version_output" =~ ^LibreOffice[[:space:]]+26\.2\.2\.2([[:space:]]|$) ]]', workflow)
+
     def test_temporary_renderer_runtimes_outlive_python_suites_and_cleanup_is_unconditional(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         python_suites = [
@@ -188,7 +196,7 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         report = {
             "status": "passed", "commit": "a" * 40,
             "runIdentity": {"workflow": "CI", "runId": "123", "runAttempt": "2"},
-            "engine": {"version": "LibreOffice 26.2.2.2", "binarySha256": "a" * 64},
+            "engine": {"version": "LibreOffice 26.2.2.2 Build 2", "binarySha256": "a" * 64},
             "run": {"os": "Windows", "runner": "Hosted Agent", "runnerImage": "win22", "runnerImageVersion": "20261020.1", "installer": {
                 "version": "26.2.2.2",
                 "status": "verified", "package": "pinned.msi", "packageSha256": "b" * 64,
@@ -205,15 +213,21 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
             path = Path(directory) / "report.json"
             path.write_text(json.dumps(report), encoding="utf-8")
             rendered, status = build_libreoffice_ci_summary.render(path)
+            report["engine"]["version"] = "LibreOffice 26.2.2.20 Build 2"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            wrong_version, wrong_version_status = build_libreoffice_ci_summary.render(path)
+            report["engine"]["version"] = "LibreOffice 26.2.2.2 Build 2"
             report["runIdentity"]["runId"] = "999"
             path.write_text(json.dumps(report), encoding="utf-8")
             rejected, rejected_status = build_libreoffice_ci_summary.render(path)
 
         self.assertEqual(status, 0)
-        self.assertIn("LibreOffice 26.2.2.2", rendered)
+        self.assertIn("LibreOffice 26.2.2.2 Build 2", rendered)
         self.assertIn("pinned.msi", rendered)
         self.assertIn("downloadarchive.documentfoundation.org", rendered)
         self.assertIn("docx_variant_000", rendered)
+        self.assertEqual(wrong_version_status, 1)
+        self.assertIn("not a pass", wrong_version)
         self.assertEqual(rejected_status, 1)
         self.assertIn("not a pass", rejected)
 

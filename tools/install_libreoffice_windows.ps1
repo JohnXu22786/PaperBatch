@@ -59,7 +59,8 @@ if ($installOutput.ExitCode -notin @(0, 3010)) { throw "Verified LibreOffice MSI
 $engine = Join-Path $installRoot 'program\soffice.com'
 if (-not (Test-Path -LiteralPath $engine -PathType Leaf)) { throw 'The verified LibreOffice installation did not contain program\soffice.com.' }
 $versionOutput = (& $engine --version | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or -not $versionOutput.StartsWith("LibreOffice $version")) { throw 'Installed LibreOffice version did not match the pinned version.' }
+$versionPattern = '^LibreOffice\s+' + [regex]::Escape($version) + '(?=\s|$)'
+if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch $versionPattern) { throw 'Installed LibreOffice version did not match the pinned version.' }
 $engineHash = (Get-FileHash -LiteralPath $engine -Algorithm SHA256).Hash.ToLowerInvariant()
 $packageHash = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
 $provenancePath = Join-Path $env:RUNNER_TEMP 'paperbatch-lo-installer-provenance.json'
