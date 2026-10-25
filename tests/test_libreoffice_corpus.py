@@ -31,31 +31,91 @@ PINNED_XLSX_PPTX_TEST_IDS = frozenset(
 
 class LibreOfficeCorpusTests(unittest.TestCase):
     def test_console_summary_exposes_only_bounded_pdfium_stage_counts(self):
+        def failed_row(**overrides):
+            row = {
+                "status": "failed", "timedOut": False, "launchAttempted": True,
+                "identityVerified": True, "exitCode": 0, "outputPdfBytes": 100,
+                "outputPdfSha256": "a" * 64,
+                "pageInspection": {"status": "pinned-pdfium", "structureValid": True, "pageCount": 1},
+                "failureCategory": "other",
+                "inputPath": "/tmp/private document.docx", "reason": "private failure detail",
+                "stdout": "private stdout", "stderr": "private stderr",
+            }
+            row.update(overrides)
+            return row
+
         report = {
             "status": "failed",
             "counts": {
                 "selectedForLibreOffice": 8,
-                "successfulLibreOfficeConversions": 8,
-                "failedLibreOfficeConversions": 0,
+                "successfulLibreOfficeConversions": 1,
+                "failedLibreOfficeConversions": 7,
             },
             "results": [
-                {"pageInspection": {"status": "pinned-pdfium-digest-check-failed-filenotfounderror"}},
-                {"pageInspection": {"status": "pinned-pdfium-digest-check-failed-filenotfounderror"}},
-                {"pageInspection": {"status": "pinned-pdfium"}},
-                {"pageInspection": {"status": "hostile /tmp/private/path and error text"}},
+                failed_row(timedOut=True, failureCategory="timeout"),
+                failed_row(launchAttempted=False, failureCategory="launch-failure"),
+                failed_row(identityVerified=False, failureCategory="identity-mismatch"),
+                failed_row(exitCode=7, failureCategory="nonzero-exit"),
+                failed_row(outputPdfBytes=None, outputPdfSha256=None, failureCategory="missing-output"),
+                failed_row(pageInspection={"status": "structural-parser", "structureValid": False}, failureCategory="invalid-output"),
+                failed_row(
+                    pageInspection={"status": "pinned-pdfium-digest-check-failed-filenotfounderror", "structureValid": True},
+                    failureCategory="other",
+                ),
+                {"status": "converted", "pageInspection": {"status": "pinned-pdfium"}},
             ],
-            "reason": "must not be printed",
+            "reason": "private report reason",
         }
 
         summary = run_libreoffice_corpus.console_summary(report)
 
-        self.assertIn("status=failed selected=8 converted=8 failed=0", summary)
-        self.assertIn("digest-check=2", summary)
-        self.assertIn("passed=1", summary)
-        self.assertIn("other=1", summary)
+        self.assertIn("status=failed selected=8 converted=1 failed=7", summary)
+        self.assertIn("conversion failure categories: nonzero-exit=1,timeout=1,launch-failure=1,identity-mismatch=1,missing-output=1,invalid-output=1,other=1", summary)
+        self.assertIn("digest-check=1", summary)
+        self.assertIn("passed=6", summary)
         self.assertNotIn("filenotfounderror", summary)
-        self.assertNotIn("/tmp/private/path", summary)
-        self.assertNotIn("must not be printed", summary)
+        self.assertNotIn("/tmp/private document.docx", summary)
+        self.assertNotIn("private failure detail", summary)
+        self.assertNotIn("private stdout", summary)
+        self.assertNotIn("private stderr", summary)
+        self.assertNotIn("private report reason", summary)
+
+    def test_failure_categories_distinguish_launch_failure_from_unlaunched_rows(self):
+        fixture = {
+            "id": "docx_variant_000", "path": "sample.docx", "sha256": "a" * 64, "size_bytes": 10,
+        }
+
+        def result(command, *, input_sha256="a" * 64, reason=None):
+            return run_libreoffice_corpus.result_record(
+                fixture, status="failed", input_sha256=input_sha256, output_bytes=None,
+                output_sha256=None, page_count=None, command=command, reason=reason,
+            )
+
+        changed_input = result(None, input_sha256="b" * 64, reason="input digest changed after manifest selection")
+        exhausted = result(None, reason="total corpus runtime budget exhausted")
+        prelaunch_budget = result({
+            "exitCode": None, "timedOut": False, "launchAttempted": False,
+            "budgetExpiredBeforeLaunch": True, "identityVerified": True,
+        })
+        launch_failure = result({
+            "exitCode": None, "timedOut": False, "launchAttempted": False,
+            "identityVerified": True,
+        })
+        process_creation_error = result({
+            "exitCode": None, "timedOut": False, "launchAttempted": True,
+            "identityVerified": False,
+        })
+        postprocess_identity_error = result({
+            "exitCode": 0, "timedOut": False, "launchAttempted": True,
+            "identityVerified": False,
+        })
+
+        self.assertEqual(changed_input["failureCategory"], "identity-mismatch")
+        self.assertEqual(exhausted["failureCategory"], "other")
+        self.assertEqual(prelaunch_budget["failureCategory"], "other")
+        self.assertEqual(launch_failure["failureCategory"], "launch-failure")
+        self.assertEqual(process_creation_error["failureCategory"], "launch-failure")
+        self.assertEqual(postprocess_identity_error["failureCategory"], "identity-mismatch")
 
     @unittest.skipUnless(
         sys.platform.startswith("linux")

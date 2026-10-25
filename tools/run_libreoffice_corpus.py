@@ -50,6 +50,10 @@ PDFIUM_STAGES = frozenset({
     "digest-check", "read-pdf", "load-library", "resolve-api", "initialize-library",
     "load-document", "count-pages", "close-document", "destroy-library",
 })
+CONVERSION_FAILURE_CATEGORIES = (
+    "nonzero-exit", "timeout", "launch-failure", "identity-mismatch",
+    "missing-output", "invalid-output", "other",
+)
 SECRET_ASSIGNMENT = re.compile(
     r'''(?i)(password|passwd|token|secret|credentials?|api[_-]?key)(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)'''
 )
@@ -64,6 +68,37 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _conversion_failure_category(
+    *, status: str, input_sha256: str, manifest_sha256: str,
+    output_bytes: int | None, output_sha256: str | None,
+    command: dict[str, Any] | None, reason: str | None, structure_valid: bool,
+) -> str | None:
+    if status != "failed":
+        return None
+    if command and command.get("timedOut") is True:
+        return "timeout"
+    if input_sha256 != manifest_sha256:
+        return "identity-mismatch"
+    if ((command and command.get("budgetExpiredBeforeLaunch") is True)
+            or (isinstance(reason, str) and reason.startswith("total corpus runtime budget"))):
+        return "other"
+    if (command and command.get("launchAttempted") is True
+            and command.get("identityVerified") is False and command.get("exitCode") is None):
+        return "launch-failure"
+    if command and command.get("identityVerified") is False:
+        return "identity-mismatch"
+    if command and command.get("launchAttempted") is False:
+        return "launch-failure"
+    exit_code = command.get("exitCode") if command else None
+    if type(exit_code) is int and exit_code != 0:
+        return "nonzero-exit"
+    if output_bytes is None:
+        return "missing-output"
+    if not structure_valid or not isinstance(output_sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", output_sha256):
+        return "invalid-output"
+    return "other"
 
 
 def console_summary(report: dict[str, Any]) -> str:
@@ -82,9 +117,15 @@ def console_summary(report: dict[str, Any]) -> str:
     if not isinstance(results, list):
         results = []
     inspection_counts: dict[str, int] = {}
+    failure_counts = {category: 0 for category in CONVERSION_FAILURE_CATEGORIES}
     for result in results:
         if not isinstance(result, dict):
             continue
+        failure_category = result.get("failureCategory") if result.get("status") == "failed" else None
+        if result.get("status") == "failed":
+            if failure_category not in failure_counts:
+                failure_category = "other"
+            failure_counts[failure_category] += 1
         inspection = result.get("pageInspection")
         if not isinstance(inspection, dict):
             continue
@@ -108,11 +149,15 @@ def console_summary(report: dict[str, Any]) -> str:
     inspection_summary = ",".join(
         f"{label}={inspection_counts[label]}" for label in sorted(inspection_counts)
     ) or "none"
+    failure_summary = ",".join(
+        f"{category}={failure_counts[category]}" for category in CONVERSION_FAILURE_CATEGORIES
+    )
     return (
         f"LibreOffice corpus status={status} "
         f"selected={safe_count('selectedForLibreOffice')} "
         f"converted={safe_count('successfulLibreOfficeConversions')} "
         f"failed={safe_count('failedLibreOfficeConversions')} "
+        f"conversion failure categories: {failure_summary}; "
         f"PDFium inspection statuses: {inspection_summary}"
     )
 
@@ -253,6 +298,11 @@ def result_record(
         "manifestSha256": fixture["sha256"],
         "inputBytes": fixture["size_bytes"],
         "status": status,
+        "failureCategory": _conversion_failure_category(
+            status=status, input_sha256=input_sha256, manifest_sha256=fixture["sha256"],
+            output_bytes=output_bytes, output_sha256=output_sha256,
+            command=command, reason=reason, structure_valid=structure_valid,
+        ),
         "exitCode": command.get("exitCode") if command else None,
         "timedOut": command.get("timedOut") if command else False,
         "launchAttempted": command.get("launchAttempted") if command else False,
