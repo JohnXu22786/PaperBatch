@@ -149,7 +149,18 @@ jobs:
 
       - name: Run focused headless presentation tests
         id: headless-desktop-tests
+        env:
+          PAPERBATCH_APPLICATION_IMPORT_REPORT: ${{ runner.temp }}/paperbatch-application-import-report.json
         run: dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
+
+      - name: Upload bounded PaperBatch application import report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paperbatch-application-import-${{ runner.os }}
+          path: ${{ runner.temp }}/paperbatch-application-import-report.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Download and verify temporary PDFium fixture runtime
         if: runner.os == 'Windows'
@@ -169,6 +180,7 @@ jobs:
           Add-Content $env:GITHUB_ENV 'PAPERBATCH_PDFIUM_TEST_SHA256=a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f'
 
       - name: Install and verify pinned LibreOffice and PDFium integration runtimes
+        id: install-libreoffice-linux
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -217,7 +229,7 @@ jobs:
           lo_engine='/opt/libreoffice26.2/program/soffice.bin'
           test -x "$lo_engine"
           lo_version_output="$(LD_LIBRARY_PATH=/opt/libreoffice26.2/program URE_BOOTSTRAP=file:///opt/libreoffice26.2/program/fundamentalrc "$lo_engine" --version)"
-          [[ "$lo_version_output" == 'LibreOffice 26.2.2.2'* ]]
+          [[ "$lo_version_output" =~ ^LibreOffice[[:space:]]+26\.2\.2\.2([[:space:]]|$) ]]
           [[ "$(sha256sum "$lo_engine" | cut -d ' ' -f 1)" == 'bcfd617b90f741cd9aa778e70d6aa317ec6c8971e238f602f3f69ea0ad210c0a' ]]
           pdfium_archive="$RUNNER_TEMP/pdfium-linux-x64.tgz"
           pdfium_root="$RUNNER_TEMP/paperbatch-pdfium-linux"
@@ -238,9 +250,41 @@ jobs:
             echo "PAPERBATCH_PDFIUM_TEST_PATH=$pdfium_library"
             echo 'PAPERBATCH_PDFIUM_TEST_SHA256=dca41ec4a2496ea7378b144cc4bad2d9e050692aaac75b9cc22411c1835f7f6e'
           } >> "$GITHUB_ENV"
+          python3 - "$lo_archive_path" "$lo_base" "$lo_root/installer-provenance.json" <<'PYCODE'
+          import hashlib, json, sys
+          from pathlib import Path
+          package = Path(sys.argv[1])
+          digest = hashlib.sha256()
+          with package.open('rb') as stream:
+              for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                  digest.update(chunk)
+          value = {
+              "version": "26.2.2.2",
+              "source": "Document Foundation official archive",
+              "sourceUrl": sys.argv[2],
+              "package": package.name,
+              "packageSha256": digest.hexdigest(),
+              "integrityMethod": "pinned SHA-256 and OpenPGP detached signature verified before extraction",
+              "signingKeyFingerprint": "C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3",
+          }
+          Path(sys.argv[3]).write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
+          PYCODE
+          echo "PAPERBATCH_LO_INSTALLER_PROVENANCE=$lo_root/installer-provenance.json" >> "$GITHUB_ENV"
           echo '## Pinned native renderer evidence' >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
           echo 'Validated LibreOffice 26.2.2.2 on Ubuntu x86_64 against a synthetic DOCX. The test verifies isolated-profile rendering, one-page PDFium inspection, immutable source bytes, renderer provenance and preservation of a separate LibreOffice process.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install and verify pinned LibreOffice on Windows
+        id: install-libreoffice-windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/install_libreoffice_windows.ps1
+
+      - name: Install and verify pinned LibreOffice on macOS
+        id: install-libreoffice-macos
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash tools/install_libreoffice_macos.sh
 
       - name: Run managed test runner
         id: managed-test-runner
@@ -262,49 +306,38 @@ jobs:
           retention-days: 14
 
       - name: Convert bounded synthetic OOXML corpus with pinned LibreOffice
-        if: runner.os == 'Linux'
+        id: libreoffice-corpus
         shell: bash
         run: |
           report="$RUNNER_TEMP/paperbatch-lo-corpus-report.json"
           set +e
-          python3 tools/run_libreoffice_corpus.py \
+          python tools/run_libreoffice_corpus.py \
             --engine-binary "$PAPERBATCH_LO_ENGINE_PATH" \
             --expected-engine-sha256 "$PAPERBATCH_LO_ENGINE_SHA256" \
             --timeout-seconds 60 --budget-seconds 900 --output "$report"
           corpus_exit=$?
-          python3 - "$report" "$GITHUB_STEP_SUMMARY" <<'PYCODE'
-          import json
-          import sys
-          from pathlib import Path
-          report = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-          with Path(sys.argv[2]).open('a', encoding='utf-8') as summary:
-              summary.write('\n## Synthetic OOXML LibreOffice execution\n\n')
-              if report.get('status') == 'blocked':
-                  summary.write(f"Blocked: {report.get('reason', 'unknown reason')}\n")
-              else:
-                  engine = report['engine']
-                  counts = report['counts']
-                  summary.write(f"LibreOffice: `{engine['version']}`; binary SHA-256: `{engine['binarySha256']}`.\n\n")
-                  summary.write(f"Synthetic source specimens: {counts['syntheticSourceSpecimens']}; selected: {counts['selectedForLibreOffice']}; converted: {counts['successfulLibreOfficeConversions']}; failed: {counts['failedLibreOfficeConversions']}. Human fidelity, Office/WPS, OEM/device and physical output: 0. Compatibility evidence: 0.\n\n")
-                  summary.write('| Input ID | Manifest SHA-256 | Status | Exit | Timed out | PDF bytes | PDF SHA-256 | Page inspection |\n|---|---|---:|---:|---:|---:|---|---|\n')
-                  for item in report['results']:
-                      page = item['pageInspection']
-                      summary.write(f"| `{item['inputId']}` | `{item['manifestSha256']}` | {item['status']} | {item['exitCode']} | {item['timedOut']} | {item['outputPdfBytes']} | `{item['outputPdfSha256']}` | {page['status']}; valid={page['structureValid']}; pages={page['pageCount']} |\n")
-                  summary.write('\n### Skipped synthetic specimens\n\n')
-                  for item in report['skipped']:
-                      summary.write(f"- `{item['id']}` (`{item['sha256']}`): {item['reason']}\n")
-                  summary.write('\nLibreOffice execution is not fidelity review, Office/WPS compatibility, printer validation or paper proof. G1/G3/G4 and U8 native/device/clean-PC evidence remain open.\n')
-          PYCODE
           exit "$corpus_exit"
 
       - name: Upload synthetic OOXML LibreOffice report
-        if: always() && runner.os == 'Linux'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: synthetic-ooxml-libreoffice-report
+          name: synthetic-ooxml-libreoffice-report-${{ matrix.os }}
           path: ${{ runner.temp }}/paperbatch-lo-corpus-report.json
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Publish bounded exact-run LibreOffice summary
+        id: libreoffice-summary
+        if: always()
+        shell: bash
+        run: python tools/build_libreoffice_ci_summary.py "$RUNNER_TEMP/paperbatch-lo-corpus-report.json"
+
+      - name: Publish bounded exact-run PaperBatch import summary
+        id: application-import-summary
+        if: always()
+        shell: bash
+        run: python tools/build_application_import_ci_summary.py "$RUNNER_TEMP/paperbatch-application-import-report.json"
 
       - name: Verify PDFium vector composition on the pinned Windows runtime
         id: pdfiumverify
@@ -484,17 +517,11 @@ jobs:
             printf '::error title=Managed test failure::%s\n' "$diagnostic"
           done < "$failure_log"
 
-      - name: Remove temporary Linux renderer runtimes
-        if: always() && runner.os == 'Linux'
-        run: |
-          rm -rf "$RUNNER_TEMP/paperbatch-libreoffice-26.2.2.2" "$RUNNER_TEMP/paperbatch-pdfium-linux"
-          rm -f "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz" "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz.asc" "$RUNNER_TEMP/tdf-release-key.asc" "$RUNNER_TEMP/tdf-release-key.gpg" "$RUNNER_TEMP/tdf-signature-status.txt" "$RUNNER_TEMP/pdfium-linux-x64.tgz"
-
       - name: Compile Python sources
         id: compile-python
         run: python -m compileall -q tools tests
 
-      # The unit suite uses fixtures; pinned-engine LibreOffice export stays opt-in/local.
+      # The unit suite uses fixtures; hosted lanes separately run the pinned LibreOffice synthetic corpus.
       - name: Run Python unit tests
         if: runner.os == 'Linux'
         id: python-tests-linux
@@ -539,6 +566,28 @@ jobs:
           if-no-files-found: error
           retention-days: 2
 
+      - name: Remove temporary Linux renderer runtimes
+        if: always() && runner.os == 'Linux'
+        run: |
+          rm -rf "$RUNNER_TEMP/paperbatch-libreoffice-26.2.2.2" "$RUNNER_TEMP/paperbatch-pdfium-linux"
+          rm -f "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz" "$RUNNER_TEMP/LibreOffice_26.2.2.2_Linux_x86-64_deb.tar.gz.asc" "$RUNNER_TEMP/tdf-release-key.asc" "$RUNNER_TEMP/tdf-release-key.gpg" "$RUNNER_TEMP/tdf-signature-status.txt" "$RUNNER_TEMP/pdfium-linux-x64.tgz"
+
+      - name: Remove temporary Windows LibreOffice runtime
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'paperbatch-libreoffice-26.2.2.2')
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'LibreOffice_26.2.2.2_Win_x86-64.msi')
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'LibreOffice_26.2.2.2_Win_x86-64.msi.asc')
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'tdf-release-key.asc'), (Join-Path $env:RUNNER_TEMP 'tdf-release-key.gpg'), (Join-Path $env:RUNNER_TEMP 'tdf-signature-status.txt')
+
+      - name: Remove temporary macOS LibreOffice runtime
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          rm -rf "$RUNNER_TEMP/paperbatch-libreoffice-26.2.2.2" "$RUNNER_TEMP/paperbatch-lo-dmg"
+          rm -f "$RUNNER_TEMP/LibreOffice_26.2.2.2_MacOS_$(uname -m | sed 's/arm64/aarch64/; s/x86_64/x86_64/').dmg" "$RUNNER_TEMP/LibreOffice_26.2.2.2_MacOS_$(uname -m | sed 's/arm64/aarch64/; s/x86_64/x86_64/').dmg.asc" "$RUNNER_TEMP/tdf-release-key.asc" "$RUNNER_TEMP/tdf-release-key.gpg" "$RUNNER_TEMP/tdf-signature-status.txt"
+
       - name: Remove temporary PDFium test runtime
         if: always() && runner.os == 'Windows'
         shell: pwsh
@@ -554,7 +603,7 @@ jobs:
           PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
           PB_JOB_RESULT: ${{ job.status }}
           PB_JOB_NAME: ${{ matrix.os }} / .NET 10, Avalonia, and Python
-          PB_STEP_OUTCOMES: '{"restore":"${{ steps.restore.outcome }}","build_core":"${{ steps.build-core.outcome }}","build_probe":"${{ steps.build-probe.outcome }}","build_desktop":"${{ steps.build-desktop.outcome }}","headless_tests":"${{ steps.headless-desktop-tests.outcome }}","managed_tests":"${{ steps.managed-test-runner.outcome }}","python_compile":"${{ steps.compile-python.outcome }}","python_tests_linux":"${{ steps.python-tests-linux.outcome }}","python_tests_macos":"${{ steps.python-tests-macos.outcome }}","python_tests_windows":"${{ steps.python-tests-windows.outcome }}","windows_runner_capture":"${{ steps.windows-runner-capture.outcome }}"}'
+          PB_STEP_OUTCOMES: '{"restore":"${{ steps.restore.outcome }}","build_core":"${{ steps.build-core.outcome }}","build_probe":"${{ steps.build-probe.outcome }}","build_desktop":"${{ steps.build-desktop.outcome }}","headless_tests":"${{ steps.headless-desktop-tests.outcome }}","application_import_summary":"${{ steps.application-import-summary.outcome }}","libreoffice_installer_linux":"${{ steps.install-libreoffice-linux.outcome }}","libreoffice_installer_windows":"${{ steps.install-libreoffice-windows.outcome }}","libreoffice_installer_macos":"${{ steps.install-libreoffice-macos.outcome }}","libreoffice_corpus":"${{ steps.libreoffice-corpus.outcome }}","libreoffice_summary":"${{ steps.libreoffice-summary.outcome }}","managed_tests":"${{ steps.managed-test-runner.outcome }}","python_compile":"${{ steps.compile-python.outcome }}","python_tests_linux":"${{ steps.python-tests-linux.outcome }}","python_tests_macos":"${{ steps.python-tests-macos.outcome }}","python_tests_windows":"${{ steps.python-tests-windows.outcome }}","windows_runner_capture":"${{ steps.windows-runner-capture.outcome }}"}'
         run: python tools/build_ci_job_summary.py --title "Managed tests and runner evidence" --report windows-print-runner-evidence.json
 
   windows-pdfium-community-proof:

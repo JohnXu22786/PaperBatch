@@ -299,6 +299,25 @@ def fixture_classic_xref_is_valid(
 
 
 class LibreOfficeProbeFixtureTests(unittest.TestCase):
+    def test_runtime_directory_binding_description_matches_platform_handle(self):
+        descriptions = {
+            "linux": probe_libreoffice_export.runtime_directory_binding_description("linux", "posix"),
+            "windows": probe_libreoffice_export.runtime_directory_binding_description("win32", "nt"),
+            "macos": probe_libreoffice_export.runtime_directory_binding_description("darwin", "posix"),
+        }
+
+        self.assertIn("Linux descriptor", descriptions["linux"])
+        self.assertIn("Win32 handle", descriptions["windows"])
+        self.assertIn("macOS engine handle", descriptions["macos"])
+        self.assertIn(
+            "complete signed app Contents tree",
+            probe_libreoffice_export.runtime_directory_inspection_description("darwin", "posix"),
+        )
+        self.assertIn(
+            "sibling program-directory tree",
+            probe_libreoffice_export.runtime_directory_inspection_description("linux", "posix"),
+        )
+
     @unittest.skipUnless(sys.platform.startswith("linux") and os.uname().machine.lower() in {"x86_64", "amd64"}, "Linux x86_64 seccomp regression")
     def test_launcher_mode_uses_verified_runtime_wrapper_under_no_network_sandbox(self):
         with tempfile.TemporaryDirectory(prefix="paperbatch-lo-launcher-mode-test-") as directory:
@@ -1020,6 +1039,27 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
         self.assertIn("runtime components changed", result["identityFailure"].lower())
         run_mock.assert_not_called()
 
+    @unittest.skipUnless(os.name == "nt", "Windows runtime-component identity regression")
+    def test_windows_runtime_component_mutation_is_named_and_still_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="paperbatch-windows-runtime-component-test-") as directory:
+            program_directory = Path(directory) / "program"
+            program_directory.mkdir()
+            executable = program_directory / "soffice.com"
+            executable.write_bytes(b"pinned Windows launcher fixture")
+            component = program_directory / "fundamental.ini"
+            component.write_bytes(b"trusted runtime component")
+            expected_sha256 = hashlib.sha256(executable.read_bytes()).hexdigest()
+            pinned = probe_libreoffice_export.open_pinned_engine(executable, expected_sha256)
+            try:
+                component.write_bytes(b"externally changed runtime component")
+                with self.assertRaises(probe_libreoffice_export.PinnedEngineError) as raised:
+                    pinned.verify_runtime_directory()
+            finally:
+                pinned.close()
+
+        self.assertIn("changed relative components: fundamental.ini", str(raised.exception))
+        self.assertNotIn(directory, str(raised.exception))
+
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux runtime-component timeout regression")
     def test_timeout_reports_runtime_mutation_as_unverified(self):
         with tempfile.TemporaryDirectory(prefix="paperbatch-runtime-component-timeout-test-") as directory:
@@ -1156,6 +1196,57 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
                 with mock.patch.object(os, "open", side_effect=check_nonblocking_fifo):
                     with self.assertRaises(probe_libreoffice_export.PinnedEngineError):
                         probe_libreoffice_export.open_readonly_regular_file(fifo)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS signed app runtime mutation regression")
+    def test_macos_runtime_fingerprint_covers_frameworks_and_internal_symlink_targets(self):
+        with tempfile.TemporaryDirectory(prefix="paperbatch-macos-app-runtime-test-") as directory:
+            contents = Path(directory) / "LibreOffice.app" / "Contents"
+            macos_directory = contents / "MacOS"
+            frameworks = contents / "Frameworks"
+            resources = contents / "Resources"
+            macos_directory.mkdir(parents=True)
+            frameworks.mkdir()
+            resources.mkdir()
+            executable = macos_directory / "soffice"
+            executable.write_bytes(b"pinned macOS engine fixture")
+            component = frameworks / "libfixture.dylib"
+            component.write_bytes(b"trusted framework component")
+            (resources / "libfixture.dylib").symlink_to("../Frameworks/libfixture.dylib")
+            expected_sha256 = hashlib.sha256(executable.read_bytes()).hexdigest()
+
+            pinned = probe_libreoffice_export.open_pinned_engine(executable, expected_sha256)
+            try:
+                self.assertEqual(str(contents), pinned.runtime_directory_path)
+                self.assertIn("complete signed app Contents", pinned.identity_binding)
+                component.write_bytes(b"externally changed framework component")
+                with self.assertRaises(probe_libreoffice_export.PinnedEngineError) as raised:
+                    pinned.verify_runtime_directory()
+            finally:
+                pinned.close()
+
+        self.assertIn("runtime components changed", str(raised.exception).lower())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS external app symlink rejection")
+    def test_macos_runtime_fingerprint_rejects_symlinks_outside_signed_contents(self):
+        with tempfile.TemporaryDirectory(prefix="paperbatch-macos-app-external-link-test-") as directory:
+            root = Path(directory)
+            contents = root / "LibreOffice.app" / "Contents"
+            macos_directory = contents / "MacOS"
+            resources = contents / "Resources"
+            macos_directory.mkdir(parents=True)
+            resources.mkdir()
+            executable = macos_directory / "soffice"
+            executable.write_bytes(b"pinned macOS engine fixture")
+            external_component = root / "outside.dylib"
+            external_component.write_bytes(b"outside app runtime")
+            (resources / "external.dylib").symlink_to(external_component)
+            expected_sha256 = hashlib.sha256(executable.read_bytes()).hexdigest()
+
+            with self.assertRaisesRegex(
+                probe_libreoffice_export.PinnedEngineError,
+                "symbolic link with an unavailable or external target",
+            ):
+                probe_libreoffice_export.open_pinned_engine(executable, expected_sha256)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux O_PATH race regression")
     def test_readonly_file_open_pins_regular_file_before_content_open(self):
@@ -1458,6 +1549,8 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
                         "LD_DEBUG": "all",
                         "LD_LIBRARY_PATH": "/tmp/untrusted-libraries",
                         "URE_BOOTSTRAP": "file:///tmp/untrusted-fundamentalrc",
+                        "PYTHONDONTWRITEBYTECODE": "0",
+                        "PYTHONPYCACHEPREFIX": "/tmp/untrusted-python-cache",
                     },
                 ),
                 mock.patch.object(
@@ -1484,6 +1577,8 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
         self.assertFalse("LD_AUDIT" in child_environment, "LD_AUDIT must be removed from the child environment")
         self.assertFalse("LD_DEBUG" in child_environment, "LD_DEBUG must be removed from the child environment")
         self.assertFalse("URE_BOOTSTRAP" in child_environment, "an inherited URE_BOOTSTRAP must be removed")
+        self.assertEqual("1", child_environment["PYTHONDONTWRITEBYTECODE"])
+        self.assertNotIn("PYTHONPYCACHEPREFIX", child_environment)
 
     @unittest.skipUnless(os.name == "nt", "Windows handle-path regression")
     def test_windows_launch_uses_path_resolved_from_locked_handle(self):
@@ -1514,6 +1609,45 @@ class LibreOfficeProbeFixtureTests(unittest.TestCase):
         command = run_process.call_args.args[0]
         self.assertTrue(command[0].startswith("\\\\?\\"))
         self.assertEqual(command[0], result["executionTarget"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows embedded-Python cache regression")
+    def test_windows_launch_disables_embedded_python_bytecode_cache(self):
+        with tempfile.TemporaryDirectory(prefix="paperbatch-windows-python-cache-test-") as directory:
+            executable = Path(directory) / "soffice.bin"
+            executable.write_text("pinned engine image", encoding="utf-8")
+            expected_sha256 = hashlib.sha256(executable.read_bytes()).hexdigest()
+            child_result = probe_libreoffice_export.subprocess.CompletedProcess(
+                args=[str(executable)],
+                returncode=0,
+                stdout="LibreOfficeDev 26.8.0.0.alpha0",
+                stderr="",
+            )
+            with (
+                mock.patch.dict(
+                    probe_libreoffice_export.os.environ,
+                    {
+                        "PYTHONDONTWRITEBYTECODE": "0",
+                        "PYTHONPYCACHEPREFIX": "C:\\untrusted-python-cache",
+                    },
+                ),
+                mock.patch.object(
+                    probe_libreoffice_export.subprocess,
+                    "run",
+                    return_value=child_result,
+                ) as run_process,
+            ):
+                result = probe_libreoffice_export.invoke(
+                    executable,
+                    ["--version"],
+                    Path(directory) / "profile",
+                    5,
+                    expected_engine_sha256=expected_sha256,
+                )
+
+        child_environment = run_process.call_args.kwargs["env"]
+        self.assertEqual("1", child_environment["PYTHONDONTWRITEBYTECODE"])
+        self.assertNotIn("PYTHONPYCACHEPREFIX", child_environment)
+        self.assertEqual(0, result["exitCode"], result)
 
     def test_fixture_text_in_pdf_comment_cannot_verify_export(self):
         content = b"BT /F1 11 Tf % (PaperBatch U0 export probe) Tj\n () Tj ET\n"

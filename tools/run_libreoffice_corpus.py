@@ -8,6 +8,7 @@ import ctypes
 import hashlib
 import json
 import os
+import platform
 import re
 import sys
 import tempfile
@@ -15,6 +16,7 @@ import time
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 import probe_libreoffice_export as probe
@@ -28,12 +30,30 @@ FORMATS = {
 }
 VARIANT_ID = re.compile(r"^(docx|xlsx|pptx)_variant_(\d{3})$")
 MAX_SELECTED_PER_FORMAT = 30
+EXPECTED_FIXTURE_IDS = frozenset(
+    f"{file_format}_variant_{index:03d}"
+    for file_format in FORMATS
+    for index in range(MAX_SELECTED_PER_FORMAT)
+)
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_TOTAL_INPUT_BYTES = 64 * 1024 * 1024
 MAX_PACKAGE_ENTRIES = 256
 MAX_PACKAGE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024
+MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+MAX_MANIFEST_FIXTURES = 256
+MAX_REPORT_BYTES = 2 * 1024 * 1024
 MAX_LOG_CHARS = 2_000
 MAX_PDF_BYTES = 64 * 1024 * 1024
+SUPPORTED_PLATFORMS = ("linux", "win32", "darwin")
+NETWORK_SANDBOX_PLATFORMS = ("linux",)
+PDFIUM_STAGES = frozenset({
+    "digest-check", "read-pdf", "load-library", "resolve-api", "initialize-library",
+    "load-document", "count-pages", "close-document", "destroy-library",
+})
+CONVERSION_FAILURE_CATEGORIES = (
+    "nonzero-exit", "timeout", "launch-failure", "identity-mismatch",
+    "missing-output", "invalid-output", "other",
+)
 SECRET_ASSIGNMENT = re.compile(
     r'''(?i)(password|passwd|token|secret|credentials?|api[_-]?key)(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)'''
 )
@@ -48,6 +68,98 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _conversion_failure_category(
+    *, status: str, input_sha256: str, manifest_sha256: str,
+    output_bytes: int | None, output_sha256: str | None,
+    command: dict[str, Any] | None, reason: str | None, structure_valid: bool,
+) -> str | None:
+    if status != "failed":
+        return None
+    if command and command.get("timedOut") is True:
+        return "timeout"
+    if input_sha256 != manifest_sha256:
+        return "identity-mismatch"
+    if ((command and command.get("budgetExpiredBeforeLaunch") is True)
+            or (isinstance(reason, str) and reason.startswith("total corpus runtime budget"))):
+        return "other"
+    if (command and command.get("launchAttempted") is True
+            and command.get("identityVerified") is False and command.get("exitCode") is None):
+        return "launch-failure"
+    if command and command.get("identityVerified") is False:
+        return "identity-mismatch"
+    if command and command.get("launchAttempted") is False:
+        return "launch-failure"
+    exit_code = command.get("exitCode") if command else None
+    if type(exit_code) is int and exit_code != 0:
+        return "nonzero-exit"
+    if output_bytes is None:
+        return "missing-output"
+    if not structure_valid or not isinstance(output_sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", output_sha256):
+        return "invalid-output"
+    return "other"
+
+
+def console_summary(report: dict[str, Any]) -> str:
+    """Return a compact stage/count summary without paths or report contents."""
+    counts = report.get("counts")
+    if not isinstance(counts, dict):
+        counts = {}
+    def safe_count(name: str) -> int:
+        value = counts.get(name)
+        return value if type(value) is int and value >= 0 else 0
+
+    status = report.get("status")
+    if status not in {"passed", "failed", "blocked"}:
+        status = "unknown"
+    results = report.get("results")
+    if not isinstance(results, list):
+        results = []
+    inspection_counts: dict[str, int] = {}
+    failure_counts = {category: 0 for category in CONVERSION_FAILURE_CATEGORIES}
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        failure_category = result.get("failureCategory") if result.get("status") == "failed" else None
+        if result.get("status") == "failed":
+            if failure_category not in failure_counts:
+                failure_category = "other"
+            failure_counts[failure_category] += 1
+        inspection = result.get("pageInspection")
+        if not isinstance(inspection, dict):
+            continue
+        inspection_status = inspection.get("status")
+        label = "other"
+        if inspection_status == "pinned-pdfium":
+            label = "passed"
+        elif inspection_status == "pinned-pdfium-rejected-output":
+            label = "rejected-output"
+        elif isinstance(inspection_status, str) and inspection_status.startswith("pinned-pdfium-") and "-failed-" in inspection_status:
+            stage = inspection_status.removeprefix("pinned-pdfium-").split("-failed-", 1)[0]
+            if stage in PDFIUM_STAGES:
+                label = stage
+        elif inspection_status == "pinned-pdfium-unavailable":
+            label = "unavailable"
+        elif inspection_status == "pinned-pdfium-invalid-digest-pin":
+            label = "invalid-digest-pin"
+        elif inspection_status == "pinned-pdfium-digest-mismatch":
+            label = "digest-mismatch"
+        inspection_counts[label] = inspection_counts.get(label, 0) + 1
+    inspection_summary = ",".join(
+        f"{label}={inspection_counts[label]}" for label in sorted(inspection_counts)
+    ) or "none"
+    failure_summary = ",".join(
+        f"{category}={failure_counts[category]}" for category in CONVERSION_FAILURE_CATEGORIES
+    )
+    return (
+        f"LibreOffice corpus status={status} "
+        f"selected={safe_count('selectedForLibreOffice')} "
+        f"converted={safe_count('successfulLibreOfficeConversions')} "
+        f"failed={safe_count('failedLibreOfficeConversions')} "
+        f"conversion failure categories: {failure_summary}; "
+        f"PDFium inspection statuses: {inspection_summary}"
+    )
 
 
 def validate_package(path: Path, file_format: str) -> str | None:
@@ -94,7 +206,9 @@ def validate_package(path: Path, file_format: str) -> str | None:
         return "package is malformed or truncated"
 
 
-def select_fixtures(manifest: dict[str, Any], corpus_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+def select_fixtures(
+    manifest: dict[str, Any], corpus_dir: Path, *, require_complete: bool = True,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     if manifest.get("synthetic") is not True or manifest.get("evidence_class") != "synthetic" or manifest.get("simulation_only") is not True:
         raise ValueError("corpus manifest is not explicitly synthetic and simulation-only")
     selected: list[dict[str, Any]] = []
@@ -103,6 +217,8 @@ def select_fixtures(manifest: dict[str, Any], corpus_dir: Path) -> tuple[list[di
     fixtures = manifest.get("fixtures")
     if not isinstance(fixtures, list):
         raise ValueError("corpus manifest has no fixture list")
+    if len(fixtures) > MAX_MANIFEST_FIXTURES:
+        raise ValueError("corpus manifest fixture count exceeds the bounded limit")
     for fixture in fixtures:
         fixture_id = fixture.get("id", "<missing-id>")
         match = VARIANT_ID.fullmatch(fixture_id)
@@ -158,6 +274,12 @@ def select_fixtures(manifest: dict[str, Any], corpus_dir: Path) -> tuple[list[di
                 "reason": _redacted_log(str(reason)),
             })
     selected.sort(key=lambda item: item["id"])
+    selected_ids = {item["id"] for item in selected}
+    missing_ids = EXPECTED_FIXTURE_IDS - selected_ids
+    if require_complete and (missing_ids or len(selected_ids) != len(selected)):
+        missing_preview = ", ".join(sorted(missing_ids)[:6])
+        reason = f"corpus is missing required accepted synthetic fixtures: {missing_preview}" if missing_ids else "corpus contains duplicate accepted synthetic fixture IDs"
+        raise ValueError(reason)
     return selected, skipped
 
 
@@ -176,6 +298,11 @@ def result_record(
         "manifestSha256": fixture["sha256"],
         "inputBytes": fixture["size_bytes"],
         "status": status,
+        "failureCategory": _conversion_failure_category(
+            status=status, input_sha256=input_sha256, manifest_sha256=fixture["sha256"],
+            output_bytes=output_bytes, output_sha256=output_sha256,
+            command=command, reason=reason, structure_valid=structure_valid,
+        ),
         "exitCode": command.get("exitCode") if command else None,
         "timedOut": command.get("timedOut") if command else False,
         "launchAttempted": command.get("launchAttempted") if command else False,
@@ -244,12 +371,34 @@ def _redacted_log(value: str) -> str:
 def classify_report(
     *, selected: list[dict[str, Any]], skipped: list[dict[str, str]],
     results: list[dict[str, Any]], engine: dict[str, Any],
+    run_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    failed = sum(result.get("status") == "failed" for result in results)
+    installer_verified = isinstance(run_metadata, dict) and isinstance(run_metadata.get("installer"), dict) and run_metadata["installer"].get("status") == "verified"
+    status = (
+        "passed" if len(selected) == len(EXPECTED_FIXTURE_IDS) and len(results) == len(selected)
+        and not failed and installer_verified
+        else "blocked" if not installer_verified or not results
+        else "failed"
+    )
+    source_commit = os.environ.get("PB_SOURCE_COMMIT", "")
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    run_identity = {
+        "workflow": os.environ.get("GITHUB_WORKFLOW", "unknown")[:120],
+        "runId": run_id if run_id.isdigit() else "unknown",
+        "runAttempt": run_attempt if run_attempt.isdigit() else "unknown",
+    }
     return {
         "schemaVersion": "1.0",
+        "status": status,
+        "commit": source_commit if re.fullmatch(r"[0-9a-fA-F]{40,64}", source_commit) else "unknown",
+        "runIdentity": run_identity,
         "evidenceClass": "synthetic-source-and-real-libreoffice-execution",
-        "classification": "LibreOffice conversion is engine execution only; it is not fidelity review or Office/WPS/device/physical output evidence.",
+        "classification": "LibreOffice conversion is engine execution only; it does not establish Office/WPS compatibility, fidelity review, device support, or physical output.",
+        "run": run_metadata or {},
         "engine": engine,
+        "jobResultAtReportTime": "in_progress",
         "limits": {
             "selectedPerFormat": MAX_SELECTED_PER_FORMAT,
             "maximumInputBytesPerFile": MAX_INPUT_BYTES,
@@ -283,39 +432,104 @@ def _pdfium_page_count(pdf_path: Path) -> tuple[int | None, str]:
     if not library or not expected_sha256:
         return None, "pinned-pdfium-unavailable"
     library_path = Path(library)
+    stage = "digest-check"
     try:
         if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256):
             return None, "pinned-pdfium-invalid-digest-pin"
         if file_sha256(library_path) != expected_sha256.lower():
             return None, "pinned-pdfium-digest-mismatch"
+        stage = "read-pdf"
+        pdf_bytes = pdf_path.read_bytes()
+        stage = "load-library"
         pdfium = ctypes.CDLL(str(library_path))
-        pdfium.FPDF_InitLibrary()
+        stage = "resolve-api"
+        initialize = pdfium.FPDF_InitLibrary
+        destroy = pdfium.FPDF_DestroyLibrary
+        load_document = pdfium.FPDF_LoadMemDocument
+        get_page_count = pdfium.FPDF_GetPageCount
+        close_document = pdfium.FPDF_CloseDocument
+        load_document.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+        load_document.restype = ctypes.c_void_p
+        get_page_count.argtypes = [ctypes.c_void_p]
+        get_page_count.restype = ctypes.c_int
+        close_document.argtypes = [ctypes.c_void_p]
+        stage = "initialize-library"
+        initialize()
         try:
-            pdfium.FPDF_LoadDocument.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
-            pdfium.FPDF_LoadDocument.restype = ctypes.c_void_p
-            pdfium.FPDF_GetPageCount.argtypes = [ctypes.c_void_p]
-            pdfium.FPDF_GetPageCount.restype = ctypes.c_int
-            pdfium.FPDF_CloseDocument.argtypes = [ctypes.c_void_p]
-            document = pdfium.FPDF_LoadDocument(os.fsencode(pdf_path), None)
+            pdf_buffer = ctypes.create_string_buffer(pdf_bytes)
+            stage = "load-document"
+            document = load_document(ctypes.cast(pdf_buffer, ctypes.c_void_p), len(pdf_bytes), None)
             if not document:
                 return None, "pinned-pdfium-rejected-output"
             try:
-                return pdfium.FPDF_GetPageCount(document), "pinned-pdfium"
+                stage = "count-pages"
+                return get_page_count(document), "pinned-pdfium"
             finally:
-                pdfium.FPDF_CloseDocument(document)
+                if sys.exc_info()[0] is None:
+                    stage = "close-document"
+                close_document(document)
         finally:
-            pdfium.FPDF_DestroyLibrary()
-    except (OSError, AttributeError, ctypes.ArgumentError):
-        return None, "pinned-pdfium-inspection-failed"
+            if sys.exc_info()[0] is None:
+                stage = "destroy-library"
+            destroy()
+    except (OSError, AttributeError, ctypes.ArgumentError) as error:
+        error_type = type(error).__name__.lower()
+        return None, f"pinned-pdfium-{stage}-failed-{error_type}"
+
+
+def _run_metadata() -> dict[str, Any]:
+    """Return bounded hosted-runner and vendor-installer provenance."""
+    installer: dict[str, Any] = {"status": "unavailable"}
+    provenance_path = os.environ.get("PAPERBATCH_LO_INSTALLER_PROVENANCE")
+    if provenance_path:
+        try:
+            raw = Path(provenance_path).read_bytes()
+            if len(raw) > 4096:
+                raise ValueError("installer provenance exceeds its byte limit")
+            value = json.loads(raw)
+            required = ("version", "source", "sourceUrl", "package", "packageSha256", "integrityMethod", "signingKeyFingerprint")
+            if not isinstance(value, dict) or any(not isinstance(value.get(key), str) for key in required):
+                raise ValueError("installer provenance has an invalid schema")
+            if not re.fullmatch(r"[0-9a-f]{64}", value["packageSha256"]):
+                raise ValueError("installer package digest is invalid")
+            if not re.fullmatch(r"[A-F0-9]{40}", value["signingKeyFingerprint"]):
+                raise ValueError("installer signer fingerprint is invalid")
+            source_url = urlparse(value["sourceUrl"])
+            if (source_url.scheme != "https" or source_url.hostname != "downloadarchive.documentfoundation.org"
+                    or source_url.username or source_url.password or source_url.query or source_url.fragment
+                    or len(value["sourceUrl"]) > 300):
+                raise ValueError("installer URL is outside the trusted Document Foundation archive")
+            installer = {
+                key: value[key] if key == "sourceUrl" else _redacted_log(value[key])
+                for key in required
+            }
+            installer["status"] = "verified"
+        except (OSError, ValueError, json.JSONDecodeError):
+            installer = {"status": "invalid"}
+    return {
+        "os": _redacted_log(os.environ.get("RUNNER_OS", platform.system()))[:80],
+        "runner": _redacted_log(os.environ.get("RUNNER_NAME", "unknown"))[:120],
+        "runnerImage": _redacted_log(os.environ.get("ImageOS", "unknown"))[:120],
+        "runnerImageVersion": _redacted_log(os.environ.get("ImageVersion", "unknown"))[:80],
+        "installer": installer,
+        "networkIsolation": "Linux x86_64 seccomp (network sockets denied)" if sys.platform.startswith("linux") else "no per-process network sandbox; synthetic input validation rejects external relationships and macro content",
+        "evidenceLimit": "LibreOffice execution does not establish Microsoft Office/WPS compatibility, visual fidelity, OEM/device support, or physical output.",
+    }
+
+
+def read_manifest(manifest_path: Path) -> dict[str, Any]:
+    if manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
+        raise ValueError("corpus manifest exceeds the bounded byte limit")
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
 def run_corpus(engine_binary: str, expected_engine_sha256: str, timeout_seconds: int, budget_seconds: int, corpus_dir: Path) -> tuple[dict[str, Any], int]:
-    if not sys.platform.startswith("linux"):
-        raise ValueError("the corpus runner requires Linux for its no-network process sandbox")
+    if sys.platform not in SUPPORTED_PLATFORMS:
+        raise ValueError("the corpus runner supports only hosted Linux, Windows, and macOS runners")
     started = time.monotonic()
     deadline = started + budget_seconds
     manifest_path = corpus_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = read_manifest(manifest_path)
     selected, skipped = select_fixtures(manifest, corpus_dir)
     engine_path = Path(engine_binary).expanduser().resolve(strict=True)
     pinned = probe.open_pinned_engine(engine_path, expected_engine_sha256)
@@ -328,7 +542,7 @@ def run_corpus(engine_binary: str, expected_engine_sha256: str, timeout_seconds:
                 version = probe.invoke(engine_path, ["--version"], root / "version-profile",
                                        min(timeout_seconds, remaining), expected_engine_sha256=expected_engine_sha256,
                                        pinned_engine=pinned, max_output_file_bytes=MAX_PDF_BYTES,
-                                       max_log_chars=MAX_LOG_CHARS, disable_network=True,
+                                       max_log_chars=MAX_LOG_CHARS, disable_network=sys.platform.startswith("linux"),
                                        deadline_monotonic=deadline)
             else:
                 version = {"exitCode": None, "timedOut": False, "durationSeconds": 0,
@@ -379,8 +593,9 @@ def run_corpus(engine_binary: str, expected_engine_sha256: str, timeout_seconds:
                         ["--convert-to", "pdf", "--outdir", str(output_dir), str(copied_input)],
                         run_dir / "profile", min(timeout_seconds, remaining),
                         expected_engine_sha256=expected_engine_sha256, pinned_engine=pinned,
-                        max_output_file_bytes=MAX_PDF_BYTES, max_log_chars=MAX_LOG_CHARS, disable_network=True,
-                        temporary_directory=temporary_directory, use_launcher=True,
+                        max_output_file_bytes=MAX_PDF_BYTES, max_log_chars=MAX_LOG_CHARS,
+                        disable_network=sys.platform.startswith("linux"),
+                        temporary_directory=temporary_directory, use_launcher=sys.platform in ("linux", "darwin"),
                         deadline_monotonic=deadline)
                     if command.get("budgetExpiredBeforeLaunch") or command.get("launchAttempted") is False:
                         results.append(result_record(fixture, status="failed", input_sha256=input_sha256,
@@ -408,9 +623,10 @@ def run_corpus(engine_binary: str, expected_engine_sha256: str, timeout_seconds:
                         input_sha256=input_sha256, output_bytes=size, output_sha256=output_hash,
                         page_count=page_count, command=command, reason=reason, page_inspection_status=pdfium_status,
                         structure_valid=structure_valid))
-            report = classify_report(selected=selected, skipped=skipped, results=results, engine=engine)
+            report = classify_report(selected=selected, skipped=skipped, results=results, engine=engine,
+                                     run_metadata=_run_metadata())
             report["elapsedSeconds"] = round(time.monotonic() - started, 3)
-            return report, 0 if report["counts"]["failedLibreOfficeConversions"] == 0 else 1
+            return report, 0 if report["status"] == "passed" else 1
     finally:
         pinned.close()
 
@@ -435,10 +651,15 @@ def main(argv: list[str] | None = None) -> int:
         report, exit_code = {"schemaVersion": "1.0", "status": "blocked", "reason": _redacted_log(str(error)),
                              "compatibilityEvidenceCount": 0}, 1
     output = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    if len(output.encode("utf-8")) > MAX_REPORT_BYTES:
+        report = {"schemaVersion": "1.0", "status": "blocked", "reason": "generated corpus report exceeds the bounded byte limit", "compatibilityEvidenceCount": 0}
+        output = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+        exit_code = 1
     if args.output:
         args.output.write_text(output, encoding="utf-8")
     else:
         sys.stdout.write(output)
+    sys.stderr.write(console_summary(report) + "\n")
     return exit_code
 
 

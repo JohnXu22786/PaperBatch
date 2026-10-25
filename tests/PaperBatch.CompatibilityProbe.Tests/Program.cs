@@ -81,6 +81,7 @@ var tests = new List<(string Name, Action Run)>
     ("renderer timeout has a distinct result", RendererTests.AdapterTimeoutIsDistinguished),
     ("cancelled render is not launched", RendererTests.CancelledRequestDoesNotLaunchAnAdapter),
     ("renderer capability failure does not try another adapter", RendererTests.CapabilityFailureStopsWithoutTryingAnotherAdapter),
+    ("pinned LibreOffice version requires a token boundary", RendererTests.PinnedLibreOfficeVersionRequiresTokenBoundary),
     ("physical device output is required for G1", PhysicalDeviceOutputIsRequiredForG1),
     ("suite-specific evidence is required", SuiteSpecificEvidenceIsRequired),
     ("queue and driver inventory does not verify a print route", QueueAndDriverInventoryDoesNotVerifyPrintRoute),

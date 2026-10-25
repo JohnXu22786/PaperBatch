@@ -10,6 +10,14 @@ using System.Security.Cryptography;
 
 internal static class RendererTests
 {
+    public static void PinnedLibreOfficeVersionRequiresTokenBoundary()
+    {
+        const string pinnedVersion = "LibreOffice 26.2.2.2";
+        Assert.True(HasPinnedLibreOfficeVersion(pinnedVersion, pinnedVersion));
+        Assert.True(HasPinnedLibreOfficeVersion(pinnedVersion + " Build 2", pinnedVersion));
+        Assert.False(HasPinnedLibreOfficeVersion("LibreOffice 26.2.2.20 Build 2", pinnedVersion));
+    }
+
     [SupportedOSPlatform("linux")]
     public static void LibreOfficeVersionQueryStopsOnTimeout()
     {
@@ -45,7 +53,7 @@ internal static class RendererTests
             throw new InvalidOperationException("The pinned LibreOffice CI runtime configuration is incomplete.");
         Assert.Equal(pinnedVersion, expectedVersion);
         Assert.Equal(pinnedEngineSha256, expectedHash);
-        Assert.True(ReadLibreOfficeVersion(enginePath).StartsWith(pinnedVersion, StringComparison.Ordinal),
+        Assert.True(HasPinnedLibreOfficeVersion(ReadLibreOfficeVersion(enginePath), pinnedVersion),
             "The verified LibreOffice executable did not report the pinned version.");
 
         var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-integration-{Guid.NewGuid():N}");
@@ -106,7 +114,7 @@ internal static class RendererTests
 
             var receipt = artifacts.GetReceipt(result.Artifact!.ArtifactId);
             Assert.Equal("libreoffice", receipt.EngineId);
-            Assert.True(receipt.EngineVersion.StartsWith(pinnedVersion, StringComparison.Ordinal));
+            Assert.True(HasPinnedLibreOfficeVersion(receipt.EngineVersion, pinnedVersion));
             Assert.Equal(expectedHash, receipt.Options["engine-sha256"]);
             Assert.Equal("disabled", receipt.Options["macro-policy"]);
             Assert.Equal("disabled", receipt.Options["link-refresh-policy"]);
@@ -170,6 +178,10 @@ internal static class RendererTests
         Assert.Equal(0, process.ExitCode);
         return output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? string.Empty;
     }
+
+    private static bool HasPinnedLibreOfficeVersion(string observed, string pinnedVersion) =>
+        observed.Equals(pinnedVersion, StringComparison.Ordinal)
+        || observed.StartsWith(pinnedVersion + " ", StringComparison.Ordinal);
 
     private static byte[] CreateSyntheticDocx()
     {
