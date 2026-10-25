@@ -332,15 +332,17 @@ def _pdfium_page_count(pdf_path: Path) -> tuple[int | None, str]:
             return None, "pinned-pdfium-invalid-digest-pin"
         if file_sha256(library_path) != expected_sha256.lower():
             return None, "pinned-pdfium-digest-mismatch"
+        pdf_bytes = pdf_path.read_bytes()
         pdfium = ctypes.CDLL(str(library_path))
         pdfium.FPDF_InitLibrary()
         try:
-            pdfium.FPDF_LoadDocument.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
-            pdfium.FPDF_LoadDocument.restype = ctypes.c_void_p
+            pdfium.FPDF_LoadMemDocument.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+            pdfium.FPDF_LoadMemDocument.restype = ctypes.c_void_p
             pdfium.FPDF_GetPageCount.argtypes = [ctypes.c_void_p]
             pdfium.FPDF_GetPageCount.restype = ctypes.c_int
             pdfium.FPDF_CloseDocument.argtypes = [ctypes.c_void_p]
-            document = pdfium.FPDF_LoadDocument(os.fsencode(pdf_path), None)
+            pdf_buffer = ctypes.create_string_buffer(pdf_bytes)
+            document = pdfium.FPDF_LoadMemDocument(pdf_buffer, len(pdf_bytes), None)
             if not document:
                 return None, "pinned-pdfium-rejected-output"
             try:

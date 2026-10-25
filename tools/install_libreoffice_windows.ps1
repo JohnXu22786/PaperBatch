@@ -19,6 +19,8 @@ if (-not $gpg) {
 if (-not $gpg) { throw 'A GPG verifier is unavailable on this hosted Windows runner.' }
 $gpgv = Join-Path (Split-Path $gpg) 'gpgv.exe'
 if (-not (Test-Path -LiteralPath $gpgv -PathType Leaf)) { throw 'The matching gpgv verifier is unavailable.' }
+$cygpath = Join-Path (Split-Path $gpg) 'cygpath.exe'
+if (-not (Test-Path -LiteralPath $cygpath -PathType Leaf)) { throw 'The path converter matching the Git-for-Windows GPG tools is unavailable.' }
 
 Invoke-WebRequest -Uri "$base/$packageName" -OutFile $package
 Invoke-WebRequest -Uri "$base/$packageName.asc" -OutFile $signature
@@ -28,7 +30,12 @@ if ($LASTEXITCODE -ne 0 -or -not ($keyListing -match "fpr:::::::::${fingerprint}
 New-Item -ItemType Directory -Path $keyringHome -Force | Out-Null
 & $gpg --batch --yes --dearmor --output $keyring $key
 if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the pinned Document Foundation signing key.' }
-$verification = @(& $gpgv --homedir $keyringHome --status-fd=1 --keyring $keyringName $signature $package 2>&1 | ForEach-Object { [string]$_ })
+$keyringHomeForGpg = (& $cygpath -u $keyringHome | Out-String).Trim()
+$keyringHomeConversionExitCode = $LASTEXITCODE
+if ($keyringHomeConversionExitCode -ne 0 -or $keyringHomeForGpg -notmatch '^/(?:[A-Za-z]|cygdrive/[A-Za-z])/[^:\r\n]*$') {
+  throw 'Could not convert the private GnuPG home to an absolute MSYS path.'
+}
+$verification = @(& $gpgv --homedir $keyringHomeForGpg --status-fd=1 --keyring $keyringName $signature $package 2>&1 | ForEach-Object { [string]$_ })
 $verificationExitCode = $LASTEXITCODE
 $verificationText = $verification -join [Environment]::NewLine
 $verificationText | Set-Content -Encoding utf8 $status

@@ -68,16 +68,21 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertIn("$observedText.Substring(0, 200)", windows)
         self.assertLess(windows.index("if ($verificationExitCode -ne 0)"), windows.index("Start-Process -FilePath 'msiexec.exe'"))
 
-    def test_windows_gpgv_uses_relative_keyring_in_private_home(self):
+    def test_windows_gpgv_uses_msys_home_path_and_relative_keyring_in_private_home(self):
         windows = (ROOT / "tools/install_libreoffice_windows.ps1").read_text(encoding="utf-8")
 
         self.assertIn("$keyringHome = Join-Path $env:RUNNER_TEMP 'paperbatch-gpg-home'", windows)
         self.assertIn("$keyringName = 'tdf-release-key.gpg'", windows)
         self.assertIn("$keyring = Join-Path $keyringHome $keyringName", windows)
         self.assertIn("New-Item -ItemType Directory -Path $keyringHome -Force", windows)
-        self.assertIn("--homedir $keyringHome --status-fd=1 --keyring $keyringName", windows)
+        self.assertIn("$cygpath = Join-Path (Split-Path $gpg) 'cygpath.exe'", windows)
+        self.assertIn("$keyringHomeForGpg = (& $cygpath -u $keyringHome | Out-String).Trim()", windows)
+        self.assertIn("$keyringHomeForGpg -notmatch '^/(?:[A-Za-z]|cygdrive/[A-Za-z])/[^:\\r\\n]*$'", windows)
+        self.assertIn("--homedir $keyringHomeForGpg --status-fd=1 --keyring $keyringName", windows)
+        self.assertNotIn("--homedir $keyringHome --status-fd=1", windows)
         self.assertNotIn("--status-fd=1 --keyring $keyring ", windows)
         self.assertLess(windows.index("gpg --batch --yes --dearmor"), windows.index("$gpgv --homedir"))
+        self.assertLess(windows.index("$cygpath -u $keyringHome"), windows.index("$gpgv --homedir"))
         self.assertLess(windows.index("$gpgv --homedir"), windows.index("if ($verificationExitCode -ne 0)"))
 
     def test_macos_engine_resolver_selects_native_main_binary_and_checks_pinned_version(self):
