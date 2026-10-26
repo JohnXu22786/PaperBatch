@@ -64,6 +64,9 @@ internal static class PreparedArtifactCoordinatorTests
             Assert.False(first.Persistence!.Replayed);
             Assert.True(replay.Persistence!.Replayed);
             Assert.Equal(first.Run!.RunId, replay.Run!.RunId);
+            Assert.True(first.Run.Segments.Single().FinalPageNumbers.SequenceEqual([1]));
+            Assert.True(replay.Run!.Segments.Single().FinalPageNumbers.SequenceEqual([1]));
+            Assert.True(runs.GetPreparedRun(first.Run.RunId)!.Segments.Single().FinalPageNumbers.SequenceEqual([1]));
         }
         finally
         {

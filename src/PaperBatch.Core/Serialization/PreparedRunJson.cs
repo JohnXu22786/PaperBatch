@@ -8,7 +8,7 @@ namespace PaperBatch.Core.Serialization;
 /// <summary>Versioned persistence codec for immutable prepared-run metadata.</summary>
 public static class PreparedRunJson
 {
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
     public const int MaximumDocumentBytes = 8 * 1024 * 1024;
 
     private static readonly JsonSerializerOptions SerializerOptions = CreateOptions();
@@ -16,7 +16,8 @@ public static class PreparedRunJson
     public static string Serialize(PreparedRun preparedRun)
     {
         ArgumentNullException.ThrowIfNull(preparedRun);
-        var version = preparedRun.FinalArtifact is null ? 1 : CurrentSchemaVersion;
+        var hasPageOwnership = preparedRun.Segments.All(segment => !segment.FinalPageNumbers.IsDefaultOrEmpty);
+        var version = preparedRun.FinalArtifact is null ? 1 : hasPageOwnership ? CurrentSchemaVersion : 2;
         var document = new StoredPreparedRun(version, ToDocument(preparedRun));
         var bytes = JsonSerializer.SerializeToUtf8Bytes(document, SerializerOptions);
         if (bytes.Length > MaximumDocumentBytes)
@@ -54,7 +55,7 @@ public static class PreparedRunJson
             throw new JsonException("Prepared-run metadata must declare an integer schemaVersion.");
         }
 
-        if (version is not (1 or CurrentSchemaVersion))
+        if (version is not (1 or 2 or CurrentSchemaVersion))
         {
             throw new NotSupportedException($"Prepared-run schema version {version} is not supported; current version is {CurrentSchemaVersion}.");
         }
@@ -71,8 +72,26 @@ public static class PreparedRunJson
         var hasFinalArtifactField = runElement.TryGetProperty("finalArtifact", out _);
         if (version == 2 && (!hasFinalArtifactField || run.FinalArtifact is null))
             throw new JsonException("Prepared-run schema version 2 requires a final artifact identity.");
+        if (version == 3 && (!hasFinalArtifactField || run.FinalArtifact is null))
+            throw new JsonException("Prepared-run schema version 3 requires a final artifact identity.");
         if (version == 1 && hasFinalArtifactField)
             throw new JsonException("Prepared-run schema version 1 cannot contain a final artifact identity.");
+
+        var storedSegments = runElement.TryGetProperty("segments", out var segmentsElement) && segmentsElement.ValueKind == JsonValueKind.Array
+            ? segmentsElement.EnumerateArray().ToArray()
+            : throw new JsonException("Prepared-run segments are required.");
+        foreach (var segmentElement in storedSegments)
+        {
+            if (segmentElement.ValueKind != JsonValueKind.Object)
+                continue;
+            var hasPageNumbers = segmentElement.ValueKind == JsonValueKind.Object &&
+                segmentElement.TryGetProperty("finalPageNumbers", out var pageNumbersElement) &&
+                pageNumbersElement.ValueKind == JsonValueKind.Array && pageNumbersElement.GetArrayLength() > 0;
+            if (version == 3 && !hasPageNumbers)
+                throw new JsonException("Prepared-run schema version 3 requires final page ownership for every segment.");
+            if (version < 3 && segmentElement.TryGetProperty("finalPageNumbers", out _))
+                throw new JsonException($"Prepared-run schema version {version} cannot contain final page ownership.");
+        }
 
         try
         {
@@ -132,7 +151,8 @@ public static class PreparedRunJson
         segment.Index,
         segment.ItemIds.ToArray(),
         segment.CompatibilityKey,
-        ToDocument(segment.PrintSettings));
+        ToDocument(segment.PrintSettings),
+        segment.FinalPageNumbers.IsDefaultOrEmpty ? null : segment.FinalPageNumbers.ToArray());
 
     private static PrintSettingsDocument ToDocument(PrintSettings settings) => new(
         settings.Copies,
@@ -175,7 +195,8 @@ public static class PreparedRunJson
         segment.Index,
         segment.ItemIds ?? throw new JsonException("Segment itemIds are required."),
         Required(segment.CompatibilityKey, "compatibilityKey"),
-        FromDocument(segment.PrintSettings ?? throw new JsonException("Segment printSettings are required.")));
+        FromDocument(segment.PrintSettings ?? throw new JsonException("Segment printSettings are required.")),
+        segment.FinalPageNumbers);
 
     private static PrintSettings FromDocument(PrintSettingsDocument settings) => new(
         settings.Copies,
@@ -254,7 +275,8 @@ public static class PreparedRunJson
         [property: JsonRequired] int Index,
         [property: JsonRequired] string[]? ItemIds,
         [property: JsonRequired] string? CompatibilityKey,
-        [property: JsonRequired] PrintSettingsDocument? PrintSettings);
+        [property: JsonRequired] PrintSettingsDocument? PrintSettings,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int[]? FinalPageNumbers);
 
     private sealed record PrintSettingsDocument(
         [property: JsonRequired] int Copies,

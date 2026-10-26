@@ -142,7 +142,8 @@ public sealed record WindowsPrintSubmission(
     string RunNonce,
     DateTimeOffset SubmittedAtUtc,
     FinalPdfArtifact Artifact,
-    Stream PdfContent);
+    Stream PdfContent,
+    IReadOnlyList<int> FinalPageNumbers);
 
 /// <summary>All native calls are isolated here; implementations must own and dispose handles they open.</summary>
 public interface IWindowsPrintBackend

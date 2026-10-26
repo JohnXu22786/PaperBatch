@@ -352,6 +352,51 @@ internal static class CoreTests
             artifact with { Sha256 = "not-a-hash" }));
     }
 
+    internal static void PreparedRunV3PersistsFinalPageOwnership()
+    {
+        var artifact = new FinalPdfArtifact("artifact_" + Hash, Hash, 2048, 4);
+        var segment = CreateSegment("item-1") with { FinalPageNumbers = [1, 2, 3, 4] };
+        var run = PreparedRun.Create("run-with-page-ownership", FixedTime, Hash,
+            [CreateItem() with { ItemId = "item-1" }], [segment], artifact);
+
+        var json = PreparedRunJson.Serialize(run);
+        using var parsed = JsonDocument.Parse(json);
+        Assert.Equal(3, parsed.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.True(parsed.RootElement.GetProperty("run").GetProperty("segments")[0]
+            .GetProperty("finalPageNumbers").EnumerateArray().Select(page => page.GetInt32())
+            .SequenceEqual([1, 2, 3, 4]));
+        var restored = PreparedRunJson.Parse(Encoding.UTF8.GetBytes(json));
+        Assert.True(restored.Segments[0].FinalPageNumbers.SequenceEqual([1, 2, 3, 4]));
+        Assert.Equal(json, PreparedRunJson.Serialize(restored));
+
+        var missingOwnership = JsonNode.Parse(json)!.AsObject();
+        missingOwnership["run"]!["segments"]![0]!.AsObject().Remove("finalPageNumbers");
+        Assert.Throws<JsonException>(() => PreparedRunJson.Parse(Encoding.UTF8.GetBytes(missingOwnership.ToJsonString())));
+
+        var emptyOwnership = JsonNode.Parse(json)!.AsObject();
+        emptyOwnership["run"]!["segments"]![0]!["finalPageNumbers"] = new JsonArray();
+        Assert.Throws<JsonException>(() => PreparedRunJson.Parse(Encoding.UTF8.GetBytes(emptyOwnership.ToJsonString())));
+    }
+
+    internal static void PreparedRunV3RejectsInterleavedSegmentPageRanges()
+    {
+        var artifact = new FinalPdfArtifact("artifact_" + Hash, Hash, 2048, 4);
+        var first = CreateItem() with { ItemId = "item-1" };
+        var second = CreateItem() with { ItemId = "item-2" };
+        var segments = new[]
+        {
+            CreateSegment(first.ItemId) with { Index = 0, FinalPageNumbers = [1, 2] },
+            CreateSegment(second.ItemId) with { SegmentId = "segment-2", Index = 1, FinalPageNumbers = [3, 4] }
+        };
+        var validJson = PreparedRunJson.Serialize(PreparedRun.Create("run-interleaved-pages", FixedTime, Hash,
+            [first, second], segments, artifact));
+        var interleaved = JsonNode.Parse(validJson)!.AsObject();
+        interleaved["run"]!["segments"]![0]!["finalPageNumbers"] = new JsonArray(1, 3);
+        interleaved["run"]!["segments"]![1]!["finalPageNumbers"] = new JsonArray(2, 4);
+
+        Assert.Throws<JsonException>(() => PreparedRunJson.Parse(Encoding.UTF8.GetBytes(interleaved.ToJsonString())));
+    }
+
     internal static void PreparedRunJsonRejectsNullArrayEntries()
     {
         var json = PreparedRunJson.Serialize(CreateRun("null-entry-run", "null-entry-segment"));

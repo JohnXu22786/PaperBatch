@@ -12,6 +12,7 @@ public sealed class WindowsPrintCoordinator(
     Func<string>? nonceFactory = null,
     RenderArtifactStore? artifacts = null)
 {
+    private const int MaximumRasterizedPageCount = 500;
     private readonly Func<string> _nonceFactory = nonceFactory ?? (() => Guid.NewGuid().ToString("N"));
 
     /// <summary>Submits ready segments in order and stops at the first non-accepted result.</summary>
@@ -22,7 +23,13 @@ public sealed class WindowsPrintCoordinator(
         ArgumentNullException.ThrowIfNull(preparedRun);
         ArgumentException.ThrowIfNullOrWhiteSpace(idempotencyKeyPrefix);
         var results = new List<PrintSubmissionResult>();
-        foreach (var job in store.GetJobs(preparedRun.RunId))
+        var jobs = store.GetJobs(preparedRun.RunId).ToArray();
+        if (preparedRun.Segments.All(segment => !segment.FinalPageNumbers.IsDefaultOrEmpty) &&
+            jobs.All(job => job.SegmentIndex >= 0 && job.SegmentIndex < preparedRun.Segments.Length))
+        {
+            jobs = jobs.OrderBy(job => preparedRun.Segments[job.SegmentIndex].FinalPageNumbers[0]).ToArray();
+        }
+        foreach (var job in jobs)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (job.State is JobState.AcceptedByOs or JobState.OsProcessing or JobState.OsReportsComplete) continue;
@@ -81,6 +88,26 @@ public sealed class WindowsPrintCoordinator(
         }
         var segment = preparedRun.Segments.SingleOrDefault(value => value.Index == job.SegmentIndex)
             ?? throw new InvalidDataException("The persisted job refers to a missing prepared segment.");
+        IReadOnlyList<int> finalPageNumbers;
+        if (!segment.FinalPageNumbers.IsDefaultOrEmpty)
+        {
+            finalPageNumbers = segment.FinalPageNumbers;
+        }
+        else if (preparedRun.Segments.Length == 1 &&
+            segment.ItemIds.SequenceEqual(preparedRun.Items.Select(item => item.ItemId), StringComparer.Ordinal))
+        {
+            // Schema-v2 runs had no page ownership map. Preserve legacy behavior only when the
+            // sole segment is provably the complete ordered batch.
+            if (finalArtifact.PageCount > MaximumRasterizedPageCount)
+                return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job,
+                    "This final PDF exceeds the bounded print raster page limit.");
+            finalPageNumbers = Enumerable.Range(1, finalArtifact.PageCount).ToArray();
+        }
+        else
+        {
+            return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job,
+                "This stored multi-segment run has no final-PDF page ownership map. Reprepare it before printing.");
+        }
         var queueIdentity = segment.PrintSettings.PrinterId;
         if (string.IsNullOrWhiteSpace(queueIdentity))
             return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job, "A printer queue must be explicitly selected.");
@@ -138,7 +165,7 @@ public sealed class WindowsPrintCoordinator(
         {
             pdfContent.Position = 0;
             var receipt = await backend.SubmitAsync(
-                new WindowsPrintSubmission(options, segment, nonce, atUtc.ToUniversalTime(), finalArtifact, pdfContent), cancellationToken).ConfigureAwait(false);
+                new WindowsPrintSubmission(options, segment, nonce, atUtc.ToUniversalTime(), finalArtifact, pdfContent, finalPageNumbers), cancellationToken).ConfigureAwait(false);
             if (!string.Equals(receipt.QueueIdentity, queueIdentity, StringComparison.Ordinal) ||
                 !string.Equals(receipt.RunNonce, nonce, StringComparison.Ordinal) ||
                 (receipt.DriverName is not null && !string.Equals(receipt.DriverName, current.DriverName, StringComparison.Ordinal)) ||

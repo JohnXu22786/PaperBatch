@@ -1,4 +1,5 @@
 using PaperBatch.Core.Layout;
+using PaperBatch.Core.Domain;
 using System.Collections.Immutable;
 
 internal static class LayoutTests
@@ -59,6 +60,49 @@ internal static class LayoutTests
         Assert.Equal(3, result.Pages.Length);
         Assert.True(result.Pages[0].SegmentKey != result.Pages[1].SegmentKey);
         Assert.True(result.Pages[0].SegmentKey != result.Pages[2].SegmentKey);
+    }
+
+    internal static void SegmentPageOwnershipFollowsComposedLayoutOrder()
+    {
+        var firstSettings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);
+        var secondSettings = firstSettings with { Media = "A4" };
+        var layout = LayoutCompiler.Compile(
+        [
+            new LayoutDocument("first", [new(612, 792), new(612, 792)], "Letter"),
+            new LayoutDocument("second", [new(595, 842)], "A4")
+        ],
+        new(CopyOrder: CopyOrder.PerDocument, Duplex: true, SeparateFilesOnFront: true,
+            AddFrontCover: true, AddSeparatorsBetweenFiles: true));
+        var segments = new[]
+        {
+            new CompatibleSegment("first-segment", 0, ["first"], "compat-first", firstSettings),
+            new CompatibleSegment("second-segment", 1, ["second"], "compat-second", secondSettings)
+        };
+
+        var mapped = SegmentPageOwnership.Assign(layout, segments);
+
+        Assert.True(layout.Succeeded);
+        Assert.True(mapped[0].FinalPageNumbers.SequenceEqual([1, 2, 3, 4]));
+        Assert.True(mapped[1].FinalPageNumbers.SequenceEqual(Enumerable.Range(5, layout.Pages.Length - 4)));
+        Assert.True(mapped.SelectMany(segment => segment.FinalPageNumbers).Order().SequenceEqual(Enumerable.Range(1, layout.Pages.Length)));
+    }
+
+    internal static void SegmentPageOwnershipRejectsInterleavedPrintSegments()
+    {
+        var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);
+        var layout = LayoutCompiler.Compile([Doc("first", 1), Doc("second", 1)], new(Copies: 2));
+        var segments = new[]
+        {
+            new CompatibleSegment("first-segment", 0, ["first"], "compat-first", settings),
+            new CompatibleSegment("second-segment", 1, ["second"], "compat-second", settings)
+        };
+        Assert.True(layout.Succeeded);
+
+        var message = string.Empty;
+        try { _ = SegmentPageOwnership.Assign(layout, segments); }
+        catch (InvalidDataException error) { message = error.Message; }
+
+        Assert.Contains("interleaves print segments", message);
     }
 
     internal static void DuplexFileBoundariesInsertBlankBackFace()
