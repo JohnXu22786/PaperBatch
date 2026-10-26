@@ -129,7 +129,7 @@ public sealed class SqliteRunStore
         EnsureInitialized();
         ArgumentNullException.ThrowIfNull(preparedRun);
         ArgumentNullException.ThrowIfNull(retention);
-        ValidateIdempotencyKey(idempotencyKey);
+        ValidateIdempotencyKey(idempotencyKey, nameof(idempotencyKey));
         if (retention.ExpiresAtUtc <= preparedRun.CreatedAtUtc)
         {
             throw new ArgumentException("Retention expiry must be later than the run creation time.", nameof(retention));
@@ -208,7 +208,7 @@ public sealed class SqliteRunStore
     public StoredRun? GetRunByRequestKey(string requestKey)
     {
         EnsureInitialized();
-        ValidateIdempotencyKey(requestKey);
+        ValidateIdempotencyKey(requestKey, nameof(requestKey));
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT run_id FROM runs WHERE request_key = $requestKey;";
@@ -388,7 +388,7 @@ public sealed class SqliteRunStore
     public JobOperationResult BeginSubmission(string jobId, string idempotencyKey, DateTimeOffset atUtc)
     {
         EnsureInitialized();
-        ValidateIdempotencyKey(idempotencyKey);
+        ValidateIdempotencyKey(idempotencyKey, nameof(idempotencyKey));
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
         var job = ReadJob(connection, transaction, jobId)
@@ -435,7 +435,7 @@ public sealed class SqliteRunStore
     public JobOperationResult RecordOsReceipt(string jobId, string idempotencyKey, OsJobReceipt receipt, DateTimeOffset atUtc)
     {
         EnsureInitialized();
-        ValidateIdempotencyKey(idempotencyKey);
+        ValidateIdempotencyKey(idempotencyKey, nameof(idempotencyKey));
         ArgumentNullException.ThrowIfNull(receipt);
         ValidateReceipt(receipt);
         var normalizedReceipt = receipt with { SubmittedAtUtc = receipt.SubmittedAtUtc.ToUniversalTime() };
@@ -747,11 +747,11 @@ public sealed class SqliteRunStore
         }
     }
 
-    private static void ValidateIdempotencyKey(string value)
+    internal static void ValidateIdempotencyKey(string? value, string parameterName)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > MaximumIdempotencyKeyLength || value.Any(char.IsControl))
         {
-            throw new ArgumentException("Idempotency keys must be nonempty, bounded, and contain no control characters.", nameof(value));
+            throw new ArgumentException("Idempotency keys must be nonempty, bounded, and contain no control characters.", parameterName);
         }
     }
 

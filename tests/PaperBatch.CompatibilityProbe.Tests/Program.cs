@@ -162,6 +162,8 @@ var tests = new List<(string Name, Action Run)>
     ("run submission proceeds sequentially and stops without resuming unknown segments", PrintingTests.RunSubmissionIsSequentialAndDoesNotResumeUnknownSegments),
     ("submission rejects legacy runs without a final artifact", PrintingTests.SubmissionRejectsLegacyRunWithoutFinalArtifact),
     ("prepared artifact pipeline composes ordered immutable snapshots", PreparedArtifactCoordinatorTests.PipelineComposesOrderedSnapshotsAndPersistsExactFinalPdf),
+    ("preparation validates idempotency keys before reading inputs", PreparedArtifactCoordinatorTests.PreparationRejectsInvalidIdempotencyKeysBeforeReadingInputs),
+    ("valid preparation idempotency keys replay the persisted run", PreparedArtifactCoordinatorTests.ValidPreparationIdempotencyKeyReplaysThePersistedRun),
     ("prepared-run invariants reject invalid hashes and copy collections", CoreTests.PreparedRunInvariantsRejectInvalidHashesAndCopyCollections),
     ("prepared-run v2 persists final artifact and reads legacy v1", CoreTests.PreparedRunV2PersistsFinalArtifactAndReadsLegacyV1),
     ("prepared-run validates renderer media type syntax", CoreTests.PreparedRunValidatesRendererMediaTypeSyntax),
