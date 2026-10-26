@@ -1111,7 +1111,7 @@ sealed class FakeSharedPreparedBatchSource : IQueueEditingPresentationSource, IQ
         var run = PreparedRun.Create(runId, now, new string('d', 64), preparedItems,
             [new CompatibleSegment("segment", 0, preparedItems.Select(item => item.ItemId), "compat",
                 new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit))],
-            new FinalPdfArtifact($"artifact-{runId}", new string('e', 64), 100, 1));
+            new FinalPdfArtifact($"artifact_{new string('e', 64)}", new string('e', 64), 100, 1));
         foreach (var item in _items) RegisterPreparedRun(item.Id, run);
         var storedRun = new StoredRun(run.RunId, now, RunState.Ready, "{}",
             new RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true));
