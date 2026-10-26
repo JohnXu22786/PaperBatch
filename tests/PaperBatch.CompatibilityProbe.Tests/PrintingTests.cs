@@ -166,6 +166,16 @@ internal static class PrintingTests
             .GetAwaiter().GetResult();
         Assert.Equal(PrintSubmissionStatus.FailedBeforeSubmit, knownFailure.Status);
         Assert.Equal(JobState.FailedBeforeSubmit, knownFailureFixture.Store.GetJob(knownFailureFixture.Job.JobId)!.State);
+
+        using var cancellationFixture = new Fixture();
+        var cancellationBackend = new TestOnlySimulatedPrintBackend(Capabilities()) { ThrowCancellationBeforeSubmit = true };
+        var cancellationCoordinator = new WindowsPrintCoordinator(cancellationFixture.Store, cancellationBackend,
+            static () => "known-cancellation", cancellationFixture.Artifacts);
+        var cancellation = cancellationCoordinator.SubmitAsync(cancellationFixture.Job.JobId,
+            cancellationFixture.PreparedRun, "known-cancellation-key", FixedTime).GetAwaiter().GetResult();
+        Assert.Equal(PrintSubmissionStatus.FailedBeforeSubmit, cancellation.Status);
+        Assert.Equal(JobState.FailedBeforeSubmit,
+            cancellationFixture.Store.GetJob(cancellationFixture.Job.JobId)!.State);
     }
 
     internal static void StatusAndCancellationAreScopedToOwnedReceipt()
@@ -826,6 +836,7 @@ internal static class PrintingTests
         public PrinterCapabilitySnapshot? CapabilitiesOnSecondRead { get; init; }
         public bool ThrowAfterSubmitSideEffect { get; init; }
         public bool ThrowBeforeSubmit { get; init; }
+        public bool ThrowCancellationBeforeSubmit { get; init; }
         public bool ThrowCapabilityAfterSubmit { get; init; }
         public bool CancelReturnsFalse { get; set; }
         public int SubmissionCount => Volatile.Read(ref _submissionCount);
@@ -851,6 +862,8 @@ internal static class PrintingTests
             LastArtifactId = submission.Artifact.ArtifactId;
             using (var content = new MemoryStream()) { submission.PdfContent.CopyTo(content); LastPdfBytes = content.ToArray(); }
             if (ThrowBeforeSubmit) throw new PrintSubmissionException("native backend rejected before StartDoc", mayHaveReachedOs: false);
+            if (ThrowCancellationBeforeSubmit) throw new PrintSubmissionException("cancelled before StartDoc", mayHaveReachedOs: false,
+                new OperationCanceledException(cancellationToken));
             if (ThrowCapabilityAfterSubmit) throw new PrintCapabilityException("capabilities changed inside submit");
             if (ThrowAfterSubmitSideEffect) throw new IOException("receipt channel interrupted after acceptance");
             var receipt = new OsJobReceipt(LastQueueIdentity, "job-1", submission.RunNonce, FixedTime,

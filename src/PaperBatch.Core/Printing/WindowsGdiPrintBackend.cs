@@ -109,11 +109,11 @@ public sealed class WindowsGdiPrintBackend(
     public async Task<OsJobReceipt> SubmitAsync(WindowsPrintSubmission submission, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(submission);
-        cancellationToken.ThrowIfCancellationRequested();
         var queue = submission.Options.QueueIdentity;
         PrinterCapabilitySnapshot initial;
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             initial = await native.GetCapabilitiesAsync(queue, cancellationToken).ConfigureAwait(false);
             EnsureOptions(submission, initial);
         }
@@ -137,7 +137,8 @@ public sealed class WindowsGdiPrintBackend(
             pages = await rasterizer.RasterizeAsync(content, submission.Artifact.PageCount, cancellationToken).ConfigureAwait(false);
             ValidatePages(pages, submission.Artifact.PageCount);
         }
-        catch (Exception error) when (error is not OperationCanceledException)
+        catch (PrintSubmissionException) { throw; }
+        catch (Exception error)
         {
             throw new PrintSubmissionException("PDF preflight/rasterization failed before StartDoc.", mayHaveReachedOs: false, error);
         }
