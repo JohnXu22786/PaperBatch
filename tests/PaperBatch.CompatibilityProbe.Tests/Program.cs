@@ -215,6 +215,7 @@ var tests = new List<(string Name, Action Run)>
     ("GDI backend reports immediate cancellation as known no effect", GdiBackendTests.InitialCancellationIsKnownNoEffect),
     ("GDI backend reports rasterization cancellation as known no effect", GdiBackendTests.RasterizationCancellationIsKnownNoEffect),
     ("GDI backend keeps cancellation after StartDoc ambiguous", GdiBackendTests.CancellationAfterStartDocRemainsAmbiguous),
+    ("native GDI adapter classifies cancellation before StartDoc as known no effect", GdiBackendTests.NativeAdapterCancellationBeforeStartDocIsKnownNoEffect),
     ("GDI backend keeps post-StartDoc failures ambiguous and disposes the document", GdiBackendTests.PreservesAmbiguityAndCleansUp),
     ("GDI backend rejects unsupported settings before StartDoc", GdiBackendTests.RejectsUnsupportedSettingsBeforeStartDoc),
     ("GDI backend rejects bytes that do not match the artifact receipt", GdiBackendTests.RejectsArtifactBytesThatDoNotMatchReceipt),

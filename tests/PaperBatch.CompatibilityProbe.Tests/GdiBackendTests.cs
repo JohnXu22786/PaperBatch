@@ -92,6 +92,23 @@ internal static class GdiBackendTests
         Assert.True(native.LastDocument!.Disposed);
     }
 
+    internal static void NativeAdapterCancellationBeforeStartDocIsKnownNoEffect()
+    {
+        var pdf = RendererTests.OnePagePdf();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var adapter = new WindowsGdiNativeAdapter();
+
+        var mayHaveReachedOs = true;
+        try
+        {
+            _ = adapter.StartDocAsync(Submission(pdf, Artifact(pdf)), [], cancellation.Token).GetAwaiter().GetResult();
+        }
+        catch (PrintSubmissionException error) { mayHaveReachedOs = error.MayHaveReachedOs; }
+
+        Assert.False(mayHaveReachedOs);
+    }
+
     internal static void PreservesAmbiguityAndCleansUp()
     {
         var pdf = RendererTests.OnePagePdf();

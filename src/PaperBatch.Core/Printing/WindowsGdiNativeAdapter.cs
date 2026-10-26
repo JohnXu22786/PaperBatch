@@ -77,9 +77,9 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
     public Task<IWindowsGdiDocument> StartDocAsync(WindowsPrintSubmission submission,
         IReadOnlyList<WindowsPrintRasterPage> pages, CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfCancellationRequestedBeforeStartDoc(cancellationToken);
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("GDI/Winspool printing requires Windows.");
-        var snapshot = GetCapabilitiesAsync(submission.Options.QueueIdentity, cancellationToken).GetAwaiter().GetResult();
+        var snapshot = GetCapabilitiesBeforeStartDoc(submission.Options.QueueIdentity, cancellationToken);
         if (!string.Equals(snapshot.Fingerprint, submission.Options.CapabilityFingerprint, StringComparison.Ordinal))
             throw new PrintSubmissionException("Queue capabilities changed at the native StartDoc boundary.", false);
 
@@ -90,7 +90,7 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
         IntPtr dc = IntPtr.Zero;
         try
         {
-            var openedQueue = GetCapabilitiesAsync(submission.Options.QueueIdentity, cancellationToken).GetAwaiter().GetResult();
+            var openedQueue = GetCapabilitiesBeforeStartDoc(submission.Options.QueueIdentity, cancellationToken);
             if (!string.Equals(openedQueue.Fingerprint, snapshot.Fingerprint, StringComparison.Ordinal))
                 throw new PrintSubmissionException("The selected queue changed while the native printer handle was being opened.", false);
             var modeSize = DocumentProperties(IntPtr.Zero, printer, snapshot.DisplayName, IntPtr.Zero, IntPtr.Zero, 0);
@@ -129,6 +129,7 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
             try
             {
                 var info = new DocInfo { Size = Marshal.SizeOf<DocInfo>(), DocumentName = documentName };
+                ThrowIfCancellationRequestedBeforeStartDoc(cancellationToken);
                 var jobId = StartDoc(dc, ref info);
                 if (jobId <= 0) throw NativeFailure("GDI StartDoc failed; the OS outcome is uncertain.", true);
                 return Task.FromResult<IWindowsGdiDocument>(new GdiDocument(dc, printer, modeMemory, jobId, pages, submission.Segment.PrintSettings.ScalingMode));
@@ -141,6 +142,24 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
             if (modeMemory != IntPtr.Zero) Marshal.FreeHGlobal(modeMemory);
             printer.Dispose();
             throw;
+        }
+    }
+
+    private PrinterCapabilitySnapshot GetCapabilitiesBeforeStartDoc(string queueIdentity, CancellationToken cancellationToken)
+    {
+        try { return GetCapabilitiesAsync(queueIdentity, cancellationToken).GetAwaiter().GetResult(); }
+        catch (OperationCanceledException error)
+        {
+            throw new PrintSubmissionException("GDI submission was canceled before StartDoc.", mayHaveReachedOs: false, error);
+        }
+    }
+
+    private static void ThrowIfCancellationRequestedBeforeStartDoc(CancellationToken cancellationToken)
+    {
+        try { cancellationToken.ThrowIfCancellationRequested(); }
+        catch (OperationCanceledException error)
+        {
+            throw new PrintSubmissionException("GDI submission was canceled before StartDoc.", mayHaveReachedOs: false, error);
         }
     }
 
