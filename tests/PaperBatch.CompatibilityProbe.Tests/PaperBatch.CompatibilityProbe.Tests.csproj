@@ -9,6 +9,8 @@
     <ProjectReference Include="../../src/PaperBatch.CompatibilityProbe/PaperBatch.CompatibilityProbe.csproj" />
     <ProjectReference Include="../../src/PaperBatch.Core/PaperBatch.Core.csproj" />
     <None Include="Fixtures/**/*.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../fixtures/synthetic_documents/synthetic_two_page.pdf" Link="Fixtures/synthetic_two_page.pdf" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../fixtures/print_batch/synthetic_batch_marker.png" Link="Fixtures/synthetic_batch_marker.png" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/PaperBatch.Cli/PaperBatch.Cli.csproj" />

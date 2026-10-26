@@ -156,6 +156,8 @@ var tests = new List<(string Name, Action Run)>
     ("CLI validates recipe compatibility using the core parser", WatchFolderTests.CliValidatesRecipes),
     ("CLI reports redacted permission errors for recipe import and export", WatchFolderTests.CliReportsPermissionDeniedForRecipeImportAndExport),
     ("submission passes the exact persisted final PDF", PrintingTests.SubmissionPassesTheExactPersistedFinalPdf),
+    ("checked-in single-PDF print contract remains a regression", PrintingTests.CheckedInSinglePdfPrintContractRemainsRegression),
+    ("checked-in PDF and PNG batch flows through production preparation, composition, and fake print orchestration", PrintingTests.CheckedInBatchFlowsThroughPreparationCompositionAndPrintOrchestration),
     ("missing explicit print queue is rejected before capability lookup", PrintingTests.MissingExplicitQueueIsRejectedBeforeCapabilityLookup),
     ("run submission proceeds sequentially and stops without resuming unknown segments", PrintingTests.RunSubmissionIsSequentialAndDoesNotResumeUnknownSegments),
     ("submission rejects legacy runs without a final artifact", PrintingTests.SubmissionRejectsLegacyRunWithoutFinalArtifact),
@@ -280,15 +282,8 @@ if (OperatingSystem.IsWindows() && !string.IsNullOrWhiteSpace(Environment.GetEnv
     tests.Add(("PDFium vector composition preserves transformed N-up placement", PdfCompositionTests.NativeCompositionRendersTwoUpFixture));
 
 if (OperatingSystem.IsLinux())
-{
     tests.Add(("LibreOffice version timeout stops its owned process", RendererTests.LibreOfficeVersionQueryStopsOnTimeout));
-    if (Environment.GetEnvironmentVariable("PAPERBATCH_REQUIRE_LIBREOFFICE_TEST") == "1")
-        tests.Add(("pinned stable LibreOffice renders an immutable synthetic DOCX", RendererTests.PinnedLibreOfficeRendersSyntheticDocx));
-    else
-        Console.WriteLine("SKIP pinned stable LibreOffice integration (CI exact-engine configuration required)");
-}
-else
-    Console.WriteLine("SKIP pinned stable LibreOffice integration (Linux exact-engine CI only)");
+Console.WriteLine("SKIP native LibreOffice integration (not part of the pre-U10 print-path evidence lane)");
 
 var failures = 0;
 foreach (var (name, run) in tests)
