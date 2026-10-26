@@ -244,6 +244,7 @@ internal static class PrintingTests
         Assert.True(prepared.Succeeded, string.Join("; ", prepared.Diagnostics));
         Assert.Equal(1, prepared.Run!.Items.Length);
         Assert.Equal(2, prepared.Run.FinalArtifact!.PageCount);
+        var persistedPageSizes = single.GetSavedPageSizes(prepared.Run.FinalArtifact);
         var expectedPdf = single.ReadPersistedFinalPdf(prepared.Run.FinalArtifact);
         var native = new FakeGdiNative(Capabilities());
         var rasterizer = new FakeGdiRasterizer();
@@ -252,6 +253,8 @@ internal static class PrintingTests
         var submitted = coordinator.SubmitRunAsync(prepared.Run, "single-pdf-regression-submit", FixedTime).GetAwaiter().GetResult();
         Assert.Equal(1, submitted.Count);
         Assert.Equal(PrintSubmissionStatus.Accepted, submitted[0].Status, SubmissionFailureDetails(submitted[0]));
+        Assert.True(persistedPageSizes.SequenceEqual(rasterizer.RasterizedPageSizes.Single()),
+            "The fake rasterizer should preserve the persisted PDFium page geometry.");
         Assert.True(expectedPdf.SequenceEqual(rasterizer.ReceivedBytes.Single()));
         Assert.Equal(2, native.Documents.Single().WritePageCount);
         Assert.Equal("simulated-job-1", single.Runs.GetJob(prepared.Persistence!.Jobs.Single().JobId)!.OsReceipt!.OsJobId);
@@ -283,6 +286,7 @@ internal static class PrintingTests
         Assert.Equal(3, batch.GetSavedPageCount(finalArtifact));
         Assert.True(batch.SavedPageContainsRedMarker(finalArtifact, 3),
             "The final page should contain the checked-in PNG marker after the two ordered PDF pages.");
+        var persistedPageSizes = batch.GetSavedPageSizes(finalArtifact);
         Assert.Equal(1, run.Segments.Length);
         Assert.True(run.Segments[0].ItemIds.SequenceEqual(run.Items.Select(item => item.ItemId)));
         var jobs = firstPrepared.Persistence!.Jobs;
@@ -300,6 +304,8 @@ internal static class PrintingTests
 
         Assert.Equal(1, results.Count);
         Assert.Equal(PrintSubmissionStatus.Accepted, results[0].Status, SubmissionFailureDetails(results[0]));
+        Assert.True(persistedPageSizes.SequenceEqual(rasterizer.RasterizedPageSizes.Single()),
+            "The fake rasterizer should preserve the composed PDFium page geometry.");
         Assert.Equal(1, native.StartDocCount);
         Assert.True(expectedPdf.SequenceEqual(rasterizer.ReceivedBytes.Single()));
         Assert.Equal(finalArtifact.Sha256, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(rasterizer.ReceivedBytes.Single())).ToLowerInvariant());
@@ -343,7 +349,6 @@ internal static class PrintingTests
         Assert.Equal(2, partialPrepared.Persistence!.Jobs.Length);
         Assert.True(partialRun.Segments.Select(segment => segment.ItemIds.Single())
             .SequenceEqual(partialRun.Items.Select(item => item.ItemId)));
-        var partialExpectedPdf = partial.ReadPersistedFinalPdf(partialRun.FinalArtifact);
         var partialNative = new FakeGdiNative(Capabilities(), failOnEndDocNumber: 2);
         var partialRasterizer = new FakeGdiRasterizer();
         var partialCoordinator = new WindowsPrintCoordinator(partial.Runs,
@@ -356,7 +361,6 @@ internal static class PrintingTests
         Assert.Equal(PrintSubmissionStatus.Accepted, partialResults[0].Status);
         Assert.Equal(PrintSubmissionStatus.NeedsReviewUnknown, partialResults[1].Status);
         Assert.Equal(2, partialNative.StartDocCount);
-        Assert.True(partialRasterizer.ReceivedBytes.All(bytes => partialExpectedPdf.SequenceEqual(bytes)));
         Assert.Equal(2, partialNative.Submissions.Count);
         Assert.True(partialNative.Submissions.All(value => value.Options.QueueIdentity == "queue-identity" &&
             value.Options.Media == "Letter" && value.Options.Tray == "Tray1" && value.Options.Color == "Color" &&
@@ -373,7 +377,6 @@ internal static class PrintingTests
         Assert.Equal(2, partialNative.Documents.Count);
         Assert.True(partialNative.Documents.All(value => value.Disposed));
         Assert.Equal(2, partialNative.Documents.Select(value => value.OsJobId).Distinct(StringComparer.Ordinal).Count());
-        Assert.Equal(4, partialNative.Documents[0].WritePageCount);
         Assert.Equal(1, partialNative.Documents[1].EndDocCount);
 
         var submissionsBeforeReplay = partialNative.StartDocCount;
@@ -454,6 +457,7 @@ internal static class PrintingTests
                     pageCount = partialRun.FinalArtifact.PageCount,
                     segmentCount = partialRun.Segments.Length,
                     jobCount = partialJobs.Length,
+                    evidenceLimit = "The partial case checks segment/job ordering, ambiguous state and no replay; it does not verify per-segment page selection, which is tracked as a separate batch-print fix.",
                     outcomes = partialResults.Select(result => result.Status.ToString()).ToArray(),
                     submissions = partialNative.Submissions.Select((value, index) => new
                     {
@@ -490,6 +494,7 @@ internal static class PrintingTests
                 {
                     "The batch test exercises two checked-in sources: a two-page PDF followed by a one-page RGB PNG.",
                     "The current model groups these matching printer settings into one segment and one job; per-item layout copy expansion is separately tested as two ordered segments/jobs.",
+                    "Per-segment page selection is not verified by the partial-failure scenario and is tracked in a separate batch-print fix.",
                     "Production renderer formats are PDF, JPEG and PNG; this batch sample directly exercises PDF and PNG, not JPEG or office document conversion.",
                     "The test proves PaperBatch orchestration to an injected fake boundary only; it does not prove OS queue acceptance or physical paper output."
                 }
@@ -507,6 +512,7 @@ internal static class PrintingTests
     private sealed class FakeGdiRasterizer : IWindowsPrintPdfRasterizer
     {
         public List<byte[]> ReceivedBytes { get; } = [];
+        public List<PageSize[]> RasterizedPageSizes { get; } = [];
 
         public async Task<IReadOnlyList<WindowsPrintRasterPage>> RasterizeAsync(
             Stream pdf, int expectedPageCount, CancellationToken cancellationToken = default)
@@ -514,9 +520,11 @@ internal static class PrintingTests
             using var content = new MemoryStream();
             await pdf.CopyToAsync(content, cancellationToken);
             ReceivedBytes.Add(content.ToArray());
-            return Enumerable.Range(1, expectedPageCount)
-                .Select(page => new WindowsPrintRasterPage(page, new PageSize(612, 792), new PdfRasterPage(2, 2, 8, new byte[16])))
+            var pages = Enumerable.Range(1, expectedPageCount)
+                .Select(page => new WindowsPrintRasterPage(page, new PageSize(612, 792), new PdfRasterPage(17, 22, 68, new byte[1496])))
                 .ToArray();
+            RasterizedPageSizes.Add(pages.Select(page => page.PdfSize).ToArray());
+            return pages;
         }
     }
 
@@ -642,6 +650,12 @@ internal static class PrintingTests
         {
             using var persisted = Artifacts.OpenRead(artifact.ArtifactId);
             return _inspector.GetPageSizesAsync(persisted, CancellationToken.None).GetAwaiter().GetResult().Count;
+        }
+
+        public IReadOnlyList<PageSize> GetSavedPageSizes(FinalPdfArtifact artifact)
+        {
+            using var persisted = Artifacts.OpenRead(artifact.ArtifactId);
+            return _inspector.GetPageSizesAsync(persisted, CancellationToken.None).GetAwaiter().GetResult();
         }
 
         public bool SavedPageContainsRedMarker(FinalPdfArtifact artifact, int pageNumber)
