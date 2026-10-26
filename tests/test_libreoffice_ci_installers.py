@@ -17,24 +17,24 @@ import resolve_macos_libreoffice_engine
 
 
 class LibreOfficeCiInstallerTests(unittest.TestCase):
-    def test_every_hosted_os_lane_uses_the_standard_matrix_and_corpus_report(self):
+    def test_general_matrix_keeps_import_evidence_and_print_contract_is_windows_only(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         windows = (ROOT / "tools/install_libreoffice_windows.ps1").read_text(encoding="utf-8")
         macos = (ROOT / "tools/install_libreoffice_macos.sh").read_text(encoding="utf-8")
 
         self.assertIn("os: [ubuntu-latest, windows-latest, macos-latest]", workflow)
-        self.assertIn("tools/install_libreoffice_windows.ps1", workflow)
-        self.assertIn("tools/install_libreoffice_macos.sh", workflow)
-        self.assertIn("tools/run_libreoffice_corpus.py", workflow)
-        self.assertIn("build_libreoffice_ci_summary.py", workflow)
+        self.assertNotIn("LibreOffice", workflow)
+        self.assertNotIn("run_libreoffice_corpus.py", workflow)
+        self.assertNotIn("synthetic-ooxml-libreoffice-report", workflow)
         self.assertIn("build_application_import_ci_summary.py", workflow)
+        self.assertIn("PB_JOB_NAME: Windows batch print contract", workflow)
+        self.assertIn("${{ runner.os == 'Windows' && format('{0}/windows-batch-print-contract.json', runner.temp) || '' }}", workflow)
+        self.assertIn("name: windows-batch-print-contract", workflow)
         self.assertIn("real production queue import reports per-format intake and renderer outcomes", (ROOT / "tests/PaperBatch.Desktop.Tests/Program.cs").read_text(encoding="utf-8"))
         app_import_test = (ROOT / "tests/PaperBatch.Desktop.Tests/ApplicationImportEvidenceTests.cs").read_text(encoding="utf-8")
         self.assertIn("new ProductionPresentationSources", app_import_test)
         self.assertIn("presentation.ImportAsync", app_import_test)
-        self.assertIn("name: synthetic-ooxml-libreoffice-report-${{ matrix.os }}", workflow)
         self.assertIn("name: paperbatch-application-import-${{ runner.os }}", workflow)
-        self.assertNotIn("runner.os == 'Linux'\n        shell: bash\n        run:\n          report=\"$RUNNER_TEMP/paperbatch-lo-corpus-report.json\"", workflow)
         self.assertNotIn("releases/latest", windows)
         self.assertIn("downloadarchive.documentfoundation.org/libreoffice/old/$version/win/x86_64", windows)
         self.assertIn("downloadarchive.documentfoundation.org/libreoffice/old/${version}/mac/${architecture}", macos)
@@ -44,42 +44,26 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertIn("26.2.2.2", windows)
         self.assertIn("26.2.2.2", macos)
 
-    def test_windows_and_linux_installer_version_checks_require_a_token_boundary(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    def test_windows_installer_version_check_requires_a_token_boundary(self):
         windows = (ROOT / "tools/install_libreoffice_windows.ps1").read_text(encoding="utf-8")
 
         self.assertIn("$versionPattern = '^LibreOffice\\s+' + [regex]::Escape($version) + '(?=\\s|$)'", windows)
         self.assertIn('$versionOutput -notmatch $versionPattern', windows)
-        self.assertIn(r'[[ "$lo_version_output" =~ ^LibreOffice[[:space:]]+26\.2\.2\.2([[:space:]]|$) ]]', workflow)
 
-    def test_temporary_renderer_runtimes_outlive_python_suites_and_cleanup_is_unconditional(self):
+    def test_only_windows_pdfium_fixture_runtime_is_cleaned_up(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        python_suites = [
-            workflow.index("id: python-tests-linux"),
-            workflow.index("id: python-tests-macos"),
-            workflow.index("id: python-tests-windows"),
-        ]
-        suite_end = max(python_suites)
-        cleanup_names = (
-            "Remove temporary Linux renderer runtimes",
-            "Remove temporary Windows LibreOffice runtime",
-            "Remove temporary macOS LibreOffice runtime",
-            "Remove temporary PDFium test runtime",
-        )
-        cleanup_positions = [workflow.index(name) for name in cleanup_names]
+        cleanup = workflow.index("Remove temporary PDFium test runtime")
+        self.assertIn("if: always() && runner.os == 'Windows'", workflow[cleanup:cleanup + 150])
+        self.assertNotIn("LibreOffice", workflow)
+        self.assertNotIn("paperbatch-lo-corpus-report", workflow)
 
-        self.assertTrue(all(position > suite_end for position in cleanup_positions))
-        self.assertTrue(all("if: always()" in workflow[position:position + 150] for position in cleanup_positions))
-        self.assertLess(max(cleanup_positions), workflow.index("Publish bounded exact-run managed and runner summary"))
-
-    def test_vendor_signatures_are_verified_before_each_installer_runs(self):
+    def test_vendor_signature_checks_remain_in_the_standalone_installer_scripts(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         windows = (ROOT / "tools/install_libreoffice_windows.ps1").read_text(encoding="utf-8")
         macos = (ROOT / "tools/install_libreoffice_macos.sh").read_text(encoding="utf-8")
 
-        self.assertIn("gpgv --status-fd=1 --keyring", workflow)
-        self.assertIn("aa2815afe97e45dc02e446c43e24232f1d78941aee1081c95d871e05d74062e8", workflow)
-        self.assertLess(workflow.index("gpgv --status-fd=1"), workflow.index('tar -xzf "$lo_archive_path"'))
+        self.assertNotIn("gpgv --status-fd=1", workflow)
+        self.assertNotIn("aa2815afe97e45dc02e446c43e24232f1d78941aee1081c95d871e05d74062e8", workflow)
         self.assertIn("C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3", windows)
         self.assertLess(windows.index("$gpgv --homedir"), windows.index("Start-Process -FilePath 'msiexec.exe'"))
         self.assertIn("C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3", macos)

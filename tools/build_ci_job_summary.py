@@ -91,6 +91,28 @@ def _report_lines(report: dict[str, Any]) -> list[str]:
                 for name, result in list(job_results.items())[:16]
             ))
 
+    batch_print = report.get("batchPrint")
+    if isinstance(batch_print, dict):
+        artifact = batch_print.get("finalArtifact")
+        artifact_pages = artifact.get("pageCount", "unknown") if isinstance(artifact, dict) else "unknown"
+        lines.append(
+            "Batch print: "
+            f"sources={_clean(batch_print.get('sourceCount', 'unknown'), 16)}, "
+            f"pages={_clean(artifact_pages, 16)}, "
+            f"segments={_clean(batch_print.get('segmentCount', 'unknown'), 16)}, "
+            f"jobs={_clean(batch_print.get('jobCount', 'unknown'), 16)}, "
+            f"simulated submission `{_clean(batch_print.get('simulatedSubmission', 'unknown'), 32)}`"
+        )
+    partial_failure = report.get("partialFailure")
+    if isinstance(partial_failure, dict):
+        lines.append(
+            "Batch partial failure: "
+            f"segments={_clean(partial_failure.get('segmentCount', 'unknown'), 16)}, "
+            f"jobs={_clean(partial_failure.get('jobCount', 'unknown'), 16)}, "
+            f"outcomes `{_clean(', '.join(map(str, partial_failure.get('outcomes', []))), 100)}`, "
+            f"automatic resubmit `{_clean(partial_failure.get('automaticResubmit', 'unknown'), 16)}`"
+        )
+
     scenarios = report.get("scenarios")
     if isinstance(scenarios, list):
         lines.append(f"Scenarios reported: {len(scenarios)}")

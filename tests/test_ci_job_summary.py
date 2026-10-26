@@ -53,6 +53,32 @@ class CiJobSummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match summary run"):
             summary_builder.render_summary(self.context, title="Evidence", report=report)
 
+    def test_batch_print_report_summary_includes_batch_and_partial_failure_counts(self) -> None:
+        report = {
+            "commit": "a" * 40,
+            "runIdentity": {"workflow": "CI", "runId": "12345", "runAttempt": "2"},
+            "batchPrint": {
+                "sourceCount": 2,
+                "finalArtifact": {"pageCount": 3},
+                "segmentCount": 1,
+                "jobCount": 1,
+                "simulatedSubmission": "passed",
+            },
+            "partialFailure": {
+                "segmentCount": 2,
+                "jobCount": 2,
+                "outcomes": ["Accepted", "NeedsReviewUnknown"],
+                "automaticResubmit": False,
+            },
+        }
+
+        result = summary_builder.render_summary(self.context, title="Windows batch print contract", report=report)
+
+        self.assertIn("Batch print: sources=2, pages=3, segments=1, jobs=1", result)
+        self.assertIn("Batch partial failure: segments=2, jobs=2", result)
+        self.assertIn("Accepted, NeedsReviewUnknown", result)
+        self.assertIn("automatic resubmit `False`", result)
+
     def test_failed_job_and_missing_report_are_never_reported_as_passed(self) -> None:
         context = {**self.context, "job_result": "failure"}
         result = summary_builder.render_summary(
