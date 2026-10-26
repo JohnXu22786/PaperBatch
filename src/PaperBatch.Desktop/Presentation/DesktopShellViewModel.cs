@@ -130,7 +130,10 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
     public PrinterQueueCapabilitySnapshot? SelectedPrinter { get => _selectedPrinter; set { if (SetProperty(ref _selectedPrinter, value)) { InvalidatePreparedQueue(); OnPropertyChanged(nameof(CanPrepareSelectedQueue)); OnPropertyChanged(nameof(CanSubmitPreparedRun)); } } }
     public IReadOnlyList<PrintJobSnapshot> PrintJobs { get => _printJobs; private set { if (SetProperty(ref _printJobs, value)) OnPropertyChanged(nameof(CanSubmitPreparedRun)); } }
     public bool CanSubmitPreparedRun => IsProductionMode && _queueSource is IPrintSubmissionPresentationSource { CanSubmitPrintJobs: true } &&
-        SelectedPrinter is not null && HasPreviewImage && !_printStatusUnavailable && PrintJobs.Count > 0 && PrintJobs.All(job => job.State == nameof(JobState.Ready)) &&
+        SelectedPrinter is not null && HasPreviewImage && !_printStatusUnavailable && PrintJobs.Count > 0 &&
+        PrintJobs.Any(job => job.State is nameof(JobState.Ready) or nameof(JobState.FailedBeforeSubmit)) &&
+        PrintJobs.All(job => job.State is nameof(JobState.Ready) or nameof(JobState.FailedBeforeSubmit) or
+            nameof(JobState.AcceptedByOs) or nameof(JobState.OsProcessing) or nameof(JobState.OsReportsComplete)) &&
         Volatile.Read(ref _printSubmissionGate) == 0;
     public bool CanRefreshPrintJobs => _queueSource is IPrintSubmissionPresentationSource { CanSubmitPrintJobs: true } && SelectedQueueItem is not null;
     public string PrintLabel => Localize("Print prepared PDF", "打印已准备的 PDF");

@@ -455,6 +455,7 @@ public static class JobStateTransitions
     public static bool IsAllowed(JobState current, JobState next) => (current, next) switch
     {
         (JobState.Ready, JobState.Submitting) => true,
+        (JobState.FailedBeforeSubmit, JobState.Submitting) => true,
         (JobState.Submitting, JobState.AcceptedByOs or JobState.FailedBeforeSubmit or JobState.NeedsReviewUnknown) => true,
         (JobState.AcceptedByOs, JobState.OsProcessing or JobState.OsReportsComplete or JobState.CancelRequested or JobState.NeedsReviewUnknown) => true,
         (JobState.OsProcessing, JobState.OsReportsComplete or JobState.CancelRequested or JobState.NeedsReviewUnknown) => true,

@@ -25,7 +25,8 @@ public sealed class WindowsPrintCoordinator(
         foreach (var job in store.GetJobs(preparedRun.RunId))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (job.State != JobState.Ready) break;
+            if (job.State is JobState.AcceptedByOs or JobState.OsProcessing or JobState.OsReportsComplete) continue;
+            if (job.State is not (JobState.Ready or JobState.FailedBeforeSubmit)) break;
             var result = await SubmitAsync(job.JobId, preparedRun,
                 $"{idempotencyKeyPrefix}-{job.JobId}", atUtc, cancellationToken).ConfigureAwait(false);
             results.Add(result);
@@ -60,7 +61,7 @@ public sealed class WindowsPrintCoordinator(
             storedArtifact.LengthBytes != finalArtifact.LengthBytes)
             throw new InvalidDataException("The final PDF artifact receipt does not match the prepared run.");
         await using var pdfContent = artifacts.OpenRead(finalArtifact.ArtifactId);
-        if (job.State != JobState.Ready)
+        if (job.State is not (JobState.Ready or JobState.FailedBeforeSubmit))
         {
             var replay = store.BeginSubmission(jobId, idempotencyKey, atUtc);
             if (replay.Job.State == JobState.Submitting)

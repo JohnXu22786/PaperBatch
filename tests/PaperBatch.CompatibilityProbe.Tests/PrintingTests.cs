@@ -176,6 +176,13 @@ internal static class PrintingTests
         Assert.Equal(PrintSubmissionStatus.FailedBeforeSubmit, cancellation.Status);
         Assert.Equal(JobState.FailedBeforeSubmit,
             cancellationFixture.Store.GetJob(cancellationFixture.Job.JobId)!.State);
+        cancellationBackend.ThrowCancellationBeforeSubmit = false;
+        var retriedCancellation = cancellationCoordinator.SubmitAsync(cancellationFixture.Job.JobId,
+            cancellationFixture.PreparedRun, "known-cancellation-key", FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
+        Assert.Equal(PrintSubmissionStatus.Accepted, retriedCancellation.Status);
+        Assert.Equal(2, cancellationBackend.SubmissionCount);
+        Assert.Equal(JobState.AcceptedByOs,
+            cancellationFixture.Store.GetJob(cancellationFixture.Job.JobId)!.State);
     }
 
     internal static void StatusAndCancellationAreScopedToOwnedReceipt()
@@ -732,6 +739,36 @@ internal static class PrintingTests
         Assert.Equal(1, uncertainBackend.SubmissionCount);
     }
 
+    internal static void RunSubmissionRetriesKnownNoEffectSegmentWithoutResubmittingAcceptedSegments()
+    {
+        using var seed = new Fixture();
+        var firstItem = seed.PreparedRun.Items[0];
+        var secondItem = firstItem with { ItemId = "item-2" };
+        var firstSegment = new CompatibleSegment("segment-1", 0, [firstItem.ItemId], "compat-1", Settings());
+        var secondSegment = new CompatibleSegment("segment-2", 1, [secondItem.ItemId], "compat-2", Settings());
+        var run = PreparedRun.Create("run-known-no-effect-retry", FixedTime, Hash, [firstItem, secondItem],
+            [firstSegment, secondSegment], seed.PreparedRun.FinalArtifact);
+
+        using var fixture = new Fixture(run);
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities()) { ThrowCancellationOnSubmissionNumber = 2 };
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "retryable-nonce", fixture.Artifacts);
+
+        var firstAttempt = coordinator.SubmitRunAsync(run, "retryable-key", FixedTime).GetAwaiter().GetResult();
+        Assert.Equal(2, firstAttempt.Count);
+        Assert.Equal(PrintSubmissionStatus.Accepted, firstAttempt[0].Status);
+        Assert.Equal(PrintSubmissionStatus.FailedBeforeSubmit, firstAttempt[1].Status);
+        Assert.Equal(JobState.AcceptedByOs, fixture.Store.GetJobs(run.RunId)[0].State);
+        Assert.Equal(JobState.FailedBeforeSubmit, fixture.Store.GetJobs(run.RunId)[1].State);
+        Assert.Equal(2, backend.SubmissionCount);
+
+        var retry = coordinator.SubmitRunAsync(run, "retryable-key", FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
+        Assert.Equal(1, retry.Count);
+        Assert.Equal(PrintSubmissionStatus.Accepted, retry[0].Status);
+        Assert.Equal(3, backend.SubmissionCount);
+        Assert.Equal(JobState.AcceptedByOs, fixture.Store.GetJobs(run.RunId)[0].State);
+        Assert.Equal(JobState.AcceptedByOs, fixture.Store.GetJobs(run.RunId)[1].State);
+    }
+
     internal static void OsCompletionDoesNotConfirmPaperOutput()
     {
         using var fixture = new Fixture();
@@ -836,7 +873,8 @@ internal static class PrintingTests
         public PrinterCapabilitySnapshot? CapabilitiesOnSecondRead { get; init; }
         public bool ThrowAfterSubmitSideEffect { get; init; }
         public bool ThrowBeforeSubmit { get; init; }
-        public bool ThrowCancellationBeforeSubmit { get; init; }
+        public bool ThrowCancellationBeforeSubmit { get; set; }
+        public int ThrowCancellationOnSubmissionNumber { get; init; }
         public bool ThrowCapabilityAfterSubmit { get; init; }
         public bool CancelReturnsFalse { get; set; }
         public int SubmissionCount => Volatile.Read(ref _submissionCount);
@@ -856,13 +894,14 @@ internal static class PrintingTests
 
         public Task<OsJobReceipt> SubmitAsync(WindowsPrintSubmission submission, CancellationToken cancellationToken = default)
         {
-            Interlocked.Increment(ref _submissionCount);
+            var submissionNumber = Interlocked.Increment(ref _submissionCount);
             LastQueueIdentity = submission.Options.QueueIdentity;
             LastRunNonce = submission.RunNonce;
             LastArtifactId = submission.Artifact.ArtifactId;
             using (var content = new MemoryStream()) { submission.PdfContent.CopyTo(content); LastPdfBytes = content.ToArray(); }
             if (ThrowBeforeSubmit) throw new PrintSubmissionException("native backend rejected before StartDoc", mayHaveReachedOs: false);
-            if (ThrowCancellationBeforeSubmit) throw new PrintSubmissionException("cancelled before StartDoc", mayHaveReachedOs: false,
+            if (ThrowCancellationBeforeSubmit || submissionNumber == ThrowCancellationOnSubmissionNumber)
+                throw new PrintSubmissionException("cancelled before StartDoc", mayHaveReachedOs: false,
                 new OperationCanceledException(cancellationToken));
             if (ThrowCapabilityAfterSubmit) throw new PrintCapabilityException("capabilities changed inside submit");
             if (ThrowAfterSubmitSideEffect) throw new IOException("receipt channel interrupted after acceptance");

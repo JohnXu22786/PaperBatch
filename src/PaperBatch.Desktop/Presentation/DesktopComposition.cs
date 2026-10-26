@@ -162,8 +162,10 @@ internal sealed class ProductionPresentationSources :
             !_preparedRunsByQueueItem.TryGetValue(queueItemId, out var run) || run.FinalArtifact is null)
             throw new InvalidOperationException("A persisted prepared PDF and configured Windows print backend are required.");
         var refreshedJobs = new List<PrintJobSnapshot>();
-        foreach (var job in _runStore.GetJobs(run.RunId).Where(job => job.State == JobState.Ready))
+        foreach (var job in _runStore.GetJobs(run.RunId))
         {
+            if (job.State is JobState.AcceptedByOs or JobState.OsProcessing or JobState.OsReportsComplete) continue;
+            if (job.State is not (JobState.Ready or JobState.FailedBeforeSubmit)) break;
             var arguments = new[] { job.JobId };
             var response = await SendCoordinatorRequestAsync("cli.submit",
                 CoordinatorRequestKeys.Create("submit", arguments), new { arguments }, cancellationToken).ConfigureAwait(false);

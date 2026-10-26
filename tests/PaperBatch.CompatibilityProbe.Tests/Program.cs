@@ -160,6 +160,7 @@ var tests = new List<(string Name, Action Run)>
     ("checked-in PDF and PNG batch flows through production preparation, composition, and fake print orchestration", PrintingTests.CheckedInBatchFlowsThroughPreparationCompositionAndPrintOrchestration),
     ("missing explicit print queue is rejected before capability lookup", PrintingTests.MissingExplicitQueueIsRejectedBeforeCapabilityLookup),
     ("run submission proceeds sequentially and stops without resuming unknown segments", PrintingTests.RunSubmissionIsSequentialAndDoesNotResumeUnknownSegments),
+    ("run submission retries known no-effect segments without resubmitting accepted segments", PrintingTests.RunSubmissionRetriesKnownNoEffectSegmentWithoutResubmittingAcceptedSegments),
     ("submission rejects legacy runs without a final artifact", PrintingTests.SubmissionRejectsLegacyRunWithoutFinalArtifact),
     ("prepared artifact pipeline composes ordered immutable snapshots", PreparedArtifactCoordinatorTests.PipelineComposesOrderedSnapshotsAndPersistsExactFinalPdf),
     ("prepared-run invariants reject invalid hashes and copy collections", CoreTests.PreparedRunInvariantsRejectInvalidHashesAndCopyCollections),
