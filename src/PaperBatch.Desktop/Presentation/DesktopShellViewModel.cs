@@ -871,7 +871,7 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         if (SelectedQueueItem is not { } selected) return;
         var index = QueueItems.IndexOf(selected);
         if (_previewSource is IPreparedArtifactPresentationSource preparedArtifacts)
-            preparedArtifacts.InvalidatePreparedRun(selected.Id);
+            foreach (var item in QueueItems) preparedArtifacts.InvalidatePreparedRun(item.Id);
         if (_queueSource is IQueueEditingPresentationSource editable) editable.Remove(selected.Id);
         QueueItems.Remove(selected);
         SelectedQueueItem = QueueItems.Count == 0 ? null : QueueItems[Math.Min(index, QueueItems.Count - 1)];
