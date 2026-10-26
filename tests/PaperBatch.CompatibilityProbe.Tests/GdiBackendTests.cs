@@ -47,6 +47,68 @@ internal static class GdiBackendTests
         Assert.Equal(0, native.StartDocCount);
     }
 
+    internal static void RasterizationCancellationIsKnownNoEffect()
+    {
+        var pdf = RendererTests.OnePagePdf();
+        var native = new FakeNative(Capabilities());
+        var backend = new WindowsGdiPrintBackend(native, new FakeRasterizer { CancelDuringRasterization = true });
+
+        var mayHaveReachedOs = true;
+        try { _ = backend.SubmitAsync(Submission(pdf, Artifact(pdf))).GetAwaiter().GetResult(); }
+        catch (PrintSubmissionException error) { mayHaveReachedOs = error.MayHaveReachedOs; }
+
+        Assert.False(mayHaveReachedOs);
+        Assert.Equal(0, native.StartDocCount);
+    }
+
+    internal static void InitialCancellationIsKnownNoEffect()
+    {
+        var pdf = RendererTests.OnePagePdf();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var native = new FakeNative(Capabilities());
+        var backend = new WindowsGdiPrintBackend(native, new FakeRasterizer());
+
+        var mayHaveReachedOs = true;
+        try { _ = backend.SubmitAsync(Submission(pdf, Artifact(pdf)), cancellation.Token).GetAwaiter().GetResult(); }
+        catch (PrintSubmissionException error) { mayHaveReachedOs = error.MayHaveReachedOs; }
+
+        Assert.False(mayHaveReachedOs);
+        Assert.Equal(0, native.StartDocCount);
+    }
+
+    internal static void CancellationAfterStartDocRemainsAmbiguous()
+    {
+        var pdf = RendererTests.OnePagePdf();
+        var native = new FakeNative(Capabilities()) { CancelWritingPage = true };
+        var backend = new WindowsGdiPrintBackend(native, new FakeRasterizer());
+
+        var mayHaveReachedOs = false;
+        try { _ = backend.SubmitAsync(Submission(pdf, Artifact(pdf))).GetAwaiter().GetResult(); }
+        catch (PrintSubmissionException error) { mayHaveReachedOs = error.MayHaveReachedOs; }
+
+        Assert.True(mayHaveReachedOs);
+        Assert.Equal(1, native.StartDocCount);
+        Assert.True(native.LastDocument!.Disposed);
+    }
+
+    internal static void NativeAdapterCancellationBeforeStartDocIsKnownNoEffect()
+    {
+        var pdf = RendererTests.OnePagePdf();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var adapter = new WindowsGdiNativeAdapter();
+
+        var mayHaveReachedOs = true;
+        try
+        {
+            _ = adapter.StartDocAsync(Submission(pdf, Artifact(pdf)), [], cancellation.Token).GetAwaiter().GetResult();
+        }
+        catch (PrintSubmissionException error) { mayHaveReachedOs = error.MayHaveReachedOs; }
+
+        Assert.False(mayHaveReachedOs);
+    }
+
     internal static void PreservesAmbiguityAndCleansUp()
     {
         var pdf = RendererTests.OnePagePdf();
@@ -151,12 +213,14 @@ internal static class GdiBackendTests
 
     private sealed class FakeRasterizer : IWindowsPrintPdfRasterizer
     {
+        public bool CancelDuringRasterization { get; init; }
         public byte[] ReceivedBytes { get; private set; } = [];
         public async Task<IReadOnlyList<WindowsPrintRasterPage>> RasterizeAsync(Stream pdf, int expectedPageCount, CancellationToken cancellationToken = default)
         {
             using var content = new MemoryStream();
             await pdf.CopyToAsync(content, cancellationToken);
             ReceivedBytes = content.ToArray();
+            if (CancelDuringRasterization) throw new OperationCanceledException(cancellationToken);
             return [
                 new(1, new PageSize(612, 792), new PdfRasterPage(17, 22, 68, new byte[1496]))
             ];
@@ -168,6 +232,7 @@ internal static class GdiBackendTests
         private int _reads;
         public PrinterCapabilitySnapshot? SecondCapabilities { get; init; }
         public bool FailWritingPage { get; init; }
+        public bool CancelWritingPage { get; init; }
         public int StartDocCount { get; private set; }
         public int EndDocCount { get; private set; }
         public FakeDocument? LastDocument { get; private set; }
@@ -177,7 +242,7 @@ internal static class GdiBackendTests
         public Task<IWindowsGdiDocument> StartDocAsync(WindowsPrintSubmission submission, IReadOnlyList<WindowsPrintRasterPage> pages, CancellationToken cancellationToken = default)
         {
             StartDocCount++;
-            LastDocument = new FakeDocument(this, FailWritingPage);
+            LastDocument = new FakeDocument(this, FailWritingPage, CancelWritingPage);
             return Task.FromResult<IWindowsGdiDocument>(LastDocument);
         }
         public Task<PrintBackendJobStatus> GetStatusAsync(OsJobReceipt receipt, CancellationToken cancellationToken = default)
@@ -185,13 +250,14 @@ internal static class GdiBackendTests
         public Task<bool> CancelAsync(OsJobReceipt receipt, CancellationToken cancellationToken = default)
         { LastReceipt = receipt; return Task.FromResult(true); }
 
-        public sealed class FakeDocument(FakeNative owner, bool failWrite) : IWindowsGdiDocument
+        public sealed class FakeDocument(FakeNative owner, bool failWrite, bool cancelWrite) : IWindowsGdiDocument
         {
             public string OsJobId => "job-from-startdoc";
             public int CompletedPages { get; private set; }
             public bool Disposed { get; private set; }
             public Task StartPageAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
             public Task WritePageAsync(WindowsPrintRasterPage page, CancellationToken cancellationToken = default) =>
+                cancelWrite ? Task.FromException(new OperationCanceledException(cancellationToken)) :
                 failWrite ? Task.FromException(new IOException("write failed")) : Task.CompletedTask;
             public Task EndPageAsync(CancellationToken cancellationToken = default) { CompletedPages++; return Task.CompletedTask; }
             public Task EndDocAsync(CancellationToken cancellationToken = default) { owner.EndDocCount++; return Task.CompletedTask; }

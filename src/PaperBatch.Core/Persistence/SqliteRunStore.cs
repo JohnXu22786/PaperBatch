@@ -401,30 +401,35 @@ public sealed class SqliteRunStore
                 throw new IdempotencyConflictException("A different idempotency key already owns this submission attempt.");
             }
 
-            transaction.Commit();
-            return new JobOperationResult(job, Replayed: true);
+            if (job.State != JobState.FailedBeforeSubmit)
+            {
+                transaction.Commit();
+                return new JobOperationResult(job, Replayed: true);
+            }
         }
 
-        if (job.State != JobState.Ready)
+        if (job.State is not (JobState.Ready or JobState.FailedBeforeSubmit))
         {
             throw new InvalidOperationException($"A job in state {job.State} cannot begin submission.");
         }
 
+        var previousState = job.State;
         var changed = Execute(connection, transaction, """
             UPDATE jobs SET state = $nextState, submission_key = $idempotencyKey, updated_utc = $updatedUtc
-            WHERE job_id = $jobId AND state = $currentState AND submission_key IS NULL;
+            WHERE job_id = $jobId AND state = $currentState AND submission_key IS $existingKey;
             """,
             ("$nextState", JobState.Submitting.ToString()),
             ("$idempotencyKey", idempotencyKey),
             ("$updatedUtc", FormatTimestamp(atUtc)),
             ("$jobId", jobId),
-            ("$currentState", JobState.Ready.ToString()));
+            ("$currentState", previousState.ToString()),
+            ("$existingKey", job.IdempotencyKey));
         if (changed != 1)
         {
             throw new InvalidOperationException("Submission intent lost a concurrent state transition.");
         }
 
-        InsertTransition(connection, transaction, jobId, JobState.Ready, JobState.Submitting, atUtc, idempotencyKey, "submission intent persisted before OS submission");
+        InsertTransition(connection, transaction, jobId, previousState, JobState.Submitting, atUtc, idempotencyKey, "submission intent persisted before OS submission");
         var updated = ReadJob(connection, transaction, jobId)!;
         RefreshRunState(connection, transaction, job.RunId);
         transaction.Commit();

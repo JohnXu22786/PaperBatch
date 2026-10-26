@@ -1,6 +1,8 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using System.Text.Json;
 using System.Text;
 using PaperBatch.Desktop;
@@ -21,6 +23,7 @@ var tests = new (string Name, Action Run)[]
     ("navigation changes the active section", NavigationChangesTheActiveSection),
     ("printer inspection is explicit, read-only, and keeps demo mode disabled", PrinterInspectionIsReadOnly),
     ("print status and cancellation failures remain visible and block unsafe submission", PrintStatusFailuresAreVisibleAndBlockSubmission),
+    ("known no-effect print failures can be retried from the desktop", KnownNoEffectPrintFailuresCanBeRetried),
     ("queue ordering and removal are actionable and clear prepared previews", QueueEditsPreserveSelectionAndInvalidateRemovedPreview),
     ("removing a batch source clears its shared prepared run until re-preparation", RemovingBatchSourceInvalidatesSharedPreparedRun),
     ("language selection localizes desktop section labels", LanguageSelectionLocalizesSectionLabels),
@@ -256,6 +259,38 @@ static void PrintStatusFailuresAreVisibleAndBlockSubmission()
     Assert.True(!viewModel.CanSubmitPreparedRun);
     viewModel.CancelPrintJobAsync("owned-job").GetAwaiter().GetResult();
     Assert.Contains("Print cancellation could not be confirmed", viewModel.OperationError);
+}
+
+static void KnownNoEffectPrintFailuresCanBeRetried()
+{
+    var source = new FakeRetryablePrintSource(
+        [new QueueItemSnapshot("queue-item", "Prepared.pdf", "4 pages", "Ready")],
+        [new PrintJobSnapshot("accepted-job", 0, "AcceptedByOs", "Accepted", false),
+         new PrintJobSnapshot("failed-job", 1, "FailedBeforeSubmit", "No OS submission occurred", false)]);
+    var preview = new FakePrintablePreviewSource();
+    var viewModel = new DesktopShellViewModel(source, new FakeSettingsSource(), preview,
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    SelectSupportedPrinter(viewModel);
+    viewModel.RefreshPreviewAsync().GetAwaiter().GetResult();
+    viewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
+
+    Assert.True(viewModel.CanSubmitPreparedRun);
+    viewModel.SubmitPreparedRunAsync().GetAwaiter().GetResult();
+    Assert.Equal(1, source.SubmissionCalls);
+    Assert.True(viewModel.PrintJobs.All(job => job.State == "AcceptedByOs"));
+
+    var uncertainSource = new FakeRetryablePrintSource(
+        [new QueueItemSnapshot("queue-item", "Prepared.pdf", "4 pages", "Ready")],
+        [new PrintJobSnapshot("accepted-job", 0, "AcceptedByOs", "Accepted", false),
+         new PrintJobSnapshot("uncertain-job", 1, "NeedsReviewUnknown", "Outcome unknown", false)]);
+    var uncertainViewModel = new DesktopShellViewModel(uncertainSource, new FakeSettingsSource(), new FakePrintablePreviewSource(),
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    SelectSupportedPrinter(uncertainViewModel);
+    uncertainViewModel.RefreshPreviewAsync().GetAwaiter().GetResult();
+    uncertainViewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
+    Assert.True(!uncertainViewModel.CanSubmitPreparedRun);
 }
 
 static void SourceIntakeErrorsRemainVisibleAndAppend()
@@ -1039,6 +1074,30 @@ sealed class FakeUnavailablePrintSource(IReadOnlyList<QueueItemSnapshot> items) 
         Task.FromException<IReadOnlyList<PrintJobSnapshot>>(new UnauthorizedAccessException());
     public Task<bool> CancelPrintJobAsync(string jobId, CancellationToken cancellationToken = default) =>
         Task.FromException<bool>(new UnauthorizedAccessException());
+}
+
+sealed class FakeRetryablePrintSource(IReadOnlyList<QueueItemSnapshot> items, IReadOnlyList<PrintJobSnapshot> initialJobs) :
+    IQueuePresentationSource, IPrintSubmissionPresentationSource
+{
+    public bool CanSubmitPrintJobs => true;
+    public int SubmissionCalls { get; private set; }
+    public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => items;
+    public Task<IReadOnlyList<PrintJobSnapshot>> SubmitPreparedRunAsync(string queueItemId, CancellationToken cancellationToken = default)
+    {
+        SubmissionCalls++;
+        return Task.FromResult<IReadOnlyList<PrintJobSnapshot>>(
+            initialJobs.Select(job => job with { State = "AcceptedByOs", Detail = "Accepted" }).ToArray());
+    }
+    public Task<IReadOnlyList<PrintJobSnapshot>> RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken = default) =>
+        Task.FromResult(initialJobs);
+    public Task<bool> CancelPrintJobAsync(string jobId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+}
+
+sealed class FakePrintablePreviewSource : IFinalPreviewPresentationSource
+{
+    public Task<PreviewSnapshot> GetPreviewAsync(string queueItemId, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new PreviewSnapshot(queueItemId, "Test preview", 1, 1,
+            new WriteableBitmap(new PixelSize(1, 1), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Unpremul)));
 }
 
 sealed class FakePreparedPreviewSource : IFinalPreviewPresentationSource, IPreparedArtifactPresentationSource
