@@ -2129,6 +2129,14 @@ static class Assert
         }
     }
 
+    public static void Equal<T>(T expected, T actual, string failureDetails)
+    {
+        if (!EqualityComparer<T>.Default.Equals(expected, actual))
+        {
+            throw new InvalidOperationException($"Expected '{expected}', got '{actual}'. {failureDetails}");
+        }
+    }
+
     public static void Contains<T>(T expected, IEnumerable<T> actual)
     {
         if (!actual.Contains(expected))

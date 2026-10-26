@@ -251,7 +251,7 @@ internal static class PrintingTests
             new WindowsGdiPrintBackend(native, rasterizer), static () => "single-pdf-regression", single.Artifacts);
         var submitted = coordinator.SubmitRunAsync(prepared.Run, "single-pdf-regression-submit", FixedTime).GetAwaiter().GetResult();
         Assert.Equal(1, submitted.Count);
-        Assert.Equal(PrintSubmissionStatus.Accepted, submitted[0].Status);
+        Assert.Equal(PrintSubmissionStatus.Accepted, submitted[0].Status, SubmissionFailureDetails(submitted[0]));
         Assert.True(expectedPdf.SequenceEqual(rasterizer.ReceivedBytes.Single()));
         Assert.Equal(2, native.Documents.Single().WritePageCount);
         Assert.Equal("simulated-job-1", single.Runs.GetJob(prepared.Persistence!.Jobs.Single().JobId)!.OsReceipt!.OsJobId);
@@ -299,7 +299,7 @@ internal static class PrintingTests
         var results = coordinator.SubmitRunAsync(run, "checked-in-batch-submit-key", FixedTime).GetAwaiter().GetResult();
 
         Assert.Equal(1, results.Count);
-        Assert.Equal(PrintSubmissionStatus.Accepted, results[0].Status);
+        Assert.Equal(PrintSubmissionStatus.Accepted, results[0].Status, SubmissionFailureDetails(results[0]));
         Assert.Equal(1, native.StartDocCount);
         Assert.True(expectedPdf.SequenceEqual(rasterizer.ReceivedBytes.Single()));
         Assert.Equal(finalArtifact.Sha256, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(rasterizer.ReceivedBytes.Single())).ToLowerInvariant());
@@ -786,6 +786,13 @@ internal static class PrintingTests
             [PrintOption.Duplex] = new(CapabilityState.Supported, ["Simplex", "LongEdge", "ShortEdge"], null),
             [PrintOption.Copies] = new(CapabilityState.Supported, ["1..999"], null)
         });
+
+    private static string SubmissionFailureDetails(PrintSubmissionResult result)
+    {
+        var reason = result.Reason ?? "<no reason provided>";
+        if (reason.Length > 512) reason = reason[..512];
+        return $"Job state: {result.Job?.State.ToString() ?? "<no stored job>"}; reason: {reason}";
+    }
 
     private static PrinterCapabilitySnapshot ChangedCapabilities() => Capabilities() with
     {
