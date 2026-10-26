@@ -371,7 +371,7 @@ internal static class PrintingTests
         Assert.Equal(1, secondPartialJob.SegmentIndex);
         Assert.Equal(JobState.AcceptedByOs, firstPartialJob.State);
         Assert.Equal("simulated-job-1", firstPartialJob.OsReceipt!.OsJobId);
-        Assert.Equal("batch-print-run-2", firstPartialJob.OsReceipt.RunNonce);
+        Assert.Equal("batch-partial-run-2", firstPartialJob.OsReceipt.RunNonce);
         Assert.Equal(JobState.NeedsReviewUnknown, secondPartialJob.State);
         Assert.True(secondPartialJob.OsReceipt is null);
         Assert.Equal(2, partialNative.Documents.Count);
