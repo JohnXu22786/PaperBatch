@@ -22,6 +22,7 @@ var tests = new (string Name, Action Run)[]
     ("printer inspection is explicit, read-only, and keeps demo mode disabled", PrinterInspectionIsReadOnly),
     ("print status and cancellation failures remain visible and block unsafe submission", PrintStatusFailuresAreVisibleAndBlockSubmission),
     ("queue ordering and removal are actionable and clear prepared previews", QueueEditsPreserveSelectionAndInvalidateRemovedPreview),
+    ("removing a batch source clears its shared prepared run until re-preparation", RemovingBatchSourceInvalidatesSharedPreparedRun),
     ("language selection localizes desktop section labels", LanguageSelectionLocalizesSectionLabels),
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
     ("real production queue import reports per-format intake and renderer outcomes", ApplicationImportEvidenceTests.ProductionQueueImportReportsFormatOutcomes),
@@ -114,6 +115,38 @@ static void QueueEditsPreserveSelectionAndInvalidateRemovedPreview()
     Assert.Equal(2, viewModel.QueueItems.Count);
     Assert.True(preview.InvalidatedIds.Contains("b"));
     Assert.Equal("a", viewModel.SelectedQueueItem!.Id);
+}
+
+static void RemovingBatchSourceInvalidatesSharedPreparedRun()
+{
+    var source = new FakeSharedPreparedBatchSource();
+    var viewModel = new DesktopShellViewModel(source, new FakeSettingsSource(), source,
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    SelectSupportedPrinter(viewModel);
+
+    viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
+    Assert.Contains("a, b, c", viewModel.CurrentPreview!.Description);
+    source.SubmitPreparedRunAsync("b").GetAwaiter().GetResult();
+    Assert.Equal("a, b, c", string.Join(", ", source.LastSubmittedSourceIds));
+
+    viewModel.RemoveSelectedQueueItem();
+    Assert.Equal("b", viewModel.SelectedQueueItem!.Id);
+    var submissionsBeforeStaleAttempt = source.SubmissionCount;
+    foreach (var remainingId in new[] { "b", "c" })
+    {
+        viewModel.SelectedQueueItem = viewModel.QueueItems.Single(item => item.Id == remainingId);
+        Assert.Contains("unavailable", viewModel.CurrentPreview!.Description);
+        Assert.Throws<InvalidOperationException>(() => source.SubmitPreparedRunAsync(remainingId).GetAwaiter().GetResult());
+    }
+    Assert.Equal(submissionsBeforeStaleAttempt, source.SubmissionCount);
+
+    viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
+    Assert.Contains("b, c", viewModel.CurrentPreview!.Description);
+    source.SubmitPreparedRunAsync("b").GetAwaiter().GetResult();
+    Assert.Equal("b, c", string.Join(", ", source.LastSubmittedSourceIds));
+    source.SubmitPreparedRunAsync("c").GetAwaiter().GetResult();
+    Assert.Equal("b, c", string.Join(", ", source.LastSubmittedSourceIds));
 }
 
 static void LanguageSelectionLocalizesSectionLabels()
@@ -1045,6 +1078,91 @@ sealed class FakePreparationSource(IReadOnlyList<QueueItemSnapshot> items) : IQu
     public void InvalidatePreparedRun(string queueItemId) => InvalidatedIds.Add(queueItemId);
     public Task<PreviewSnapshot> GetPreviewAsync(string queueItemId, CancellationToken cancellationToken = default) =>
         Task.FromResult(new PreviewSnapshot(queueItemId, "Preview", 1, 1));
+}
+
+sealed class FakeSharedPreparedBatchSource : IQueueEditingPresentationSource, IQueuePreparationPresentationSource,
+    IFinalPreviewPresentationSource, IPreparedArtifactPresentationSource, IPrintSubmissionPresentationSource
+{
+    private readonly List<QueueItemSnapshot> _items = [
+        new("a", "A.pdf", "ready", "Ready"),
+        new("b", "B.pdf", "ready", "Ready"),
+        new("c", "C.pdf", "ready", "Ready")];
+    private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
+    private int _prepareCount;
+
+    public event Action<string>? PreparedArtifactChanged;
+    public bool CanPrepare => true;
+    public bool CanSubmitPrintJobs => true;
+    public IReadOnlyList<string> ResolutionSummaries => [];
+    public IReadOnlyList<string> LastSubmittedSourceIds { get; private set; } = [];
+    public int SubmissionCount { get; private set; }
+    public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => _items.ToArray();
+
+    public void Move(string queueItemId, int delta) { }
+
+    public void Remove(string queueItemId) => _items.RemoveAll(item => item.Id == queueItemId);
+
+    public Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings,
+        LayoutOptions layoutOptions, JobRecipe? recipe = null, CancellationToken cancellationToken = default)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var preparedItems = _items.Select((item, index) => CreatePreparedItem(item.Id, index, now)).ToArray();
+        var runId = $"batch-run-{++_prepareCount}";
+        var run = PreparedRun.Create(runId, now, new string('d', 64), preparedItems,
+            [new CompatibleSegment("segment", 0, preparedItems.Select(item => item.ItemId), "compat",
+                new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit))],
+            new FinalPdfArtifact($"artifact_{new string('e', 64)}", new string('e', 64), 100, 1));
+        foreach (var item in _items) RegisterPreparedRun(item.Id, run);
+        var storedRun = new StoredRun(run.RunId, now, RunState.Ready, "{}",
+            new RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true));
+        return Task.FromResult(new PreparedArtifactResult(run,
+            new RunCreationResult(storedRun, [], Replayed: false), [], IsCancelled: false));
+    }
+
+    public void RegisterPreparedRun(string queueItemId, PreparedRun run)
+    {
+        _preparedRunsByQueueItem[queueItemId] = run;
+        PreparedArtifactChanged?.Invoke(queueItemId);
+    }
+
+    public void InvalidatePreparedRun(string queueItemId)
+    {
+        _preparedRunsByQueueItem.Remove(queueItemId);
+        PreparedArtifactChanged?.Invoke(queueItemId);
+    }
+
+    public Task<PreviewSnapshot> GetPreviewAsync(string queueItemId, CancellationToken cancellationToken = default)
+    {
+        if (!_preparedRunsByQueueItem.TryGetValue(queueItemId, out var run))
+            return Task.FromResult(new PreviewSnapshot(queueItemId, "Final preview unavailable: no prepared artifact exists.", 0, 0));
+        return Task.FromResult(new PreviewSnapshot(queueItemId,
+            $"Prepared run {run.RunId}: {string.Join(", ", run.Items.Select(item => item.ItemId))}", 1, 1,
+            ArtifactId: run.FinalArtifact!.ArtifactId));
+    }
+
+    public Task<IReadOnlyList<PrintJobSnapshot>> SubmitPreparedRunAsync(string queueItemId, CancellationToken cancellationToken = default)
+    {
+        if (!_preparedRunsByQueueItem.TryGetValue(queueItemId, out var run))
+            throw new InvalidOperationException("A persisted prepared PDF is required.");
+        SubmissionCount++;
+        LastSubmittedSourceIds = run.Items.Select(item => item.ItemId).ToArray();
+        return Task.FromResult<IReadOnlyList<PrintJobSnapshot>>([]);
+    }
+
+    public Task<IReadOnlyList<PrintJobSnapshot>> RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<PrintJobSnapshot>>([]);
+
+    public Task<bool> CancelPrintJobAsync(string jobId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+
+    private static PreparedItem CreatePreparedItem(string itemId, int index, DateTimeOffset now)
+    {
+        var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);
+        return new PreparedItem(itemId,
+            new SourceSnapshot($"snapshot-{itemId}", new string((char)('a' + index), 64), 10, now),
+            new RendererResult("renderer", "1", $"source-{itemId}", new string((char)('f' - index), 64), 10, 1,
+                new RendererCapabilities(1, ["application/pdf"])),
+            [new PageMapping(1, 1)], settings);
+    }
 }
 
 sealed class ConflictTestInspector : IPdfArtifactInspector, IPdfPageMetadataInspector, IStaticPdfContentInspector
