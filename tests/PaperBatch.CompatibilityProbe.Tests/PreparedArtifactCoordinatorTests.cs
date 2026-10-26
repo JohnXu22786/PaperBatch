@@ -10,6 +10,69 @@ internal static class PreparedArtifactCoordinatorTests
 {
     private static readonly DateTimeOffset FixedTime = new(2026, 10, 20, 12, 0, 0, TimeSpan.Zero);
 
+    internal static void PreparationRejectsInvalidIdempotencyKeysBeforeReadingInputs()
+    {
+        var coordinator = new PreparedArtifactCoordinator(null!, null!, null!, null!, null!, null!, null!, null!);
+        var inputs = new UnenumeratedInputs();
+        var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter",
+            Orientation.Auto, ScalingMode.ShrinkToFit);
+
+        foreach (var idempotencyKey in new string?[] { null, string.Empty, " \t " })
+        {
+            try
+            {
+                coordinator.PrepareAsync(inputs, settings, new LayoutOptions(), idempotencyKey!,
+                    new RetentionMetadata(FixedTime.AddDays(1), RetainWhileUnresolved: true), FixedTime)
+                    .GetAwaiter().GetResult();
+                throw new InvalidOperationException("Expected invalid idempotency key to be rejected.");
+            }
+            catch (ArgumentException exception) when (exception.ParamName == "idempotencyKey")
+            {
+            }
+        }
+    }
+
+    internal static void ValidPreparationIdempotencyKeyReplaysThePersistedRun()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "paperbatch-prepare-idempotency-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var sourcePath = Path.Combine(root, "source.pdf");
+            File.WriteAllBytes(sourcePath, RendererTests.OnePagePdf());
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+            var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+            var renderers = new RendererCoordinator([
+                new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts))
+            ]);
+            var runs = new SqliteRunStore(Path.Combine(root, "runs.db"));
+            runs.Initialize();
+            var coordinator = new PreparedArtifactCoordinator(new SourceIntakeService(cache), cache, renderers,
+                new FixturePageMetadataInspector(), new VerifiedStaticFixtureInspector(), new FixtureCompositionAdapter(),
+                artifacts, runs);
+            var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter",
+                Orientation.Auto, ScalingMode.ShrinkToFit);
+            var retention = new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true);
+
+            var first = coordinator.PrepareAsync([new SourceInput(sourcePath)], settings, new LayoutOptions(),
+                "valid-prepare-key", retention, FixedTime).GetAwaiter().GetResult();
+            var replay = coordinator.PrepareAsync([new SourceInput(sourcePath)], settings, new LayoutOptions(),
+                "valid-prepare-key", retention, FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
+
+            Assert.True(first.Succeeded, string.Join("; ", first.Diagnostics));
+            Assert.True(replay.Succeeded, string.Join("; ", replay.Diagnostics));
+            Assert.False(first.Persistence!.Replayed);
+            Assert.True(replay.Persistence!.Replayed);
+            Assert.Equal(first.Run!.RunId, replay.Run!.RunId);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
     internal static void PipelineComposesOrderedSnapshotsAndPersistsExactFinalPdf()
     {
         if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
@@ -162,5 +225,33 @@ internal static class PreparedArtifactCoordinatorTests
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(true);
         }
+    }
+
+    private sealed class FixturePageMetadataInspector : IPdfPageMetadataInspector
+    {
+        public Task<int> GetPageCountAsync(Stream pdf, CancellationToken cancellationToken) => Task.FromResult(1);
+
+        public Task<IReadOnlyList<PageSize>> GetPageSizesAsync(Stream pdf, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<PageSize>>([new PageSize(612, 792)]);
+    }
+
+    private sealed class FixtureCompositionAdapter : IPageCompositionAdapter
+    {
+        public Task ComposePdfAsync(LayoutCompilation compilation, IEnumerable<PdfCompositionSource> sources,
+            Stream destination, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            destination.Write(sources.First().PdfBytes.Span);
+            destination.WriteByte((byte)' ');
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class UnenumeratedInputs : IEnumerable<SourceInput>
+    {
+        public IEnumerator<SourceInput> GetEnumerator() =>
+            throw new InvalidOperationException("Preparation enumerated its inputs before validating the idempotency key.");
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 }

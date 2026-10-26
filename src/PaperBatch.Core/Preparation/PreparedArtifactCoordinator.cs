@@ -60,6 +60,7 @@ public sealed class PreparedArtifactCoordinator(
         IReadOnlyList<LayoutDocumentSettings>? perItemLayoutSettings,
         CancellationToken cancellationToken = default)
     {
+        SqliteRunStore.ValidateIdempotencyKey(idempotencyKey, nameof(idempotencyKey));
         try
         {
             await _prepareGate.WaitAsync(cancellationToken).ConfigureAwait(false);
