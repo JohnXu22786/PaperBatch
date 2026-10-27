@@ -246,6 +246,21 @@ internal static class PrintingTests
         Assert.Equal(JobState.CancelObserved, afterCancel.State);
     }
 
+    internal static void UnknownStatusDoesNotConfirmCancellationAfterRequest()
+    {
+        using var fixture = new Fixture();
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities()) { CancelReturnsFalse = true };
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1", fixture.Artifacts);
+        coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "submit-key", FixedTime).GetAwaiter().GetResult();
+        var cancel = coordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
+        Assert.Equal(JobState.CancelRequested, cancel.State);
+
+        backend.LastStatus = PrintBackendJobStatus.Unknown;
+        var refreshed = coordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
+        Assert.Equal(JobState.NeedsReviewUnknown, refreshed.State);
+        Assert.True(refreshed.State != JobState.CancelObserved);
+    }
+
     internal static void SubmissionRejectsLegacyRunWithoutFinalArtifact()
     {
         using var fixture = new Fixture();

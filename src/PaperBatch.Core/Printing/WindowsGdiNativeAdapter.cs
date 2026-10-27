@@ -35,6 +35,8 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
     private const uint DibRgbColors = 0;
     private const uint SrcCopy = 0x00CC0020;
     private const int GdiError = -1;
+    private const uint JobStatusDeleted = 0x00000100;
+    private const uint JobStatusCancelled = 0x00008000;
 
     public Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(string queueIdentity, CancellationToken cancellationToken = default)
     {
@@ -173,12 +175,7 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
                 return PrintBackendJobStatus.Unknown;
             var job = ReadJob(printer, jobId);
             if (job is null || !string.Equals(job.Value.DocumentName, DocumentName(receipt.QueueIdentity, receipt.RunNonce), StringComparison.Ordinal)) return PrintBackendJobStatus.Unknown;
-            var status = job.Value.Status;
-            if ((status & (0x00000002u | 0x00000040u)) != 0) return PrintBackendJobStatus.Failed;
-            if ((status & 0x00000100u) != 0) return PrintBackendJobStatus.Cancelled;
-            if ((status & (0x00000004u | 0x00000010u | 0x00000020u | 0x00000008u)) != 0) return PrintBackendJobStatus.Processing;
-            if ((status & (0x00000080u | 0x00001000u)) != 0) return PrintBackendJobStatus.ReportedComplete;
-            return PrintBackendJobStatus.Accepted;
+            return MapWinspoolJobStatus(job.Value.Status);
         }
     }
 
@@ -303,6 +300,16 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
 
     internal static bool HasRequiredDevModeFields(uint actualFields, uint requiredFields) =>
         (actualFields & requiredFields) == requiredFields;
+
+    internal static PrintBackendJobStatus MapWinspoolJobStatus(uint status)
+    {
+        if ((status & JobStatusDeleted) != 0) return PrintBackendJobStatus.Unknown;
+        if ((status & (0x00000002u | 0x00000040u)) != 0) return PrintBackendJobStatus.Failed;
+        if ((status & JobStatusCancelled) != 0) return PrintBackendJobStatus.Cancelled;
+        if ((status & (0x00000004u | 0x00000010u | 0x00000020u | 0x00000008u)) != 0) return PrintBackendJobStatus.Processing;
+        if ((status & (0x00000080u | 0x00001000u)) != 0) return PrintBackendJobStatus.ReportedComplete;
+        return PrintBackendJobStatus.Accepted;
+    }
 
     internal static bool HasExactNativeMapping(
         IReadOnlyCollection<string> capabilityValues,
