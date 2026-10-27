@@ -150,6 +150,34 @@ internal static class LayoutTests
         Assert.Equal(new PageSize(595, 842), mixedSizes.Pages[2].OutputSize);
     }
 
+    internal static void DuplexCompatibilityBoundaryStartsNextJobOnFront()
+    {
+        var firstSettings = new PrintSettings(1, ColorMode.Color, DuplexMode.LongEdge, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);
+        var secondSettings = firstSettings with { Media = "A4" };
+        var layout = LayoutCompiler.Compile(
+        [
+            new LayoutDocument("first", [new(612, 792)], "Letter") { SegmentCompatibilityKey = "compat-first" },
+            new LayoutDocument("second", [new(595, 842)], "A4") { SegmentCompatibilityKey = "compat-second" }
+        ],
+        new(CopyOrder: CopyOrder.PerDocument, Duplex: true));
+        var segments = new[]
+        {
+            new CompatibleSegment("first-segment", 0, ["first"], "compat-first", firstSettings),
+            new CompatibleSegment("second-segment", 1, ["second"], "compat-second", secondSettings)
+        };
+
+        var mapped = SegmentPageOwnership.Assign(layout, segments);
+
+        Assert.True(layout.Succeeded);
+        Assert.Equal(3, layout.Pages.Length);
+        Assert.Equal(PageSide.Front, layout.Pages[0].Side);
+        Assert.True(layout.Pages[1].IsBlank);
+        Assert.Equal(PageSide.Back, layout.Pages[1].Side);
+        Assert.Equal(PageSide.Front, layout.Pages[2].Side);
+        Assert.True(mapped[0].FinalPageNumbers.SequenceEqual([1, 2]));
+        Assert.True(mapped[1].FinalPageNumbers.SequenceEqual([3]));
+    }
+
     internal static void PhysicalFacesExposeSheetDimensionsInsteadOfNUpCells()
     {
         var result = LayoutCompiler.Compile([Doc("a", 2)], new(NUp: NUpMode.Two, Duplex: true, SheetSize: new(700, 900), SeparateFilesOnFront: true));

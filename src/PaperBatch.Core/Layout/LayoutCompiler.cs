@@ -25,6 +25,9 @@ public sealed record LayoutDocumentSettings(int? Copies = null, NUpMode? NUp = n
 public sealed record LayoutDocument(string ItemId, ImmutableArray<PageSize> Pages, string Media, string? PrinterId = null,
     string? TrayId = null, LayoutDocumentSettings? Settings = null, string? SourceName = null)
 {
+    /// <summary>Identifies the prepared print/layout job segment containing this document.</summary>
+    public string? SegmentCompatibilityKey { get; init; }
+
     public LayoutDocument(string itemId, IEnumerable<PageSize> pages, string media, string? printerId = null,
         string? trayId = null, LayoutDocumentSettings? settings = null, string? sourceName = null)
         : this(itemId, pages?.ToImmutableArray() ?? throw new ArgumentNullException(nameof(pages)), media, printerId, trayId, settings, sourceName) { }
@@ -168,6 +171,7 @@ public static class LayoutCompiler
         int estimateLastDoc = -1;
         int estimateLastCopy = 0;
         int estimateUnitIndex = 0;
+        string? estimatedSegmentCompatibilityKey = null;
         void CountEstimatedFace()
         {
             estimatedFaces++;
@@ -175,6 +179,14 @@ public static class LayoutCompiler
         }
         foreach (var unit in EnumerateUnits())
         {
+            var segmentCompatibilityKey = docs[unit.Doc].SegmentCompatibilityKey;
+            if (options.Duplex && segmentCompatibilityKey is not null && estimatedSegmentCompatibilityKey is not null &&
+                !StringComparer.Ordinal.Equals(segmentCompatibilityKey, estimatedSegmentCompatibilityKey) && !estimateNeedFront)
+            {
+                CountEstimatedFace();
+                estimateNeedFront = true;
+            }
+            if (segmentCompatibilityKey is not null) estimatedSegmentCompatibilityKey = segmentCompatibilityKey;
             var startsPacket = options.CopyOrder == CopyOrder.CollatedPackets ? unit.Copy != estimateLastCopy : estimateUnitIndex > 0;
             if (startsPacket && options.SeparatePacketsOnFront && options.Duplex && estimateLastCopy != 0 && !estimateNeedFront)
             {
@@ -208,6 +220,7 @@ public static class LayoutCompiler
         var segmentOrdinal = -1;
         bool needFront = true;
         bool outputLimitExceeded = false;
+        string? previousSegmentCompatibilityKey = null;
         bool TryAddPhysicalPage(PhysicalPage page)
         {
             if (pages.Count >= options.MaximumOutputPages)
@@ -239,12 +252,26 @@ public static class LayoutCompiler
             else sheet++;
             previousKey = key;
         }
+        void EnsureSegmentStartsOnFront(string? segmentCompatibilityKey, PageSize? outputSize)
+        {
+            if (segmentCompatibilityKey is not null && previousSegmentCompatibilityKey is not null &&
+                !StringComparer.Ordinal.Equals(segmentCompatibilityKey, previousSegmentCompatibilityKey) && options.Duplex && !needFront)
+            {
+                var blankSize = pages.Count == 0 ? outputSize : pages[^1].OutputSize ?? outputSize;
+                TryAddPhysicalPage(new PhysicalPage(pages.Count + 1, sheet++, PageSide.Back,
+                    previousKey ?? segmentCompatibilityKey, [], blankSize));
+                needFront = true;
+            }
+            if (segmentCompatibilityKey is not null) previousSegmentCompatibilityKey = segmentCompatibilityKey;
+        }
 
         var lastDoc = -1;
         var lastCopy = 0;
         var unitIndex = 0;
         foreach (var unit in EnumerateUnits())
         {
+            EnsureSegmentStartsOnFront(docs[unit.Doc].SegmentCompatibilityKey,
+                DocumentSheetSize(docs[unit.Doc], options) ?? docs[unit.Doc].Pages[selectedByDoc[unit.Doc][0]]);
             var startsPacket = options.CopyOrder == CopyOrder.CollatedPackets ? unit.Copy != lastCopy : unitIndex > 0;
             if (startsPacket)
             {

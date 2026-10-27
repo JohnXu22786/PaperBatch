@@ -195,15 +195,20 @@ public sealed class PreparedArtifactCoordinator(
             }
 
             cancellationToken.ThrowIfCancellationRequested();
+            var segmentedItems = items.Select((item, index) => (Item: item,
+                LayoutSettings: effectivePerItemLayoutSettings is null ? null : effectivePerItemLayoutSettings[index]));
+            var segmentGroups = segmentedItems.GroupAdjacentBy(entry => (entry.Item.PrintSettings, entry.LayoutSettings)).ToArray();
+            var segments = segmentGroups.Select((group, index) => new CompatibleSegment(
+                "segment_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture), index,
+                group.Select(entry => entry.Item.ItemId), "layout-v1", group[0].Item.PrintSettings)).ToList();
+            var segmentByItem = segments.SelectMany(segment => segment.ItemIds.Select(itemId => (itemId, segment.SegmentId)))
+                .ToDictionary(entry => entry.itemId, entry => entry.SegmentId, StringComparer.Ordinal);
+            layoutDocuments = layoutDocuments.Select(document => document with
+                { SegmentCompatibilityKey = segmentByItem[document.ItemId] }).ToList();
+
             var layout = LayoutCompiler.Compile(layoutDocuments, layoutOptions);
             if (!layout.Succeeded)
                 return new(null, null, layout.Diagnostics.Select(diagnostic => diagnostic.Message).ToArray(), IsCancelled: false);
-            var segments = new List<CompatibleSegment>();
-            var segmentedItems = items.Select((item, index) => (Item: item,
-                LayoutSettings: effectivePerItemLayoutSettings is null ? null : effectivePerItemLayoutSettings[index]));
-            foreach (var group in segmentedItems.GroupAdjacentBy(entry => (entry.Item.PrintSettings, entry.LayoutSettings)))
-                segments.Add(new CompatibleSegment("segment_" + segments.Count.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    segments.Count, group.Select(entry => entry.Item.ItemId), "layout-v1", group[0].Item.PrintSettings));
             try { segments = SegmentPageOwnership.Assign(layout, segments).ToList(); }
             catch (InvalidDataException exception)
             {
