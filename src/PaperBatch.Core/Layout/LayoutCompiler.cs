@@ -78,6 +78,9 @@ public sealed record PdfCompositionSource(string ItemId, ReadOnlyMemory<byte> Pd
 /// <summary>Composes an already compiled page map using the selected pinned engine adapter.</summary>
 public interface IPageCompositionAdapter
 {
+    /// <summary>Maximum byte length of one source PDF accepted by this compositor.</summary>
+    long MaximumSourceBytes => long.MaxValue;
+
     Task ComposePdfAsync(LayoutCompilation compilation, IEnumerable<PdfCompositionSource> sources, Stream destination, CancellationToken cancellationToken = default);
 }
 
