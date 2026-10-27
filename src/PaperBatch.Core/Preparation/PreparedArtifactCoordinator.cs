@@ -120,14 +120,6 @@ public sealed class PreparedArtifactCoordinator(
                 if (diagnostics.Count == 0) diagnostics.Add("Every selected source must pass intake preflight before preparation.");
                 return new(null, null, diagnostics, IsCancelled: false);
             }
-            var effectiveRequestKey = ComputeEffectiveRequestKey(idempotencyKey, inputArray, prepared.Items,
-                printSettings, layoutOptions, perItemPrintSettings, perItemLayoutSettings);
-            var existingRun = runs.GetRunByRequestKey(effectiveRequestKey);
-            if (existingRun is not null)
-            {
-                var replayed = new RunCreationResult(existingRun, runs.GetJobs(existingRun.RunId), Replayed: true);
-                return new(PreparedRunJson.Parse(System.Text.Encoding.UTF8.GetBytes(existingRun.PreparedRunJson)), replayed, [], false);
-            }
             for (var sourceIndex = 0; sourceIndex < inputArray.Length; sourceIndex++)
             {
                 var expectedSha256 = inputArray[sourceIndex].ExpectedSha256;
@@ -137,6 +129,14 @@ public sealed class PreparedArtifactCoordinator(
                     diagnostics.Add($"{Path.GetFileName(prepared.Items[sourceIndex].SourcePath)} changed after queue preflight. Reimport the source before preparing; no final artifact was created.");
                     return new(null, null, diagnostics, IsCancelled: false);
                 }
+            }
+            var effectiveRequestKey = ComputeEffectiveRequestKey(idempotencyKey, inputArray, prepared.Items,
+                printSettings, layoutOptions, perItemPrintSettings, perItemLayoutSettings);
+            var existingRun = runs.GetRunByRequestKey(effectiveRequestKey);
+            if (existingRun is not null)
+            {
+                var replayed = new RunCreationResult(existingRun, runs.GetJobs(existingRun.RunId), Replayed: true);
+                return new(PreparedRunJson.Parse(System.Text.Encoding.UTF8.GetBytes(existingRun.PreparedRunJson)), replayed, [], false);
             }
             var items = new List<PreparedItem>(prepared.Items.Length);
             var layoutDocuments = new List<LayoutDocument>(prepared.Items.Length);
