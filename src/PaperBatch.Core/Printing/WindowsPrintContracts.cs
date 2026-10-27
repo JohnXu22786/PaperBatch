@@ -32,7 +32,7 @@ public sealed record PrintOptionCapability(
         : this(state, values?.ToImmutableArray() ?? throw new ArgumentNullException(nameof(values)), detail) { }
 }
 
-/// <summary>A point-in-time, driver-reported view. Values are exact driver tokens and are never inferred.</summary>
+/// <summary>A point-in-time view of canonical option values supported by the selected driver.</summary>
 public sealed record PrinterCapabilitySnapshot(
     string QueueIdentity,
     string DisplayName,

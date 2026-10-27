@@ -250,16 +250,37 @@ internal static class GdiBackendTests
         Assert.False(WindowsGdiNativeAdapter.HasExactNativeMapping(values, complete.SetItem("Other", "12")));
     }
 
-    internal static void DuplexCapabilityDoesNotInventBindingModes()
+    internal static void NativeDuplexCapabilityMapsSafeModesForPrintOptions()
     {
+        var baseSettings = new PrintSettings(1, ColorMode.Color, DuplexMode.LongEdge, "Letter", Orientation.Portrait,
+            ScalingMode.ShrinkToFit, "queue-identity", "Tray1");
         var unsupported = WindowsGdiNativeAdapter.MapDuplexCapability(-1);
         Assert.Equal(CapabilityState.Unavailable, unsupported.State);
-        Assert.Equal(CapabilityState.Unsupported, WindowsGdiNativeAdapter.MapDuplexCapability(0).State);
-        Assert.Equal(0, WindowsGdiNativeAdapter.MapDuplexCapability(0).Values.Length);
+        Assert.Equal(0, unsupported.Values.Length);
+        Assert.Throws<PrintCapabilityException>(() => WindowsPrintJobOptions.Map("queue-identity",
+            Capabilities() with { Options = Capabilities().Options.SetItem(PrintOption.Duplex, unsupported) },
+            baseSettings with { DuplexMode = DuplexMode.Simplex }));
+
+        var simplex = WindowsGdiNativeAdapter.MapDuplexCapability(0);
+        Assert.Equal(CapabilityState.Supported, simplex.State);
+        Assert.True(simplex.Values.SequenceEqual(["Simplex"]));
+        var simplexSettings = baseSettings with { DuplexMode = DuplexMode.Simplex };
+        var simplexOptions = WindowsPrintJobOptions.Map("queue-identity",
+            Capabilities() with { Options = Capabilities().Options.SetItem(PrintOption.Duplex, simplex) }, simplexSettings);
+        Assert.Equal("Simplex", simplexOptions.Duplex);
+        Assert.Throws<PrintCapabilityException>(() => WindowsPrintJobOptions.Map("queue-identity",
+            Capabilities() with { Options = Capabilities().Options.SetItem(PrintOption.Duplex, simplex) }, baseSettings));
+
         var duplex = WindowsGdiNativeAdapter.MapDuplexCapability(1);
-        Assert.Equal(CapabilityState.Unknown, duplex.State);
-        Assert.Equal(0, duplex.Values.Length);
-        Assert.Contains("exact binding modes", duplex.Detail!);
+        Assert.Equal(CapabilityState.Supported, duplex.State);
+        Assert.True(duplex.Values.SequenceEqual(["Simplex", "LongEdge", "ShortEdge"]));
+        foreach (var mode in new[] { DuplexMode.LongEdge, DuplexMode.ShortEdge })
+        {
+            var settings = baseSettings with { DuplexMode = mode };
+            var options = WindowsPrintJobOptions.Map("queue-identity",
+                Capabilities() with { Options = Capabilities().Options.SetItem(PrintOption.Duplex, duplex) }, settings);
+            Assert.Equal(mode.ToString(), options.Duplex);
+        }
     }
 
     private static WindowsPrintSubmission Submission(byte[] pdf, FinalPdfArtifact artifact)
