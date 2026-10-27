@@ -24,6 +24,8 @@ var tests = new (string Name, Action Run)[]
     ("printer inspection is explicit, read-only, and keeps demo mode disabled", PrinterInspectionIsReadOnly),
     ("print status and cancellation failures remain visible and block unsafe submission", PrintStatusFailuresAreVisibleAndBlockSubmission),
     ("known no-effect print failures can be retried from the desktop", KnownNoEffectPrintFailuresCanBeRetried),
+    ("preparation refreshes newly persisted ready print jobs", PreparationRefreshesReadyPrintJobs),
+    ("preparation refreshes the currently selected row", PreparationRefreshesCurrentlySelectedRow),
     ("queue ordering and removal are actionable and clear prepared previews", QueueEditsPreserveSelectionAndInvalidateRemovedPreview),
     ("removing a batch source clears its shared prepared run until re-preparation", RemovingBatchSourceInvalidatesSharedPreparedRun),
     ("language selection localizes desktop section labels", LanguageSelectionLocalizesSectionLabels),
@@ -151,6 +153,43 @@ static void RemovingBatchSourceInvalidatesSharedPreparedRun()
     Assert.Equal("b, c", string.Join(", ", source.LastSubmittedSourceIds));
     source.SubmitPreparedRunAsync("c").GetAwaiter().GetResult();
     Assert.Equal("b, c", string.Join(", ", source.LastSubmittedSourceIds));
+}
+
+static void PreparationRefreshesReadyPrintJobs()
+{
+    var source = new FakeSharedPreparedBatchSource();
+    var viewModel = new DesktopShellViewModel(source, new FakeSettingsSource(), new FakePrintablePreviewSource(),
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    SelectSupportedPrinter(viewModel);
+
+    Assert.True(!viewModel.CanSubmitPreparedRun);
+    Assert.Empty(viewModel.PrintJobs);
+    viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
+
+    Assert.Equal(2, source.PrintJobRefreshCalls);
+    Assert.Equal("Ready", viewModel.PrintJobs.Single().State);
+    Assert.True(viewModel.CanSubmitPreparedRun);
+}
+
+static void PreparationRefreshesCurrentlySelectedRow()
+{
+    var source = new FakeSharedPreparedBatchSource { DelayPreparation = true };
+    var viewModel = new DesktopShellViewModel(source, new FakeSettingsSource(), new FakePrintablePreviewSource(),
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    SelectSupportedPrinter(viewModel);
+
+    var preparation = Task.Run(async () => await viewModel.PrepareQueueAsync());
+    source.PrepareStarted.Task.GetAwaiter().GetResult();
+    viewModel.SelectedQueueItem = viewModel.QueueItems[1];
+    Assert.Empty(viewModel.PrintJobs);
+
+    source.CompletePreparation();
+    preparation.GetAwaiter().GetResult();
+
+    Assert.Equal("Ready", viewModel.PrintJobs.Single().State);
+    Assert.True(viewModel.CanSubmitPreparedRun);
 }
 
 static void LanguageSelectionLocalizesSectionLabels()
@@ -1193,6 +1232,7 @@ sealed class FakeSharedPreparedBatchSource : IQueueEditingPresentationSource, IQ
         new("b", "B.pdf", "ready", "Ready"),
         new("c", "C.pdf", "ready", "Ready")];
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
+    private readonly TaskCompletionSource<bool> _preparationGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _prepareCount;
 
     public event Action<string>? PreparedArtifactChanged;
@@ -1201,15 +1241,23 @@ sealed class FakeSharedPreparedBatchSource : IQueueEditingPresentationSource, IQ
     public IReadOnlyList<string> ResolutionSummaries => [];
     public IReadOnlyList<string> LastSubmittedSourceIds { get; private set; } = [];
     public int SubmissionCount { get; private set; }
+    public int PrintJobRefreshCalls { get; private set; }
+    public bool DelayPreparation { get; init; }
+    public TaskCompletionSource<bool> PrepareStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => _items.ToArray();
 
     public void Move(string queueItemId, int delta) { }
 
     public void Remove(string queueItemId) => _items.RemoveAll(item => item.Id == queueItemId);
 
-    public Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings,
+    public async Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings,
         LayoutOptions layoutOptions, JobRecipe? recipe = null, CancellationToken cancellationToken = default)
     {
+        if (DelayPreparation)
+        {
+            PrepareStarted.TrySetResult(true);
+            await _preparationGate.Task.WaitAsync(cancellationToken);
+        }
         var now = DateTimeOffset.UtcNow;
         var preparedItems = _items.Select((item, index) => CreatePreparedItem(item.Id, index, now)).ToArray();
         var runId = $"batch-run-{++_prepareCount}";
@@ -1220,9 +1268,11 @@ sealed class FakeSharedPreparedBatchSource : IQueueEditingPresentationSource, IQ
         foreach (var item in _items) RegisterPreparedRun(item.Id, run);
         var storedRun = new StoredRun(run.RunId, now, RunState.Ready, "{}",
             new RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true));
-        return Task.FromResult(new PreparedArtifactResult(run,
-            new RunCreationResult(storedRun, [], Replayed: false), [], IsCancelled: false));
+        return new PreparedArtifactResult(run,
+            new RunCreationResult(storedRun, [], Replayed: false), [], IsCancelled: false);
     }
+
+    public void CompletePreparation() => _preparationGate.TrySetResult(true);
 
     public void RegisterPreparedRun(string queueItemId, PreparedRun run)
     {
@@ -1254,8 +1304,14 @@ sealed class FakeSharedPreparedBatchSource : IQueueEditingPresentationSource, IQ
         return Task.FromResult<IReadOnlyList<PrintJobSnapshot>>([]);
     }
 
-    public Task<IReadOnlyList<PrintJobSnapshot>> RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken = default) =>
-        Task.FromResult<IReadOnlyList<PrintJobSnapshot>>([]);
+    public Task<IReadOnlyList<PrintJobSnapshot>> RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken = default)
+    {
+        PrintJobRefreshCalls++;
+        IReadOnlyList<PrintJobSnapshot> jobs = _preparedRunsByQueueItem.ContainsKey(queueItemId)
+            ? [new PrintJobSnapshot("ready-job", 0, nameof(JobState.Ready), "Prepared and ready", false)]
+            : [];
+        return Task.FromResult(jobs);
+    }
 
     public Task<bool> CancelPrintJobAsync(string jobId, CancellationToken cancellationToken = default) => Task.FromResult(false);
 
