@@ -55,6 +55,26 @@ internal static class GdiBackendTests
         Assert.Equal(1, native.StartDocCount);
     }
 
+    internal static void NativeAdapterValidatesSelectedPageIdentityForNonPrefixPages()
+    {
+        var selectedPages = new[]
+        {
+            new WindowsPrintRasterPage(3, new PageSize(612, 792), new PdfRasterPage(1, 1, 4, new byte[4]))
+        };
+
+        Assert.True(WindowsGdiNativeAdapter.IsSelectedPage(selectedPages, selectedPages[0]));
+        Assert.False(WindowsGdiNativeAdapter.IsSelectedPage(selectedPages,
+            new WindowsPrintRasterPage(2, selectedPages[0].PdfSize, selectedPages[0].Raster)));
+
+        var laterPages = new[]
+        {
+            new WindowsPrintRasterPage(2, new PageSize(612, 792), new PdfRasterPage(1, 1, 4, new byte[4])),
+            new WindowsPrintRasterPage(3, new PageSize(612, 792), new PdfRasterPage(1, 1, 4, new byte[4]))
+        };
+        Assert.True(WindowsGdiNativeAdapter.IsSelectedPage(laterPages, laterPages[0]));
+        Assert.True(WindowsGdiNativeAdapter.IsSelectedPage(laterPages, laterPages[1]));
+    }
+
     internal static void RejectsPageSelectionOutsideSegmentOwnership()
     {
         var pdf = RendererTests.OnePagePdf();
