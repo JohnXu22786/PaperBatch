@@ -75,6 +75,13 @@ internal static class GdiBackendTests
         Assert.True(WindowsGdiNativeAdapter.IsSelectedPage(laterPages, laterPages[1]));
     }
 
+    internal static void NativeAdapterMapsDeletedAndCancelledWinspoolStatusesConservatively()
+    {
+        Assert.Equal(PrintBackendJobStatus.Unknown, WindowsGdiNativeAdapter.MapWinspoolJobStatus(0x00000100u));
+        Assert.Equal(PrintBackendJobStatus.Unknown, WindowsGdiNativeAdapter.MapWinspoolJobStatus(0x00008100u));
+        Assert.Equal(PrintBackendJobStatus.Cancelled, WindowsGdiNativeAdapter.MapWinspoolJobStatus(0x00008000u));
+    }
+
     internal static void RejectsPageSelectionOutsideSegmentOwnership()
     {
         var pdf = RendererTests.OnePagePdf();
