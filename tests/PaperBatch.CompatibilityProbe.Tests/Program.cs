@@ -218,6 +218,7 @@ var tests = new List<(string Name, Action Run)>
     ("mutated prepared run with same id is rejected before backend access", PrintingTests.SameRunIdWithMutatedPreparedRunIsRejectedBeforeCapabilityOrSubmission),
     ("ambiguous print submission remains unknown across restart", PrintingTests.AmbiguousSubmissionIsNotRetriedAfterRestart),
     ("print status and cancellation use exact owned job receipt", PrintingTests.StatusAndCancellationAreScopedToOwnedReceipt),
+    ("accepted cancellation is observed only after a cancelled status", PrintingTests.AcceptedCancellationIsObservedOnlyAfterCancelledStatus),
     ("unknown print status after a cancel request does not confirm cancellation", PrintingTests.UnknownStatusDoesNotConfirmCancellationAfterRequest),
     ("concurrent print jobs keep separate submission nonces", PrintingTests.ConcurrentJobsKeepDistinctReceipts),
     ("print cancellation race preserves the winning OS status", PrintingTests.CancellationRacePreservesOsStatus),

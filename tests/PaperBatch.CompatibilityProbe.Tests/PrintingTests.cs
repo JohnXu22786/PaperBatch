@@ -235,7 +235,8 @@ internal static class PrintingTests
         backend.LastStatus = PrintBackendJobStatus.Processing;
         Assert.Equal(JobState.OsProcessing, coordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(1))
             .GetAwaiter().GetResult().State);
-        coordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
+        var cancel = coordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
+        Assert.Equal(JobState.CancelRequested, cancel.State);
         Assert.Equal("queue-identity", backend.LastQueueIdentity);
         Assert.Equal("job-1", backend.LastJobId);
         Assert.Equal("run-nonce-1", backend.LastRunNonce);
@@ -243,20 +244,39 @@ internal static class PrintingTests
 
         backend.LastStatus = PrintBackendJobStatus.ReportedComplete;
         var afterCancel = coordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(3)).GetAwaiter().GetResult();
-        Assert.Equal(JobState.CancelObserved, afterCancel.State);
+        Assert.Equal(JobState.OsReportsComplete, afterCancel.State);
+    }
+
+    internal static void AcceptedCancellationIsObservedOnlyAfterCancelledStatus()
+    {
+        using var fixture = new Fixture();
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1", fixture.Artifacts);
+        coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "submit-key", FixedTime).GetAwaiter().GetResult();
+
+        var cancel = coordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
+        Assert.Equal(JobState.CancelRequested, cancel.State);
+
+        backend.LastStatus = PrintBackendJobStatus.Cancelled;
+        var observed = coordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
+        Assert.Equal(JobState.CancelObserved, observed.State);
     }
 
     internal static void UnknownStatusDoesNotConfirmCancellationAfterRequest()
     {
         using var fixture = new Fixture();
-        var backend = new TestOnlySimulatedPrintBackend(Capabilities()) { CancelReturnsFalse = true };
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
         var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1", fixture.Artifacts);
         coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "submit-key", FixedTime).GetAwaiter().GetResult();
         var cancel = coordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
         Assert.Equal(JobState.CancelRequested, cancel.State);
 
+        backend.LastStatus = PrintBackendJobStatus.Processing;
+        var continuing = coordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
+        Assert.Equal(JobState.CancelRequested, continuing.State);
+
         backend.LastStatus = PrintBackendJobStatus.Unknown;
-        var refreshed = coordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
+        var refreshed = coordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(3)).GetAwaiter().GetResult();
         Assert.Equal(JobState.NeedsReviewUnknown, refreshed.State);
         Assert.True(refreshed.State != JobState.CancelObserved);
     }
@@ -952,7 +972,7 @@ internal static class PrintingTests
         first.CancelAsync(firstFixture.Job.JobId, FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
         Assert.Equal("nonce-first", backend.LastRunNonce);
         Assert.Equal("job-1", backend.LastJobId);
-        Assert.Equal(JobState.CancelObserved, firstFixture.Store.GetJob(firstFixture.Job.JobId)!.State);
+        Assert.Equal(JobState.CancelRequested, firstFixture.Store.GetJob(firstFixture.Job.JobId)!.State);
         Assert.Equal(JobState.AcceptedByOs, secondFixture.Store.GetJob(secondFixture.Job.JobId)!.State);
     }
 
@@ -982,6 +1002,9 @@ internal static class PrintingTests
         backend.CancelReturnsFalse = false;
         var restartedCoordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "unused-after-restart", fixture.Artifacts);
         var retried = restartedCoordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
+        Assert.Equal(JobState.CancelRequested, retried.State);
+        backend.LastStatus = PrintBackendJobStatus.Cancelled;
+        retried = restartedCoordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(3)).GetAwaiter().GetResult();
         Assert.Equal(JobState.CancelObserved, retried.State);
         Assert.Equal(2, backend.CancelCount);
         Assert.Equal("queue-identity", backend.LastQueueIdentity);
