@@ -862,8 +862,9 @@ static void RecipeDuplexRequestChangesCompiledLayout()
         }
         catch (LayoutCapturedException) { }
 
-        Assert.Equal(3, composer.CompiledPageCount);
-        Assert.True(composer.CompiledSides.SequenceEqual([PageSide.Front, PageSide.Back, PageSide.Front]));
+        Assert.Equal(4, composer.CompiledPageCount);
+        Assert.True(composer.CompiledSides.SequenceEqual([PageSide.Front, PageSide.Back, PageSide.Front, PageSide.Back]));
+        Assert.True(composer.CompiledBlankPages.SequenceEqual([false, true, false, false]));
         Assert.Equal(0, store.GetRecentRuns().Length);
         Assert.True(sources.ResolutionSummaries[0].Contains("duplex mode/双面模式=LongEdge (file override/单文件覆盖)", StringComparison.Ordinal));
         Assert.True(sources.ResolutionSummaries[1].Contains("copies/份数=2 (file override/单文件覆盖)", StringComparison.Ordinal));
@@ -1302,12 +1303,14 @@ sealed class LayoutCaptureComposer : IPageCompositionAdapter
 {
     public int CompiledPageCount { get; private set; }
     public IReadOnlyList<PageSide> CompiledSides { get; private set; } = [];
+    public IReadOnlyList<bool> CompiledBlankPages { get; private set; } = [];
     public IReadOnlyList<(string ItemId, PageRectangle? Bounds)> CompiledPlacements { get; private set; } = [];
     public Task ComposePdfAsync(LayoutCompilation compilation, IEnumerable<PdfCompositionSource> sources,
         Stream destination, CancellationToken cancellationToken = default)
     {
         CompiledPageCount = compilation.Pages.Length;
         CompiledSides = compilation.Pages.Select(page => page.Side).ToArray();
+        CompiledBlankPages = compilation.Pages.Select(page => page.IsBlank).ToArray();
         CompiledPlacements = compilation.Pages.SelectMany(page => page.Placements)
             .Select(placement => (placement.ItemId, placement.TargetBounds)).ToArray();
         throw new LayoutCapturedException();

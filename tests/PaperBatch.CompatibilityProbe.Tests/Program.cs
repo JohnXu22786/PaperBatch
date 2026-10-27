@@ -192,6 +192,7 @@ var tests = new List<(string Name, Action Run)>
     ("page ranges and reversal preserve source mappings", LayoutTests.RangesAndReverseOrderPreserveSelectedMapping),
     ("mixed sheet sizes create separate contiguous segments", LayoutTests.MixedSheetSizesCreateDistinctContiguousSegments),
     ("duplex file boundary inserts a blank back face", LayoutTests.DuplexFileBoundariesInsertBlankBackFace),
+    ("duplex compatibility boundary starts next job on front", LayoutTests.DuplexCompatibilityBoundaryStartsNextJobOnFront),
     ("copy expansion and segment keys preserve order", LayoutTests.CopyExpansionAndSegmentsPreserveOrder),
     ("per-document copies ranges N-up and fit alter the compiled page map", LayoutTests.PerDocumentCopyRangeNUpAndFitSettingsAffectCompiledPages),
     ("automatic orientation preserves inspected source page dimensions", LayoutTests.AutoOrientationPreservesSourcePageDimensions),
