@@ -9,8 +9,8 @@ COPY tools/ipp-lab/build-packages.lock tools/ipp-lab/runtime-packages.lock tools
 COPY tools/ipp-lab/ubuntu-snapshot.sources /etc/apt/sources.list.d/ubuntu.sources
 
 RUN dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /tmp/base-packages.lock \
-    && apt-get -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false update \
-    && xargs -r apt-get -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false install --yes --no-install-recommends < tools/ipp-lab/build-packages.lock \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false update \
+    && xargs -r apt-get -o Acquire::Retries=3 -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false install --yes --no-install-recommends < tools/ipp-lab/build-packages.lock \
     && dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /tmp/installed-packages.lock \
     && cat /tmp/base-packages.lock tools/ipp-lab/build-packages.lock | sort -u > /tmp/expected-packages.lock \
     && diff -u /tmp/expected-packages.lock /tmp/installed-packages.lock \
@@ -44,8 +44,8 @@ COPY tools/ipp-lab/runtime-packages.lock tools/ipp-lab/runtime-packages.lock
 COPY tools/ipp-lab/ubuntu-snapshot.sources /etc/apt/sources.list.d/ubuntu.sources
 
 RUN dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /tmp/base-packages.lock \
-    && apt-get -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false update \
-    && xargs -r apt-get -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false install --yes --no-install-recommends < tools/ipp-lab/runtime-packages.lock \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false update \
+    && xargs -r apt-get -o Acquire::Retries=3 -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false install --yes --no-install-recommends < tools/ipp-lab/runtime-packages.lock \
     && dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /tmp/installed-packages.lock \
     && cat /tmp/base-packages.lock tools/ipp-lab/runtime-packages.lock | sort -u > /tmp/expected-packages.lock \
     && diff -u /tmp/expected-packages.lock /tmp/installed-packages.lock \
