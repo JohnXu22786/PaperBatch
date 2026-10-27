@@ -223,6 +223,7 @@ var tests = new List<(string Name, Action Run)>
     ("reported completion is not paper output confirmation", PrintingTests.OsCompletionDoesNotConfirmPaperOutput),
     ("partial-failure report describes the page-selection evidence it checks", PrintingTests.PartialFailureReportAccuratelyDescribesPageSelection),
     ("Windows queue capability enumeration is read-only", PrintingTests.NativeQueueEnumerationIsReadOnlyAndBounded),
+    ("initial EnumPrinters failures are not reported as an empty queue list", PrintingTests.InitialEnumPrintersFailureIsNotTreatedAsEmpty),
     ("production GDI adapter capability P/Invoke is read-only", PrintingTests.NativeGdiCapabilityBoundaryIsReadOnly),
     ("GDI backend verifies immutable artifact bytes and returns the StartDoc job receipt", GdiBackendTests.VerifiesArtifactAndReturnsReceipt),
     ("GDI backend rasterizes and submits only selected final PDF pages", GdiBackendTests.RasterizesAndSubmitsOnlySelectedFinalPages),

@@ -10,6 +10,7 @@ namespace PaperBatch.Core.Printing;
 public static class WindowsPrintCapabilityEnumerator
 {
     private const uint PrinterEnumLocal = 0x00000002;
+    private const int ErrorInsufficientBuffer = 122;
     private const int MaximumEnumeratedValues = 4096;
     private const ushort DcPapers = 2;
     private const ushort DcBins = 6;
@@ -23,7 +24,9 @@ public static class WindowsPrintCapabilityEnumerator
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Local print capability enumeration requires Windows.");
 
-        _ = EnumPrinters(PrinterEnumLocal, null, 2, IntPtr.Zero, 0, out var needed, out _);
+        var sizingSucceeded = EnumPrinters(PrinterEnumLocal, null, 2, IntPtr.Zero, 0, out var needed, out _);
+        var sizingError = Marshal.GetLastWin32Error();
+        needed = GetInitialEnumerationBufferSize(sizingSucceeded, sizingError, needed);
         if (needed == 0) return [];
         var buffer = Marshal.AllocHGlobal(checked((int)needed));
         try
@@ -55,6 +58,13 @@ public static class WindowsPrintCapabilityEnumerator
         return EnumerateLocalQueues().FirstOrDefault(queue =>
             string.Equals(queue.QueueIdentity, queueIdentity, StringComparison.Ordinal))
             ?? throw new KeyNotFoundException("The selected local printer queue is no longer present.");
+    }
+
+    internal static uint GetInitialEnumerationBufferSize(bool succeeded, int errorCode, uint needed)
+    {
+        if (succeeded) return needed;
+        if (errorCode == ErrorInsufficientBuffer && needed > 0) return needed;
+        throw new Win32Exception(errorCode, "Local print queue enumeration failed.");
     }
 
     private static PrinterCapabilitySnapshot Query(string name, string driver, string port)

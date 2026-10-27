@@ -5,6 +5,7 @@ using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Preparation;
 using PaperBatch.Core.Printing;
 using PaperBatch.Core.Rendering;
+using System.ComponentModel;
 using System.Text.Json;
 
 internal static class PrintingTests
@@ -31,6 +32,25 @@ internal static class PrintingTests
         Assert.True(queues.All(queue => !string.IsNullOrWhiteSpace(queue.QueueIdentity) &&
             !string.IsNullOrWhiteSpace(queue.DisplayName) && !string.IsNullOrWhiteSpace(queue.DriverName) &&
             !string.IsNullOrWhiteSpace(queue.PortName) && queue.Options.ContainsKey(PrintOption.Media)));
+    }
+
+    internal static void InitialEnumPrintersFailureIsNotTreatedAsEmpty()
+    {
+        Win32Exception? denied = null;
+        try
+        {
+            WindowsPrintCapabilityEnumerator.GetInitialEnumerationBufferSize(false, 5, 0);
+        }
+        catch (Win32Exception exception)
+        {
+            denied = exception;
+        }
+        Assert.True(denied is not null, "A failed initial enumeration with no buffer must surface its Win32 error.");
+        Assert.Equal(5, denied!.NativeErrorCode);
+        Assert.Equal(0u, WindowsPrintCapabilityEnumerator.GetInitialEnumerationBufferSize(true, 0, 0));
+        Assert.Equal(128u, WindowsPrintCapabilityEnumerator.GetInitialEnumerationBufferSize(false, 122, 128));
+        Assert.Throws<Win32Exception>(() =>
+            WindowsPrintCapabilityEnumerator.GetInitialEnumerationBufferSize(false, 122, 0));
     }
 
     internal static void NativeGdiCapabilityBoundaryIsReadOnly()
