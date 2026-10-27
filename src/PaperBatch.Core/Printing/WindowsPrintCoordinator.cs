@@ -258,16 +258,10 @@ public sealed class WindowsPrintCoordinator(
                 else throw;
             }
         }
-        var cancelled = await backend.CancelAsync(requested.OsReceipt!, cancellationToken).ConfigureAwait(false);
-        if (!cancelled) return requested;
-        try
-        {
-            return store.TransitionJob(jobId, JobState.CancelObserved, "The OS confirmed cancellation of the owned job.", atUtc);
-        }
-        catch (InvalidOperationException)
-        {
-            return store.GetJob(jobId)!;
-        }
+        await backend.CancelAsync(requested.OsReceipt!, cancellationToken).ConfigureAwait(false);
+        // A successful CancelAsync only means the spooler accepted the command. Cancellation
+        // becomes durable only after RefreshStatusAsync observes the terminal Cancelled status.
+        return store.GetJob(jobId)!;
     }
 
     private static bool SameDevice(PrinterCapabilitySnapshot left, PrinterCapabilitySnapshot right) =>
