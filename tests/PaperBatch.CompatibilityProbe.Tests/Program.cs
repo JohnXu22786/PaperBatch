@@ -169,6 +169,7 @@ var tests = new List<(string Name, Action Run)>
     ("per-item print copies are compiled when layout copies are absent", PreparedArtifactCoordinatorTests.PerItemPrintCopiesAreCompiledWhenLayoutCopiesAreAbsent),
     ("preparation validates idempotency keys before reading inputs", PreparedArtifactCoordinatorTests.PreparationRejectsInvalidIdempotencyKeysBeforeReadingInputs),
     ("valid preparation idempotency keys replay the persisted run", PreparedArtifactCoordinatorTests.ValidPreparationIdempotencyKeyReplaysThePersistedRun),
+    ("mismatched expected source hash rejects an existing idempotent run replay", PreparedArtifactCoordinatorTests.MismatchedExpectedShaRejectsExistingIdempotentRunReplay),
     ("prepared-run invariants reject invalid hashes and copy collections", CoreTests.PreparedRunInvariantsRejectInvalidHashesAndCopyCollections),
     ("prepared-run v2 persists final artifact and reads legacy v1", CoreTests.PreparedRunV2PersistsFinalArtifactAndReadsLegacyV1),
     ("prepared-run v3 persists final page ownership", CoreTests.PreparedRunV3PersistsFinalPageOwnership),
