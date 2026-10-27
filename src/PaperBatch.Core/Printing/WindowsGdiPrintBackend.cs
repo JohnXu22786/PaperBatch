@@ -14,6 +14,15 @@ public interface IWindowsPrintPdfRasterizer
 {
     Task<IReadOnlyList<WindowsPrintRasterPage>> RasterizeAsync(
         Stream pdf, int expectedPageCount, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<WindowsPrintRasterPage>> RasterizePagesAsync(
+        Stream pdf, int expectedPageCount, IReadOnlyList<int> pageNumbers, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(pageNumbers);
+        if (!pageNumbers.SequenceEqual(Enumerable.Range(1, expectedPageCount)))
+            throw new NotSupportedException("This PDF rasterizer does not support selecting pages from a composed artifact.");
+        return RasterizeAsync(pdf, expectedPageCount, cancellationToken);
+    }
 }
 
 /// <summary>PDFium rasterization through a caller supplied runtime path and SHA-256 pin.</summary>
@@ -29,23 +38,32 @@ public sealed class PinnedPdfiumWindowsPrintRasterizer : IWindowsPrintPdfRasteri
         _inspector = new PdfiumArtifactInspector(explicitRuntimePath, expectedSha256);
 
     public async Task<IReadOnlyList<WindowsPrintRasterPage>> RasterizeAsync(
-        Stream pdf, int expectedPageCount, CancellationToken cancellationToken = default)
+        Stream pdf, int expectedPageCount, CancellationToken cancellationToken = default) =>
+        await RasterizePagesAsync(pdf, expectedPageCount, Enumerable.Range(1, expectedPageCount).ToArray(), cancellationToken).ConfigureAwait(false);
+
+    public async Task<IReadOnlyList<WindowsPrintRasterPage>> RasterizePagesAsync(
+        Stream pdf, int expectedPageCount, IReadOnlyList<int> pageNumbers, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(pdf);
+        ArgumentNullException.ThrowIfNull(pageNumbers);
         if (!pdf.CanRead || !pdf.CanSeek) throw new ArgumentException("The PDF stream must be readable and seekable.", nameof(pdf));
         pdf.Position = 0;
         if (expectedPageCount is < 1 or > MaximumPageCount)
             throw new InvalidDataException("The final PDF page count is outside the bounded print raster limit.");
+        if (pageNumbers.Count is < 1 or > MaximumPageCount || pageNumbers.Any(page => page < 1 || page > expectedPageCount) ||
+            !pageNumbers.SequenceEqual(pageNumbers.Distinct().Order()))
+            throw new InvalidDataException("The selected final PDF pages are invalid.");
         if (await _inspector.GetPageCountAsync(pdf, cancellationToken).ConfigureAwait(false) != expectedPageCount)
             throw new InvalidDataException("PDFium page count differs from the immutable artifact before rasterization.");
         pdf.Position = 0;
         var sizes = await _inspector.GetPageSizesAsync(pdf, cancellationToken).ConfigureAwait(false);
         if (sizes.Count != expectedPageCount) throw new InvalidDataException("PDFium page geometry differs from the immutable artifact page count.");
-        var pages = new List<WindowsPrintRasterPage>(sizes.Count);
+        var pages = new List<WindowsPrintRasterPage>(pageNumbers.Count);
         long totalRasterBytes = 0;
-        for (var index = 0; index < sizes.Count; index++)
+        foreach (var pageNumber in pageNumbers)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var index = pageNumber - 1;
             var size = sizes[index];
             size.Validate($"PDF page {index + 1}");
             var scale = PrintDpi / 72d;
@@ -65,7 +83,7 @@ public sealed class PinnedPdfiumWindowsPrintRasterizer : IWindowsPrintPdfRasteri
             var rasterRatio = (double)raster.Width / raster.Height;
             if (Math.Abs(expectedRatio - rasterRatio) > Math.Max(0.01, expectedRatio * 0.001))
                 throw new InvalidDataException("PDFium raster geometry differs from the immutable artifact page geometry.");
-            pages.Add(new WindowsPrintRasterPage(index + 1, sizes[index], raster));
+            pages.Add(new WindowsPrintRasterPage(pageNumber, sizes[index], raster));
         }
         return pages;
     }
@@ -102,6 +120,7 @@ public sealed class WindowsGdiPrintBackend(
     IWindowsPrintPdfRasterizer rasterizer) : IWindowsPrintBackend
 {
     private const long MaximumPdfBytes = 512L * 1024 * 1024;
+    private const int MaximumPageCount = 500;
 
     public Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(string queueIdentity, CancellationToken cancellationToken = default) =>
         native.GetCapabilitiesAsync(queueIdentity, cancellationToken);
@@ -134,8 +153,23 @@ public sealed class WindowsGdiPrintBackend(
         try
         {
             using var content = new MemoryStream(bytes, writable: false);
-            pages = await rasterizer.RasterizeAsync(content, submission.Artifact.PageCount, cancellationToken).ConfigureAwait(false);
-            ValidatePages(pages, submission.Artifact.PageCount);
+            var pageNumbers = submission.FinalPageNumbers;
+            ArgumentNullException.ThrowIfNull(pageNumbers);
+            if (pageNumbers.Count is < 1 or > MaximumPageCount || pageNumbers.Any(page => page < 1 || page > submission.Artifact.PageCount) ||
+                !pageNumbers.SequenceEqual(pageNumbers.Distinct().Order()))
+                throw new InvalidDataException("Selected final PDF pages must be unique, ordered, and within the immutable artifact.");
+            var segmentPageNumbers = submission.Segment.FinalPageNumbers;
+            if (!segmentPageNumbers.IsDefaultOrEmpty)
+            {
+                if (!pageNumbers.SequenceEqual(segmentPageNumbers))
+                    throw new InvalidDataException("Selected final PDF pages must match the segment's persisted page ownership.");
+            }
+            else if (!pageNumbers.SequenceEqual(Enumerable.Range(1, submission.Artifact.PageCount)))
+            {
+                throw new InvalidDataException("A segment without persisted page ownership may submit only the complete final PDF.");
+            }
+            pages = await rasterizer.RasterizePagesAsync(content, submission.Artifact.PageCount, pageNumbers, cancellationToken).ConfigureAwait(false);
+            ValidatePages(pages, pageNumbers);
         }
         catch (PrintSubmissionException) { throw; }
         catch (Exception error)
@@ -242,13 +276,13 @@ public sealed class WindowsGdiPrintBackend(
             throw new PrintSubmissionException("Queue identity or capabilities changed before StartDoc.", false);
     }
 
-    private static void ValidatePages(IReadOnlyList<WindowsPrintRasterPage> pages, int expectedPageCount)
+    private static void ValidatePages(IReadOnlyList<WindowsPrintRasterPage> pages, IReadOnlyList<int> expectedPageNumbers)
     {
-        if (pages.Count != expectedPageCount) throw new InvalidDataException("PDFium raster page count differs from the immutable artifact.");
+        if (pages.Count != expectedPageNumbers.Count) throw new InvalidDataException("PDFium raster page count differs from the selected final artifact pages.");
         for (var index = 0; index < pages.Count; index++)
         {
             var page = pages[index];
-            if (page.Number != index + 1 || !double.IsFinite(page.PdfSize.WidthPoints) || !double.IsFinite(page.PdfSize.HeightPoints) ||
+            if (page.Number != expectedPageNumbers[index] || !double.IsFinite(page.PdfSize.WidthPoints) || !double.IsFinite(page.PdfSize.HeightPoints) ||
                 page.PdfSize.WidthPoints <= 0 || page.PdfSize.HeightPoints <= 0 || page.PdfSize.WidthPoints > 14400 || page.PdfSize.HeightPoints > 14400 ||
                 page.Raster.Width <= 0 || page.Raster.Height <= 0 || page.Raster.Width > 16384 || page.Raster.Height > 16384 ||
                 page.Raster.Stride < checked(page.Raster.Width * 4) ||

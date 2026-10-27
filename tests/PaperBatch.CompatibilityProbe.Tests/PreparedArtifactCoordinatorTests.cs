@@ -64,6 +64,9 @@ internal static class PreparedArtifactCoordinatorTests
             Assert.False(first.Persistence!.Replayed);
             Assert.True(replay.Persistence!.Replayed);
             Assert.Equal(first.Run!.RunId, replay.Run!.RunId);
+            Assert.True(first.Run.Segments.Single().FinalPageNumbers.SequenceEqual([1]));
+            Assert.True(replay.Run!.Segments.Single().FinalPageNumbers.SequenceEqual([1]));
+            Assert.True(runs.GetPreparedRun(first.Run.RunId)!.Segments.Single().FinalPageNumbers.SequenceEqual([1]));
         }
         finally
         {
@@ -177,12 +180,18 @@ internal static class PreparedArtifactCoordinatorTests
                 .GetAwaiter().GetResult();
             Assert.True(perDocument.Succeeded, string.Join("; ", perDocument.Diagnostics));
             Assert.Equal(4, perDocument.Run!.FinalArtifact!.PageCount);
-            Assert.Equal(2, perDocument.Run.Segments.Length);
+            Assert.Equal(3, perDocument.Run.Segments.Length);
             Assert.Equal(1, perDocument.Run.Items[0].PrintSettings.Copies);
             Assert.Equal(1, perDocument.Run.Items[1].PrintSettings.Copies);
             Assert.True(perDocument.Run.FinalArtifact.Sha256 != reopenedRun.FinalArtifact!.Sha256);
             Assert.True(perDocument.Run.Segments[0].ItemIds.SequenceEqual([perDocument.Run.Items[0].ItemId]));
             Assert.True(perDocument.Run.Segments[1].ItemIds.SequenceEqual([perDocument.Run.Items[1].ItemId]));
+            Assert.True(perDocument.Run.Segments[2].ItemIds.SequenceEqual([perDocument.Run.Items[0].ItemId]));
+            Assert.True(perDocument.Run.Segments.Select(segment => segment.FinalPageNumbers)
+                .SelectMany(pages => pages).SequenceEqual([1, 2, 3, 4]));
+            Assert.True(perDocument.Run.Segments[0].FinalPageNumbers.SequenceEqual([1]));
+            Assert.True(perDocument.Run.Segments[1].FinalPageNumbers.SequenceEqual([2, 3]));
+            Assert.True(perDocument.Run.Segments[2].FinalPageNumbers.SequenceEqual([4]));
 
             stage = "orientation identity preparation";
             var changedLaterProfile = pipeline.PrepareAsync(

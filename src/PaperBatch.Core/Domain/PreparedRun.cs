@@ -130,13 +130,15 @@ public sealed record CompatibleSegment
         int index,
         IEnumerable<string> itemIds,
         string compatibilityKey,
-        PrintSettings printSettings)
+        PrintSettings printSettings,
+        IEnumerable<int>? finalPageNumbers = null)
     {
         SegmentId = segmentId;
         Index = index;
         ItemIds = itemIds?.ToImmutableArray() ?? throw new ArgumentNullException(nameof(itemIds));
         CompatibilityKey = compatibilityKey;
         PrintSettings = printSettings;
+        FinalPageNumbers = finalPageNumbers?.ToImmutableArray() ?? [];
     }
 
     public string SegmentId { get; init; }
@@ -144,6 +146,8 @@ public sealed record CompatibleSegment
     public ImmutableArray<string> ItemIds { get; init; }
     public string CompatibilityKey { get; init; }
     public PrintSettings PrintSettings { get; init; }
+    /// <summary>Ordered 1-based pages in the composed final PDF owned by this segment; empty only for legacy metadata.</summary>
+    public ImmutableArray<int> FinalPageNumbers { get; init; }
 }
 
 /// <summary>Immutable, engine-neutral input to a later coordinator submission.</summary>
@@ -246,6 +250,10 @@ public sealed record PreparedRun
             {
                 throw new ArgumentException("A compatible segment must contain at least one item.", nameof(segments));
             }
+            if (segment.ItemIds.Distinct(StringComparer.Ordinal).Count() != segment.ItemIds.Length)
+            {
+                throw new ArgumentException("A compatible segment cannot contain the same item more than once.", nameof(segments));
+            }
 
             if (string.IsNullOrWhiteSpace(segment.CompatibilityKey) || segment.CompatibilityKey.Length > 256)
             {
@@ -253,6 +261,17 @@ public sealed record PreparedRun
             }
 
             ValidatePrintSettings(segment.PrintSettings, nameof(segments));
+            if (!segment.FinalPageNumbers.IsDefault)
+            {
+                var previousPage = 0;
+                foreach (var pageNumber in segment.FinalPageNumbers)
+                {
+                    if (pageNumber <= previousPage || (previousPage != 0 && pageNumber != previousPage + 1) ||
+                        finalArtifact is null || pageNumber > finalArtifact.PageCount)
+                        throw new ArgumentException("Each segment must own one contiguous range of ordered, in-range final artifact pages.", nameof(segments));
+                    previousPage = pageNumber;
+                }
+            }
             foreach (var itemId in segment.ItemIds)
             {
                 if (!itemsById.TryGetValue(itemId, out var item))
@@ -269,9 +288,9 @@ public sealed record PreparedRun
             }
         }
 
-        if (!flattenedItemIds.SequenceEqual(normalizedItems.Select(item => item.ItemId), StringComparer.Ordinal))
+        if (!flattenedItemIds.ToHashSet(StringComparer.Ordinal).SetEquals(itemsById.Keys))
         {
-            throw new ArgumentException("Segments must cover each prepared item exactly once and preserve its order.", nameof(segments));
+            throw new ArgumentException("Segments must cover every prepared item at least once.", nameof(segments));
         }
 
         if (finalArtifact is not null)
@@ -281,6 +300,17 @@ public sealed record PreparedRun
             if (finalArtifact.LengthBytes <= 0 || finalArtifact.PageCount <= 0 ||
                 !string.Equals(finalArtifact.ArtifactId, "artifact_" + finalArtifact.Sha256.ToLowerInvariant(), StringComparison.Ordinal))
                 throw new ArgumentException("The final PDF artifact identity, length, and page count are invalid.", nameof(finalArtifact));
+        }
+
+        var mappedSegments = immutableSegments.Where(segment => !segment.FinalPageNumbers.IsDefaultOrEmpty).ToArray();
+        if (mappedSegments.Length > 0)
+        {
+            if (mappedSegments.Length != immutableSegments.Length || finalArtifact is null)
+                throw new ArgumentException("Final page ownership must be present for every segment of a run with a final artifact.", nameof(segments));
+            var ownedPages = mappedSegments.SelectMany(segment => segment.FinalPageNumbers).Order().ToArray();
+            if (ownedPages.Length != finalArtifact.PageCount ||
+                ownedPages.Where((pageNumber, index) => pageNumber != index + 1).Any())
+                throw new ArgumentException("Final page ownership must cover every composed page exactly once.", nameof(segments));
         }
 
         return new PreparedRun(

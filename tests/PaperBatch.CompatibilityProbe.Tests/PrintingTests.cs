@@ -232,6 +232,88 @@ internal static class PrintingTests
         Assert.Equal(0, backend.SubmissionCount);
     }
 
+    internal static void SubmissionRejectsLegacyMultiSegmentRunWithoutOwnershipMap()
+    {
+        using var source = new Fixture();
+        var first = source.PreparedRun.Items[0];
+        var second = first with { ItemId = "item-2" };
+        var segments = new[]
+        {
+            new CompatibleSegment("segment-1", 0, [first.ItemId], "compat", first.PrintSettings),
+            new CompatibleSegment("segment-2", 1, [second.ItemId], "compat", second.PrintSettings)
+        };
+        var legacy = PreparedRun.Create(source.PreparedRun.RunId, source.PreparedRun.CreatedAtUtc,
+            source.PreparedRun.SnapshotFingerprint, [first, second], segments, source.PreparedRun.FinalArtifact);
+        using var fixture = new Fixture(legacy);
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "legacy-multi", fixture.Artifacts);
+
+        var result = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "legacy-multi-submit", FixedTime)
+            .GetAwaiter().GetResult();
+
+        Assert.Equal(PrintSubmissionStatus.Rejected, result.Status);
+        Assert.Contains("Reprepare", result.Reason!);
+        Assert.Equal(0, backend.CapabilityReads);
+        Assert.Equal(0, backend.SubmissionCount);
+        Assert.Equal(JobState.Ready, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+    }
+
+    internal static void CoordinatorOrdersContiguousSegmentJobsByFinalPageOrder()
+    {
+        using var source = new Fixture();
+        var first = source.PreparedRun.Items[0];
+        var second = first with { ItemId = "item-2" };
+        var settings = first.PrintSettings;
+        var segments = new[]
+        {
+            new CompatibleSegment("segment-1", 0, [first.ItemId], "compat", settings, [2]),
+            new CompatibleSegment("segment-2", 1, [second.ItemId], "compat", settings, [1])
+        };
+        var twoPagePdf = PdfCompositionTests.TwoPagePdf();
+        var artifactReceipt = source.Artifacts.PersistPdfAsync(new MemoryStream(twoPagePdf), "test-renderer", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        var finalArtifact = new FinalPdfArtifact(artifactReceipt.Artifact.ArtifactId, artifactReceipt.Artifact.Sha256,
+            artifactReceipt.Artifact.LengthBytes, 2);
+        var run = PreparedRun.Create(source.PreparedRun.RunId, source.PreparedRun.CreatedAtUtc,
+            source.PreparedRun.SnapshotFingerprint, [first, second], segments, finalArtifact);
+        using var fixture = new Fixture(run, twoPagePdf, 2);
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "segment-pages", fixture.Artifacts);
+
+        var results = coordinator.SubmitRunAsync(run, "segment-pages-submit", FixedTime).GetAwaiter().GetResult();
+
+        Assert.Equal(2, results.Count);
+        Assert.True(results.All(result => result.Status == PrintSubmissionStatus.Accepted));
+        Assert.True(backend.SubmittedPageNumbers[0].SequenceEqual([1]));
+        Assert.True(backend.SubmittedPageNumbers[1].SequenceEqual([2]));
+    }
+
+    internal static void CoordinatorSubmitsSplitOwnerBlocksInComposedOrder()
+    {
+        using var source = new Fixture();
+        var first = source.PreparedRun.Items[0];
+        var second = first with { ItemId = "item-2" };
+        var settings = first.PrintSettings;
+        var artifact = source.PreparedRun.FinalArtifact! with { PageCount = 3 };
+        var segments = new[]
+        {
+            new CompatibleSegment("first-block", 0, [first.ItemId], "compat", settings, [1]),
+            new CompatibleSegment("second-document", 1, [second.ItemId], "compat", settings, [2]),
+            new CompatibleSegment("first-copy", 2, [first.ItemId], "compat", settings, [3])
+        };
+        var run = PreparedRun.Create("run-split-owner-blocks", FixedTime, Hash, [first, second], segments, artifact);
+        using var fixture = new Fixture(run, RendererTests.OnePagePdf(), 3);
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "split-owner-blocks", fixture.Artifacts);
+
+        var results = coordinator.SubmitRunAsync(run, "split-owner-blocks-submit", FixedTime).GetAwaiter().GetResult();
+
+        Assert.Equal(3, results.Count);
+        Assert.True(results.All(result => result.Status == PrintSubmissionStatus.Accepted));
+        Assert.True(backend.SubmittedPageNumbers.SelectMany(pages => pages).SequenceEqual([1, 2, 3]));
+        Assert.True(backend.SubmittedPageNumbers.Select(pages => pages.Single()).SequenceEqual([1, 2, 3]));
+    }
+
     internal static void SubmissionPassesTheExactPersistedFinalPdf()
     {
         using var fixture = new Fixture();
@@ -306,6 +388,7 @@ internal static class PrintingTests
         var persistedPageSizes = batch.GetSavedPageSizes(finalArtifact);
         Assert.Equal(1, run.Segments.Length);
         Assert.True(run.Segments[0].ItemIds.SequenceEqual(run.Items.Select(item => item.ItemId)));
+        Assert.True(run.Segments[0].FinalPageNumbers.SequenceEqual([1, 2, 3]));
         var jobs = firstPrepared.Persistence!.Jobs;
         Assert.Equal(1, jobs.Length);
         Assert.Equal(0, jobs[0].SegmentIndex);
@@ -363,6 +446,8 @@ internal static class PrintingTests
         Assert.Equal(4, partialRun.FinalArtifact!.PageCount);
         Assert.Equal(4, partial.GetSavedPageCount(partialRun.FinalArtifact));
         Assert.Equal(2, partialRun.Segments.Length);
+        Assert.True(partialRun.Segments[0].FinalPageNumbers.SequenceEqual([1, 2]));
+        Assert.True(partialRun.Segments[1].FinalPageNumbers.SequenceEqual([3, 4]));
         Assert.Equal(2, partialPrepared.Persistence!.Jobs.Length);
         Assert.True(partialRun.Segments.Select(segment => segment.ItemIds.Single())
             .SequenceEqual(partialRun.Items.Select(item => item.ItemId)));
@@ -379,6 +464,10 @@ internal static class PrintingTests
         Assert.Equal(PrintSubmissionStatus.NeedsReviewUnknown, partialResults[1].Status);
         Assert.Equal(2, partialNative.StartDocCount);
         Assert.Equal(2, partialNative.Submissions.Count);
+        Assert.True(partialRasterizer.RasterizedPageNumbers[0].SequenceEqual([1, 2]));
+        Assert.True(partialRasterizer.RasterizedPageNumbers[1].SequenceEqual([3, 4]));
+        Assert.Equal(2, partialNative.Documents[0].WritePageCount);
+        Assert.Equal(2, partialNative.Documents[1].WritePageCount);
         Assert.True(partialNative.Submissions.All(value => value.Options.QueueIdentity == "queue-identity" &&
             value.Options.Media == "Letter" && value.Options.Tray == "Tray1" && value.Options.Color == "Color" &&
             value.Options.Duplex == "LongEdge"));
@@ -530,17 +619,23 @@ internal static class PrintingTests
     {
         public List<byte[]> ReceivedBytes { get; } = [];
         public List<PageSize[]> RasterizedPageSizes { get; } = [];
+        public List<int[]> RasterizedPageNumbers { get; } = [];
 
         public async Task<IReadOnlyList<WindowsPrintRasterPage>> RasterizeAsync(
             Stream pdf, int expectedPageCount, CancellationToken cancellationToken = default)
+            => await RasterizePagesAsync(pdf, expectedPageCount, Enumerable.Range(1, expectedPageCount).ToArray(), cancellationToken);
+
+        public async Task<IReadOnlyList<WindowsPrintRasterPage>> RasterizePagesAsync(
+            Stream pdf, int expectedPageCount, IReadOnlyList<int> pageNumbers, CancellationToken cancellationToken = default)
         {
             using var content = new MemoryStream();
             await pdf.CopyToAsync(content, cancellationToken);
             ReceivedBytes.Add(content.ToArray());
-            var pages = Enumerable.Range(1, expectedPageCount)
+            var pages = pageNumbers
                 .Select(page => new WindowsPrintRasterPage(page, new PageSize(612, 792), new PdfRasterPage(17, 22, 68, new byte[1496])))
                 .ToArray();
             RasterizedPageSizes.Add(pages.Select(page => page.PdfSize).ToArray());
+            RasterizedPageNumbers.Add(pages.Select(page => page.Number).ToArray());
             return pages;
         }
     }
@@ -722,12 +817,17 @@ internal static class PrintingTests
         using var seed = new Fixture();
         var firstItem = seed.PreparedRun.Items[0];
         var secondItem = firstItem with { ItemId = "item-2" };
-        var firstSegment = new CompatibleSegment("segment-1", 0, [firstItem.ItemId], "compat-1", Settings());
-        var secondSegment = new CompatibleSegment("segment-2", 1, [secondItem.ItemId], "compat-2", Settings());
+        var twoPagePdf = PdfCompositionTests.TwoPagePdf();
+        var stored = seed.Artifacts.PersistPdfAsync(new MemoryStream(twoPagePdf), "test-renderer", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        var finalArtifact = new FinalPdfArtifact(stored.Artifact.ArtifactId, stored.Artifact.Sha256,
+            stored.Artifact.LengthBytes, 2);
+        var firstSegment = new CompatibleSegment("segment-1", 0, [firstItem.ItemId], "compat-1", Settings(), [1]);
+        var secondSegment = new CompatibleSegment("segment-2", 1, [secondItem.ItemId], "compat-2", Settings(), [2]);
         var run = PreparedRun.Create("run-multi", FixedTime, Hash, [firstItem, secondItem],
-            [firstSegment, secondSegment], seed.PreparedRun.FinalArtifact);
+            [firstSegment, secondSegment], finalArtifact);
 
-        using var fixture = new Fixture(run);
+        using var fixture = new Fixture(run, twoPagePdf, 2);
         var uncertainBackend = new TestOnlySimulatedPrintBackend(Capabilities()) { ThrowAfterSubmitSideEffect = true };
         var coordinator = new WindowsPrintCoordinator(fixture.Store, uncertainBackend, static () => "multi-nonce", fixture.Artifacts);
         var firstAttempt = coordinator.SubmitRunAsync(run, "multi-key", FixedTime).GetAwaiter().GetResult();
@@ -744,12 +844,17 @@ internal static class PrintingTests
         using var seed = new Fixture();
         var firstItem = seed.PreparedRun.Items[0];
         var secondItem = firstItem with { ItemId = "item-2" };
-        var firstSegment = new CompatibleSegment("segment-1", 0, [firstItem.ItemId], "compat-1", Settings());
-        var secondSegment = new CompatibleSegment("segment-2", 1, [secondItem.ItemId], "compat-2", Settings());
+        var twoPagePdf = PdfCompositionTests.TwoPagePdf();
+        var stored = seed.Artifacts.PersistPdfAsync(new MemoryStream(twoPagePdf), "test-renderer", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        var finalArtifact = new FinalPdfArtifact(stored.Artifact.ArtifactId, stored.Artifact.Sha256,
+            stored.Artifact.LengthBytes, 2);
+        var firstSegment = new CompatibleSegment("segment-1", 0, [firstItem.ItemId], "compat-1", Settings(), [1]);
+        var secondSegment = new CompatibleSegment("segment-2", 1, [secondItem.ItemId], "compat-2", Settings(), [2]);
         var run = PreparedRun.Create("run-known-no-effect-retry", FixedTime, Hash, [firstItem, secondItem],
-            [firstSegment, secondSegment], seed.PreparedRun.FinalArtifact);
+            [firstSegment, secondSegment], finalArtifact);
 
-        using var fixture = new Fixture(run);
+        using var fixture = new Fixture(run, twoPagePdf, 2);
         var backend = new TestOnlySimulatedPrintBackend(Capabilities()) { ThrowCancellationOnSubmissionNumber = 2 };
         var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "retryable-nonce", fixture.Artifacts);
 
@@ -888,6 +993,7 @@ internal static class PrintingTests
         public PrintBackendJobStatus LastStatus { get; set; } = PrintBackendJobStatus.Accepted;
         public Action? OnCancel { get; set; }
         public System.Collections.Concurrent.ConcurrentBag<OsJobReceipt> Receipts { get; } = [];
+        public List<int[]> SubmittedPageNumbers { get; } = [];
 
         public Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(string queueIdentity, CancellationToken cancellationToken = default) =>
             Task.FromResult(++_capabilityReads >= 2 ? CapabilitiesOnSecondRead ?? capabilities : capabilities);
@@ -895,6 +1001,7 @@ internal static class PrintingTests
         public Task<OsJobReceipt> SubmitAsync(WindowsPrintSubmission submission, CancellationToken cancellationToken = default)
         {
             var submissionNumber = Interlocked.Increment(ref _submissionCount);
+            SubmittedPageNumbers.Add(submission.FinalPageNumbers.ToArray());
             LastQueueIdentity = submission.Options.QueueIdentity;
             LastRunNonce = submission.RunNonce;
             LastArtifactId = submission.Artifact.ArtifactId;
@@ -933,15 +1040,16 @@ internal static class PrintingTests
     private sealed class Fixture : IDisposable
     {
         private readonly string _temporary = Path.Combine(Path.GetTempPath(), "paperbatch-print-test-" + Guid.NewGuid().ToString("N"));
-        public Fixture(PreparedRun? runOverride = null)
+        public Fixture(PreparedRun? runOverride = null, byte[]? finalPdf = null, int finalPageCount = 1)
         {
             Directory.CreateDirectory(_temporary);
             Store = new SqliteRunStore(Path.Combine(_temporary, "runs.db"));
             Store.Initialize();
             Artifacts = new PaperBatch.Core.Rendering.RenderArtifactStore(Path.Combine(_temporary, "artifacts"));
-            var pdf = RendererTests.OnePagePdf();
+            var pdf = finalPdf ?? RendererTests.OnePagePdf();
             var storedArtifact = Artifacts.PersistPdfAsync(new MemoryStream(pdf), "test-renderer", "1", new Dictionary<string, string>()).GetAwaiter().GetResult();
-            var finalArtifact = new FinalPdfArtifact(storedArtifact.Artifact.ArtifactId, storedArtifact.Artifact.Sha256, storedArtifact.Artifact.LengthBytes, 1);
+            var finalArtifact = new FinalPdfArtifact(storedArtifact.Artifact.ArtifactId, storedArtifact.Artifact.Sha256,
+                storedArtifact.Artifact.LengthBytes, finalPageCount);
             var item = new PreparedItem("item-1", new SourceSnapshot("source", Hash, 1, FixedTime),
                 new RendererResult("renderer", "1", "artifact", Hash, 1, 1, new RendererCapabilities(1, ["application/pdf"])),
                 [new PageMapping(1, 1)], Settings());

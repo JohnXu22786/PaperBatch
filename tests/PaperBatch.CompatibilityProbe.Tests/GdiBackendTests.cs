@@ -33,6 +33,52 @@ internal static class GdiBackendTests
         Assert.Equal("run-nonce", native.LastReceipt.RunNonce);
     }
 
+    internal static void RasterizesAndSubmitsOnlySelectedFinalPages()
+    {
+        var pdf = RendererTests.OnePagePdf();
+        var artifact = new FinalPdfArtifact("artifact-1",
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(pdf)), pdf.Length, 3);
+        var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.LongEdge, "Letter", Orientation.Portrait,
+            ScalingMode.ShrinkToFit, "queue-identity", "Tray1");
+        var segment = new CompatibleSegment("segment", 0, ["item"], "compat", settings, [1, 3]);
+        var options = WindowsPrintJobOptions.Map("queue-identity", Capabilities(), settings);
+        var submission = new WindowsPrintSubmission(options, segment, "run-nonce", At, artifact,
+            new MemoryStream(pdf), [1, 3]);
+        var native = new FakeNative(Capabilities());
+        var rasterizer = new FakeRasterizer();
+        var backend = new WindowsGdiPrintBackend(native, rasterizer);
+
+        _ = backend.SubmitAsync(submission).GetAwaiter().GetResult();
+
+        Assert.True(rasterizer.RequestedPageNumbers!.SequenceEqual([1, 3]));
+        Assert.Equal(2, native.LastDocument!.CompletedPages);
+        Assert.Equal(1, native.StartDocCount);
+    }
+
+    internal static void RejectsPageSelectionOutsideSegmentOwnership()
+    {
+        var pdf = RendererTests.OnePagePdf();
+        var artifact = new FinalPdfArtifact("artifact-1",
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(pdf)), pdf.Length, 2);
+        var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.LongEdge, "Letter", Orientation.Portrait,
+            ScalingMode.ShrinkToFit, "queue-identity", "Tray1");
+        var segment = new CompatibleSegment("segment", 0, ["item"], "compat", settings, [1]);
+        var options = WindowsPrintJobOptions.Map("queue-identity", Capabilities(), settings);
+        var submission = new WindowsPrintSubmission(options, segment, "run-nonce", At, artifact,
+            new MemoryStream(pdf), [2]);
+        var native = new FakeNative(Capabilities());
+        var rasterizer = new FakeRasterizer();
+        var backend = new WindowsGdiPrintBackend(native, rasterizer);
+
+        var mayHaveReachedOs = true;
+        try { _ = backend.SubmitAsync(submission).GetAwaiter().GetResult(); }
+        catch (PrintSubmissionException error) { mayHaveReachedOs = error.MayHaveReachedOs; }
+
+        Assert.False(mayHaveReachedOs);
+        Assert.Equal(0, native.StartDocCount);
+        Assert.True(rasterizer.RequestedPageNumbers is null);
+    }
+
     internal static void RejectsCapabilityMutationBeforeStartDoc()
     {
         var pdf = RendererTests.OnePagePdf();
@@ -195,7 +241,8 @@ internal static class GdiBackendTests
             ScalingMode.ShrinkToFit, "queue-identity", "Tray1");
         var segment = new CompatibleSegment("segment", 0, ["item"], "compat", settings);
         var options = WindowsPrintJobOptions.Map("queue-identity", Capabilities(), settings);
-        return new WindowsPrintSubmission(options, segment, "run-nonce", At, artifact, new MemoryStream(pdf));
+        return new WindowsPrintSubmission(options, segment, "run-nonce", At, artifact, new MemoryStream(pdf),
+            Enumerable.Range(1, artifact.PageCount).ToArray());
     }
 
     private static FinalPdfArtifact Artifact(byte[] pdf) => new("artifact-1",
@@ -215,15 +262,20 @@ internal static class GdiBackendTests
     {
         public bool CancelDuringRasterization { get; init; }
         public byte[] ReceivedBytes { get; private set; } = [];
+        public IReadOnlyList<int>? RequestedPageNumbers { get; private set; }
         public async Task<IReadOnlyList<WindowsPrintRasterPage>> RasterizeAsync(Stream pdf, int expectedPageCount, CancellationToken cancellationToken = default)
+            => await RasterizePagesAsync(pdf, expectedPageCount, Enumerable.Range(1, expectedPageCount).ToArray(), cancellationToken);
+
+        public async Task<IReadOnlyList<WindowsPrintRasterPage>> RasterizePagesAsync(
+            Stream pdf, int expectedPageCount, IReadOnlyList<int> pageNumbers, CancellationToken cancellationToken = default)
         {
             using var content = new MemoryStream();
             await pdf.CopyToAsync(content, cancellationToken);
             ReceivedBytes = content.ToArray();
+            RequestedPageNumbers = pageNumbers.ToArray();
             if (CancelDuringRasterization) throw new OperationCanceledException(cancellationToken);
-            return [
-                new(1, new PageSize(612, 792), new PdfRasterPage(17, 22, 68, new byte[1496]))
-            ];
+            return pageNumbers.Select(page => new WindowsPrintRasterPage(page, new PageSize(612, 792),
+                new PdfRasterPage(17, 22, 68, new byte[1496]))).ToArray();
         }
     }
 

@@ -190,6 +190,11 @@ public sealed class PreparedArtifactCoordinator(
             foreach (var group in segmentedItems.GroupAdjacentBy(entry => (entry.Item.PrintSettings, entry.LayoutSettings)))
                 segments.Add(new CompatibleSegment("segment_" + segments.Count.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     segments.Count, group.Select(entry => entry.Item.ItemId), "layout-v1", group[0].Item.PrintSettings));
+            try { segments = SegmentPageOwnership.Assign(layout, segments).ToList(); }
+            catch (InvalidDataException exception)
+            {
+                return new(null, null, [exception.Message], IsCancelled: false);
+            }
             var finalId = "run_" + Guid.NewGuid().ToString("N");
             var fingerprint = ComputeFingerprint(items, printSettings, layoutOptions, perItemLayoutSettings);
             using var composedPdf = new MemoryStream();
