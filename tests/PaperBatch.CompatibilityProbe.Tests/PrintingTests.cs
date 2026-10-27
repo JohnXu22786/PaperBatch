@@ -11,6 +11,18 @@ internal static class PrintingTests
 {
     private static readonly DateTimeOffset FixedTime = new(2026, 10, 20, 12, 0, 0, TimeSpan.Zero);
     private const string Hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private const string PartialFailureEvidenceLimit = "The partial case checks segment page maps [1, 2] and [3, 4] and rasterized pages [1, 2] and [3, 4], alongside segment/job ordering, ambiguous state and no replay. This verifies per-segment selection through the fake orchestration path only; it does not validate a native queue or physical output.";
+    private const string PageSelectionEvidenceLimit = "Per-segment page selection is verified in the partial-failure scenario by matching its segment page maps and rasterized pages [1, 2] and [3, 4]. This is fake orchestration evidence only, not native queue or physical-output validation.";
+
+    internal static void PartialFailureReportAccuratelyDescribesPageSelection()
+    {
+        Assert.Contains("segment page maps [1, 2] and [3, 4]", PartialFailureEvidenceLimit);
+        Assert.Contains("rasterized pages [1, 2] and [3, 4]", PartialFailureEvidenceLimit);
+        Assert.False(PartialFailureEvidenceLimit.Contains("does not verify per-segment page selection", StringComparison.Ordinal));
+        Assert.False(PageSelectionEvidenceLimit.Contains("is not verified", StringComparison.Ordinal));
+        Assert.Contains("fake orchestration", PartialFailureEvidenceLimit);
+        Assert.Contains("fake orchestration", PageSelectionEvidenceLimit);
+    }
 
     internal static void NativeQueueEnumerationIsReadOnlyAndBounded()
     {
@@ -563,7 +575,7 @@ internal static class PrintingTests
                     pageCount = partialRun.FinalArtifact.PageCount,
                     segmentCount = partialRun.Segments.Length,
                     jobCount = partialJobs.Length,
-                    evidenceLimit = "The partial case checks segment/job ordering, ambiguous state and no replay; it does not verify per-segment page selection, which is tracked as a separate batch-print fix.",
+                    evidenceLimit = PartialFailureEvidenceLimit,
                     outcomes = partialResults.Select(result => result.Status.ToString()).ToArray(),
                     submissions = partialNative.Submissions.Select((value, index) => new
                     {
@@ -600,7 +612,7 @@ internal static class PrintingTests
                 {
                     "The batch test exercises two checked-in sources: a two-page PDF followed by a one-page RGB PNG.",
                     "The current model groups these matching printer settings into one segment and one job; per-item layout copy expansion is separately tested as two ordered segments/jobs.",
-                    "Per-segment page selection is not verified by the partial-failure scenario and is tracked in a separate batch-print fix.",
+                    PageSelectionEvidenceLimit,
                     "Production renderer formats are PDF, JPEG and PNG; this batch sample directly exercises PDF and PNG, not JPEG or office document conversion.",
                     "The test proves PaperBatch orchestration to an injected fake boundary only; it does not prove OS queue acceptance or physical paper output."
                 }

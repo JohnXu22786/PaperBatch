@@ -220,6 +220,7 @@ var tests = new List<(string Name, Action Run)>
     ("print cancellation race preserves the winning OS status", PrintingTests.CancellationRacePreservesOsStatus),
     ("print cancellation retries the exact receipt after restart", PrintingTests.CancellationRetryAfterRestartUsesReceipt),
     ("reported completion is not paper output confirmation", PrintingTests.OsCompletionDoesNotConfirmPaperOutput),
+    ("partial-failure report describes the page-selection evidence it checks", PrintingTests.PartialFailureReportAccuratelyDescribesPageSelection),
     ("Windows queue capability enumeration is read-only", PrintingTests.NativeQueueEnumerationIsReadOnlyAndBounded),
     ("production GDI adapter capability P/Invoke is read-only", PrintingTests.NativeGdiCapabilityBoundaryIsReadOnly),
     ("GDI backend verifies immutable artifact bytes and returns the StartDoc job receipt", GdiBackendTests.VerifiesArtifactAndReturnsReceipt),
