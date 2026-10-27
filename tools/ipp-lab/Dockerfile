@@ -8,9 +8,20 @@ WORKDIR /opt/paperbatch
 COPY tools/ipp-lab/build-packages.lock tools/ipp-lab/runtime-packages.lock tools/ipp-lab/create_license_inventory.py tools/ipp-lab/
 COPY tools/ipp-lab/ubuntu-snapshot.sources /etc/apt/sources.list.d/ubuntu.sources
 
-RUN dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /tmp/base-packages.lock \
-    && apt-get -o Acquire::Retries=3 -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false update \
-    && xargs -r apt-get -o Acquire::Retries=3 -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false install --yes --no-install-recommends < tools/ipp-lab/build-packages.lock \
+# Retry at most three times with 1s/2s backoff; Error-Mode=any rejects partial indexes.
+RUN set -eu; \
+    retry() { \
+        attempt=1; \
+        while [ "$attempt" -le 3 ]; do \
+            if "$@"; then return 0; fi; \
+            [ "$attempt" -eq 3 ] && return 1; \
+            sleep "$attempt"; \
+            attempt=$((attempt + 1)); \
+        done; \
+    }; \
+    dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /tmp/base-packages.lock \
+    && retry apt-get -o Acquire::Retries=3 -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false -o APT::Update::Error-Mode=any update \
+    && retry xargs -a tools/ipp-lab/build-packages.lock -r apt-get -o Acquire::Retries=3 -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false install --yes --no-install-recommends \
     && dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /tmp/installed-packages.lock \
     && cat /tmp/base-packages.lock tools/ipp-lab/build-packages.lock | sort -u > /tmp/expected-packages.lock \
     && diff -u /tmp/expected-packages.lock /tmp/installed-packages.lock \
@@ -43,9 +54,20 @@ WORKDIR /opt/paperbatch
 COPY tools/ipp-lab/runtime-packages.lock tools/ipp-lab/runtime-packages.lock
 COPY tools/ipp-lab/ubuntu-snapshot.sources /etc/apt/sources.list.d/ubuntu.sources
 
-RUN dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /tmp/base-packages.lock \
-    && apt-get -o Acquire::Retries=3 -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false update \
-    && xargs -r apt-get -o Acquire::Retries=3 -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false install --yes --no-install-recommends < tools/ipp-lab/runtime-packages.lock \
+# Apply the same bounded retry policy to the runtime package set.
+RUN set -eu; \
+    retry() { \
+        attempt=1; \
+        while [ "$attempt" -le 3 ]; do \
+            if "$@"; then return 0; fi; \
+            [ "$attempt" -eq 3 ] && return 1; \
+            sleep "$attempt"; \
+            attempt=$((attempt + 1)); \
+        done; \
+    }; \
+    dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /tmp/base-packages.lock \
+    && retry apt-get -o Acquire::Retries=3 -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false -o APT::Update::Error-Mode=any update \
+    && retry xargs -a tools/ipp-lab/runtime-packages.lock -r apt-get -o Acquire::Retries=3 -o Acquire::https::snapshot.ubuntu.com::Verify-Peer=false install --yes --no-install-recommends \
     && dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /tmp/installed-packages.lock \
     && cat /tmp/base-packages.lock tools/ipp-lab/runtime-packages.lock | sort -u > /tmp/expected-packages.lock \
     && diff -u /tmp/expected-packages.lock /tmp/installed-packages.lock \
