@@ -158,6 +158,16 @@ public sealed class WindowsGdiPrintBackend(
             if (pageNumbers.Count is < 1 or > MaximumPageCount || pageNumbers.Any(page => page < 1 || page > submission.Artifact.PageCount) ||
                 !pageNumbers.SequenceEqual(pageNumbers.Distinct().Order()))
                 throw new InvalidDataException("Selected final PDF pages must be unique, ordered, and within the immutable artifact.");
+            var segmentPageNumbers = submission.Segment.FinalPageNumbers;
+            if (!segmentPageNumbers.IsDefaultOrEmpty)
+            {
+                if (!pageNumbers.SequenceEqual(segmentPageNumbers))
+                    throw new InvalidDataException("Selected final PDF pages must match the segment's persisted page ownership.");
+            }
+            else if (!pageNumbers.SequenceEqual(Enumerable.Range(1, submission.Artifact.PageCount)))
+            {
+                throw new InvalidDataException("A segment without persisted page ownership may submit only the complete final PDF.");
+            }
             pages = await rasterizer.RasterizePagesAsync(content, submission.Artifact.PageCount, pageNumbers, cancellationToken).ConfigureAwait(false);
             ValidatePages(pages, pageNumbers);
         }

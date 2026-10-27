@@ -38,15 +38,23 @@ public static class SegmentPageOwnership
             if (pageOwners.Length == 1) owners[pageIndex] = pageOwners[0];
         }
 
-        // Covers, separators, and duplex blanks have no source item. Attach them to the next
-        // source-owned page so each physical face is submitted once and remains in layout order.
+        // A duplex back-side blank is the reverse of the preceding document's sheet, so it
+        // must stay with the segment that owns that front. Other source-less pages attach forward.
+        int? previousOwner = null;
+        for (var index = 0; index < owners.Length; index++)
+        {
+            if (owners[index] is { } owner) previousOwner = owner;
+            else if (layout.Pages[index].IsBlank && layout.Pages[index].Side == PageSide.Back && previousOwner is { } preceding)
+                owners[index] = preceding;
+        }
+
         int? nextOwner = null;
         for (var index = owners.Length - 1; index >= 0; index--)
         {
             if (owners[index] is { } owner) nextOwner = owner;
             else if (nextOwner is { } following) owners[index] = following;
         }
-        int? previousOwner = null;
+        previousOwner = null;
         for (var index = 0; index < owners.Length; index++)
         {
             if (owners[index] is { } owner) previousOwner = owner;

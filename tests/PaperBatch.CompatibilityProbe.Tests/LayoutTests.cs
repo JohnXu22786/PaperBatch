@@ -87,6 +87,25 @@ internal static class LayoutTests
         Assert.True(mapped.SelectMany(segment => segment.FinalPageNumbers).Order().SequenceEqual(Enumerable.Range(1, layout.Pages.Length)));
     }
 
+    internal static void SegmentPageOwnershipKeepsDuplexBoundaryBlankWithPrecedingDocument()
+    {
+        var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.LongEdge, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);
+        var layout = LayoutCompiler.Compile([Doc("first", 1), Doc("second", 1)],
+            new(CopyOrder: CopyOrder.PerDocument, Duplex: true, SeparateFilesOnFront: true));
+        var segments = new[]
+        {
+            new CompatibleSegment("first-segment", 0, ["first"], "compat-first", settings),
+            new CompatibleSegment("second-segment", 1, ["second"], "compat-second", settings)
+        };
+
+        var mapped = SegmentPageOwnership.Assign(layout, segments);
+
+        Assert.True(layout.Pages[1].IsBlank);
+        Assert.Equal(PageSide.Back, layout.Pages[1].Side);
+        Assert.True(mapped[0].FinalPageNumbers.SequenceEqual([1, 2]));
+        Assert.True(mapped[1].FinalPageNumbers.SequenceEqual([3]));
+    }
+
     internal static void SegmentPageOwnershipRejectsInterleavedPrintSegments()
     {
         var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);

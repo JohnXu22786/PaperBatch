@@ -55,6 +55,30 @@ internal static class GdiBackendTests
         Assert.Equal(1, native.StartDocCount);
     }
 
+    internal static void RejectsPageSelectionOutsideSegmentOwnership()
+    {
+        var pdf = RendererTests.OnePagePdf();
+        var artifact = new FinalPdfArtifact("artifact-1",
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(pdf)), pdf.Length, 2);
+        var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.LongEdge, "Letter", Orientation.Portrait,
+            ScalingMode.ShrinkToFit, "queue-identity", "Tray1");
+        var segment = new CompatibleSegment("segment", 0, ["item"], "compat", settings, [1]);
+        var options = WindowsPrintJobOptions.Map("queue-identity", Capabilities(), settings);
+        var submission = new WindowsPrintSubmission(options, segment, "run-nonce", At, artifact,
+            new MemoryStream(pdf), [2]);
+        var native = new FakeNative(Capabilities());
+        var rasterizer = new FakeRasterizer();
+        var backend = new WindowsGdiPrintBackend(native, rasterizer);
+
+        var mayHaveReachedOs = true;
+        try { _ = backend.SubmitAsync(submission).GetAwaiter().GetResult(); }
+        catch (PrintSubmissionException error) { mayHaveReachedOs = error.MayHaveReachedOs; }
+
+        Assert.False(mayHaveReachedOs);
+        Assert.Equal(0, native.StartDocCount);
+        Assert.True(rasterizer.RequestedPageNumbers is null);
+    }
+
     internal static void RejectsCapabilityMutationBeforeStartDoc()
     {
         var pdf = RendererTests.OnePagePdf();

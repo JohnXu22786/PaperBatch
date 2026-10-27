@@ -791,12 +791,17 @@ internal static class PrintingTests
         using var seed = new Fixture();
         var firstItem = seed.PreparedRun.Items[0];
         var secondItem = firstItem with { ItemId = "item-2" };
-        var firstSegment = new CompatibleSegment("segment-1", 0, [firstItem.ItemId], "compat-1", Settings());
-        var secondSegment = new CompatibleSegment("segment-2", 1, [secondItem.ItemId], "compat-2", Settings());
+        var twoPagePdf = PdfCompositionTests.TwoPagePdf();
+        var stored = seed.Artifacts.PersistPdfAsync(new MemoryStream(twoPagePdf), "test-renderer", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        var finalArtifact = new FinalPdfArtifact(stored.Artifact.ArtifactId, stored.Artifact.Sha256,
+            stored.Artifact.LengthBytes, 2);
+        var firstSegment = new CompatibleSegment("segment-1", 0, [firstItem.ItemId], "compat-1", Settings(), [1]);
+        var secondSegment = new CompatibleSegment("segment-2", 1, [secondItem.ItemId], "compat-2", Settings(), [2]);
         var run = PreparedRun.Create("run-multi", FixedTime, Hash, [firstItem, secondItem],
-            [firstSegment, secondSegment], seed.PreparedRun.FinalArtifact);
+            [firstSegment, secondSegment], finalArtifact);
 
-        using var fixture = new Fixture(run);
+        using var fixture = new Fixture(run, twoPagePdf, 2);
         var uncertainBackend = new TestOnlySimulatedPrintBackend(Capabilities()) { ThrowAfterSubmitSideEffect = true };
         var coordinator = new WindowsPrintCoordinator(fixture.Store, uncertainBackend, static () => "multi-nonce", fixture.Artifacts);
         var firstAttempt = coordinator.SubmitRunAsync(run, "multi-key", FixedTime).GetAwaiter().GetResult();
@@ -813,12 +818,17 @@ internal static class PrintingTests
         using var seed = new Fixture();
         var firstItem = seed.PreparedRun.Items[0];
         var secondItem = firstItem with { ItemId = "item-2" };
-        var firstSegment = new CompatibleSegment("segment-1", 0, [firstItem.ItemId], "compat-1", Settings());
-        var secondSegment = new CompatibleSegment("segment-2", 1, [secondItem.ItemId], "compat-2", Settings());
+        var twoPagePdf = PdfCompositionTests.TwoPagePdf();
+        var stored = seed.Artifacts.PersistPdfAsync(new MemoryStream(twoPagePdf), "test-renderer", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        var finalArtifact = new FinalPdfArtifact(stored.Artifact.ArtifactId, stored.Artifact.Sha256,
+            stored.Artifact.LengthBytes, 2);
+        var firstSegment = new CompatibleSegment("segment-1", 0, [firstItem.ItemId], "compat-1", Settings(), [1]);
+        var secondSegment = new CompatibleSegment("segment-2", 1, [secondItem.ItemId], "compat-2", Settings(), [2]);
         var run = PreparedRun.Create("run-known-no-effect-retry", FixedTime, Hash, [firstItem, secondItem],
-            [firstSegment, secondSegment], seed.PreparedRun.FinalArtifact);
+            [firstSegment, secondSegment], finalArtifact);
 
-        using var fixture = new Fixture(run);
+        using var fixture = new Fixture(run, twoPagePdf, 2);
         var backend = new TestOnlySimulatedPrintBackend(Capabilities()) { ThrowCancellationOnSubmissionNumber = 2 };
         var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "retryable-nonce", fixture.Artifacts);
 
