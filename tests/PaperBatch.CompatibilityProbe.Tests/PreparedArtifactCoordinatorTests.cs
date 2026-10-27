@@ -10,6 +10,80 @@ internal static class PreparedArtifactCoordinatorTests
 {
     private static readonly DateTimeOffset FixedTime = new(2026, 10, 20, 12, 0, 0, TimeSpan.Zero);
 
+    internal static void PreparationRejectsSourceAboveComposerLimitBeforeCopyOrComposition()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "paperbatch-composer-source-limit-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var supportedPath = Path.Combine(root, "supported.pdf");
+            var oversizedPath = Path.Combine(root, "oversized.pdf");
+            var supportedPdf = RendererTests.OnePagePdf();
+            File.WriteAllBytes(supportedPath, supportedPdf);
+            var supportedPdfText = System.Text.Encoding.ASCII.GetString(supportedPdf);
+            // Insert one valid whitespace byte before xref and update startxref to keep the fixture parseable.
+            var xrefStart = supportedPdfText.LastIndexOf("xref\n0 ", StringComparison.Ordinal);
+            var startXrefMarker = supportedPdfText.LastIndexOf("startxref\n", StringComparison.Ordinal);
+            var startXrefValueStart = startXrefMarker + "startxref\n".Length;
+            var oversizedPdfText = supportedPdfText.Insert(xrefStart, "\n");
+            startXrefMarker++;
+            startXrefValueStart = startXrefMarker + "startxref\n".Length;
+            var startXrefValueEnd = oversizedPdfText.IndexOf('\n', startXrefValueStart);
+            oversizedPdfText = oversizedPdfText[..startXrefValueStart] +
+                (xrefStart + 1).ToString(System.Globalization.CultureInfo.InvariantCulture) + oversizedPdfText[startXrefValueEnd..];
+            Assert.Equal(supportedPdf.Length + 1, System.Text.Encoding.ASCII.GetByteCount(oversizedPdfText));
+            File.WriteAllBytes(oversizedPath, System.Text.Encoding.ASCII.GetBytes(oversizedPdfText));
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+            var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+            var renderers = new RendererCoordinator([
+                new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts))
+            ]);
+            var runs = new SqliteRunStore(Path.Combine(root, "runs.db"));
+            runs.Initialize();
+            var composer = new FixtureCompositionAdapter(pageCount => pageCount == 1
+                ? [.. RendererTests.OnePagePdf(), (byte)' ']
+                : PdfCompositionTests.TwoPagePdf(), maximumSourceBytes: supportedPdf.Length);
+            var staticInspector = new VerifiedStaticFixtureInspector();
+            var coordinator = new PreparedArtifactCoordinator(new SourceIntakeService(cache), cache, renderers,
+                new FixturePageMetadataInspector(), staticInspector, composer, artifacts, runs);
+            var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter",
+                Orientation.Auto, ScalingMode.ShrinkToFit);
+            var retention = new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true);
+
+            var supported = coordinator.PrepareAsync([new SourceInput(supportedPath)], settings, new LayoutOptions(),
+                "composer-source-limit-at-boundary", retention, FixedTime).GetAwaiter().GetResult();
+            var supportedBatch = coordinator.PrepareAsync(
+                [new SourceInput(supportedPath), new SourceInput(supportedPath, IntentionalCopy: true)],
+                settings, new LayoutOptions(), "composer-source-limit-supported-batch", retention, FixedTime.AddMinutes(1))
+                .GetAwaiter().GetResult();
+            var oversized = coordinator.PrepareAsync([new SourceInput(oversizedPath)], settings, new LayoutOptions(),
+                "composer-source-limit-above-boundary", retention, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
+
+            Assert.True(supported.Succeeded, string.Join("; ", supported.Diagnostics));
+            Assert.True(supportedBatch.Succeeded, string.Join("; ", supportedBatch.Diagnostics));
+            Assert.Equal(2, supportedBatch.Run!.Items.Length);
+            Assert.Equal(2, composer.Calls);
+            Assert.Equal(supportedPdf.Length * 2, composer.LastSourceByteCount);
+            Assert.Equal(3, staticInspector.Calls);
+            Assert.False(oversized.Succeeded);
+            Assert.True(oversized.Run is null && oversized.Persistence is null);
+            Assert.True(
+                oversized.Diagnostics.Any(message => message.Contains(
+                    "oversized.pdf: the rendered PDF exceeds the page compositor source-size limit", StringComparison.Ordinal)),
+                string.Join("; ", oversized.Diagnostics));
+            Assert.Equal(2, composer.Calls);
+            Assert.Equal(supportedPdf.Length * 2, composer.LastSourceByteCount);
+            Assert.Equal(3, staticInspector.Calls);
+            Assert.Equal(2, runs.GetRecentRuns().Length);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
     internal static void PreparationRejectsInvalidIdempotencyKeysBeforeReadingInputs()
     {
         var coordinator = new PreparedArtifactCoordinator(null!, null!, null!, null!, null!, null!, null!, null!);
@@ -316,9 +390,12 @@ internal static class PreparedArtifactCoordinatorTests
 
     private sealed class VerifiedStaticFixtureInspector : IStaticPdfContentInspector
     {
+        public int Calls { get; private set; }
+
         public Task<bool> HasStaticPageContentAsync(Stream pdf, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            Calls++;
             return Task.FromResult(true);
         }
     }
@@ -336,16 +413,25 @@ internal static class PreparedArtifactCoordinatorTests
         }
     }
 
-    private sealed class FixtureCompositionAdapter(Func<int, byte[]>? outputPdfForPageCount = null) : IPageCompositionAdapter
+    private sealed class FixtureCompositionAdapter(
+        Func<int, byte[]>? outputPdfForPageCount = null,
+        long maximumSourceBytes = long.MaxValue) : IPageCompositionAdapter
     {
+        public long MaximumSourceBytes => maximumSourceBytes;
+        public int Calls { get; private set; }
+        public int LastSourceByteCount { get; private set; }
+
         public Task ComposePdfAsync(LayoutCompilation compilation, IEnumerable<PdfCompositionSource> sources,
             Stream destination, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            Calls++;
+            var sourceArray = sources.ToArray();
+            LastSourceByteCount = sourceArray.Sum(source => source.PdfBytes.Length);
             if (outputPdfForPageCount is not null) destination.Write(outputPdfForPageCount(compilation.Pages.Length));
             else
             {
-                destination.Write(sources.First().PdfBytes.Span);
+                destination.Write(sourceArray.First().PdfBytes.Span);
                 destination.WriteByte((byte)' ');
             }
             return Task.CompletedTask;

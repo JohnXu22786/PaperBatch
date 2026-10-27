@@ -166,6 +166,7 @@ var tests = new List<(string Name, Action Run)>
     ("coordinator orders contiguous segment jobs by final page order", PrintingTests.CoordinatorOrdersContiguousSegmentJobsByFinalPageOrder),
     ("coordinator preserves composed order across split owner blocks", PrintingTests.CoordinatorSubmitsSplitOwnerBlocksInComposedOrder),
     ("prepared artifact pipeline composes ordered immutable snapshots", PreparedArtifactCoordinatorTests.PipelineComposesOrderedSnapshotsAndPersistsExactFinalPdf),
+    ("preparation rejects sources above the compositor limit before copying or composition", PreparedArtifactCoordinatorTests.PreparationRejectsSourceAboveComposerLimitBeforeCopyOrComposition),
     ("per-item print copies are compiled when layout copies are absent", PreparedArtifactCoordinatorTests.PerItemPrintCopiesAreCompiledWhenLayoutCopiesAreAbsent),
     ("preparation validates idempotency keys before reading inputs", PreparedArtifactCoordinatorTests.PreparationRejectsInvalidIdempotencyKeysBeforeReadingInputs),
     ("valid preparation idempotency keys replay the persisted run", PreparedArtifactCoordinatorTests.ValidPreparationIdempotencyKeyReplaysThePersistedRun),

@@ -162,6 +162,11 @@ public sealed class PreparedArtifactCoordinator(
                 var receipt = artifacts.GetReceipt(render.Artifact.ArtifactId);
                 if (receipt.Artifact.Sha256 != render.Artifact.Sha256 || receipt.Artifact.LengthBytes != render.Artifact.LengthBytes)
                     throw new InvalidDataException("A renderer artifact receipt did not match its reported identity.");
+                if (receipt.Artifact.LengthBytes > composer.MaximumSourceBytes)
+                {
+                    var message = $"{Path.GetFileName(source.SourcePath)}: the rendered PDF exceeds the page compositor source-size limit; no final artifact was created.";
+                    return new(null, null, [message], IsCancelled: false);
+                }
 
                 using var renderedPdf = artifacts.OpenRead(render.Artifact.ArtifactId);
                 var pageSizes = await pageInspector.GetPageSizesAsync(renderedPdf, cancellationToken).ConfigureAwait(false);

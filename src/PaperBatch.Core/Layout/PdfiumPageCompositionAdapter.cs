@@ -14,7 +14,8 @@ namespace PaperBatch.Core.Layout;
 /// </remarks>
 public sealed class PdfiumPageCompositionAdapter : IPageCompositionAdapter
 {
-    private const int MaximumSourceBytes = 256 * 1024 * 1024;
+    public const int MaximumSupportedSourceBytes = 256 * 1024 * 1024;
+    public long MaximumSourceBytes => MaximumSupportedSourceBytes;
     private const long MaximumTotalSourceBytes = 512L * 1024 * 1024;
     private const long MaximumOutputBytes = 512L * 1024 * 1024;
     private readonly string _runtimePath;
@@ -48,7 +49,7 @@ public sealed class PdfiumPageCompositionAdapter : IPageCompositionAdapter
         if (!compilation.Succeeded || compilation.Pages.IsDefaultOrEmpty) throw new InvalidOperationException("A successful nonempty layout compilation is required.");
 
         var sourceMap = sources.ToDictionary(source => source.ItemId, StringComparer.Ordinal);
-        if (sourceMap.Any(pair => string.IsNullOrWhiteSpace(pair.Key) || pair.Value.PdfBytes.IsEmpty || pair.Value.PdfBytes.Length > MaximumSourceBytes))
+        if (sourceMap.Any(pair => string.IsNullOrWhiteSpace(pair.Key) || pair.Value.PdfBytes.IsEmpty || pair.Value.PdfBytes.Length > MaximumSupportedSourceBytes))
             throw new ArgumentException("Source PDFs must have unique item IDs and contain between 1 byte and 256 MiB.", nameof(sources));
         if (sourceMap.Values.Sum(source => (long)source.PdfBytes.Length) > MaximumTotalSourceBytes)
             throw new ArgumentException("Combined source PDFs cannot exceed 512 MiB.", nameof(sources));
