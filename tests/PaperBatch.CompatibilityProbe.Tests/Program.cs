@@ -178,6 +178,7 @@ var tests = new List<(string Name, Action Run)>
     ("prepared-run v3 rejects noncontiguous segment page ranges", CoreTests.PreparedRunV3RejectsNoncontiguousSegmentPageRanges),
     ("segment page ownership follows the composed layout sequence", LayoutTests.SegmentPageOwnershipFollowsComposedLayoutOrder),
     ("segment page ownership keeps duplex boundary blanks with the preceding document", LayoutTests.SegmentPageOwnershipKeepsDuplexBoundaryBlankWithPrecedingDocument),
+    ("segment page ownership keeps separators and following duplex blanks with the next document", LayoutTests.SegmentPageOwnershipKeepsSeparatorAndFollowingDuplexBlankWithNextDocument),
     ("segment page ownership splits interleaved segments in layout order", LayoutTests.SegmentPageOwnershipSplitsInterleavedPrintSegmentsInLayoutOrder),
     ("prepared-run validates renderer media type syntax", CoreTests.PreparedRunValidatesRendererMediaTypeSyntax),
     ("layout rejects empty inputs and invalid ranges", LayoutTests.EmptyAndInvalidRangesAreDiagnostics),
