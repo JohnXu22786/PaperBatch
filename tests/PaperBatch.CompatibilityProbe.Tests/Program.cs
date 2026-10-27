@@ -225,6 +225,7 @@ var tests = new List<(string Name, Action Run)>
     ("production GDI adapter capability P/Invoke is read-only", PrintingTests.NativeGdiCapabilityBoundaryIsReadOnly),
     ("GDI backend verifies immutable artifact bytes and returns the StartDoc job receipt", GdiBackendTests.VerifiesArtifactAndReturnsReceipt),
     ("GDI backend rasterizes and submits only selected final PDF pages", GdiBackendTests.RasterizesAndSubmitsOnlySelectedFinalPages),
+    ("native GDI adapter validates selected page identity for non-prefix pages", GdiBackendTests.NativeAdapterValidatesSelectedPageIdentityForNonPrefixPages),
     ("GDI backend rejects pages outside segment ownership", GdiBackendTests.RejectsPageSelectionOutsideSegmentOwnership),
     ("GDI backend rejects changed capabilities before StartDoc", GdiBackendTests.RejectsCapabilityMutationBeforeStartDoc),
     ("GDI backend reports immediate cancellation as known no effect", GdiBackendTests.InitialCancellationIsKnownNoEffect),

@@ -345,6 +345,9 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
         return "PB-" + Convert.ToHexString(digest.AsSpan(0, 20));
     }
 
+    internal static bool IsSelectedPage(IReadOnlyList<WindowsPrintRasterPage> pages, WindowsPrintRasterPage page) =>
+        pages.Any(selectedPage => ReferenceEquals(selectedPage, page));
+
     private sealed record NativeSettings(int Orientation, short Paper, short? Tray, short Copies, int Color, int Duplex);
 
     private sealed class GdiDocument(IntPtr dc, SafePrinterHandle printer, IntPtr mode, int jobId,
@@ -362,7 +365,7 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
         public Task WritePageAsync(WindowsPrintRasterPage page, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (page.Number <= 0 || page.Number > pages.Count || !ReferenceEquals(page, pages[page.Number - 1]))
+            if (page.Number <= 0 || !IsSelectedPage(pages, page))
                 throw new PrintSubmissionException("The page does not belong to this exact GDI document.", true);
             var width = GetDeviceCaps(dc, 8);
             var height = GetDeviceCaps(dc, 10);
