@@ -103,6 +103,15 @@ public sealed class PreparedArtifactCoordinator(
             if (perItemPrintSettings is not null && perItemPrintSettings.Count != prepared.Items.Length ||
                 perItemLayoutSettings is not null && perItemLayoutSettings.Count != prepared.Items.Length)
                 return new(null, null, ["Per-document settings must match the ordered queue length."], false);
+            var effectivePerItemLayoutSettings = perItemLayoutSettings;
+            if (perItemPrintSettings is not null)
+            {
+                effectivePerItemLayoutSettings = perItemPrintSettings.Select((settings, index) =>
+                {
+                    var layoutSettings = perItemLayoutSettings?[index] ?? new LayoutDocumentSettings();
+                    return layoutSettings.Copies is null ? layoutSettings with { Copies = settings.Copies } : layoutSettings;
+                }).ToArray();
+            }
             if (prepared.IsCancelled || cancellationToken.IsCancellationRequested)
                 return new(null, null, ["Preparation was cancelled; no prepared run was created."], IsCancelled: true);
             if (prepared.Items.IsDefaultOrEmpty || prepared.Items.Any(item => !item.IsReady))
@@ -176,7 +185,7 @@ public sealed class PreparedArtifactCoordinator(
                 items.Add(new PreparedItem(itemId, snapshot, rendererResult, pageMap, sourceSettings));
                 layoutDocuments.Add(new LayoutDocument(itemId, pageSizes, sourceSettings.Media,
                     sourceSettings.PrinterId, sourceSettings.TrayId,
-                    perItemLayoutSettings is null ? null : perItemLayoutSettings[sourceIndex], Path.GetFileName(source.SourcePath)));
+                    effectivePerItemLayoutSettings is null ? null : effectivePerItemLayoutSettings[sourceIndex], Path.GetFileName(source.SourcePath)));
                 compositionSources.Add(new PdfCompositionSource(itemId, sourceBuffer.ToArray(), StaticPageContentVerified: true));
             }
 
@@ -186,7 +195,7 @@ public sealed class PreparedArtifactCoordinator(
                 return new(null, null, layout.Diagnostics.Select(diagnostic => diagnostic.Message).ToArray(), IsCancelled: false);
             var segments = new List<CompatibleSegment>();
             var segmentedItems = items.Select((item, index) => (Item: item,
-                LayoutSettings: perItemLayoutSettings is null ? null : perItemLayoutSettings[index]));
+                LayoutSettings: effectivePerItemLayoutSettings is null ? null : effectivePerItemLayoutSettings[index]));
             foreach (var group in segmentedItems.GroupAdjacentBy(entry => (entry.Item.PrintSettings, entry.LayoutSettings)))
                 segments.Add(new CompatibleSegment("segment_" + segments.Count.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     segments.Count, group.Select(entry => entry.Item.ItemId), "layout-v1", group[0].Item.PrintSettings));
@@ -196,7 +205,7 @@ public sealed class PreparedArtifactCoordinator(
                 return new(null, null, [exception.Message], IsCancelled: false);
             }
             var finalId = "run_" + Guid.NewGuid().ToString("N");
-            var fingerprint = ComputeFingerprint(items, printSettings, layoutOptions, perItemLayoutSettings);
+            var fingerprint = ComputeFingerprint(items, printSettings, layoutOptions, effectivePerItemLayoutSettings);
             using var composedPdf = new MemoryStream();
             await composer.ComposePdfAsync(layout, compositionSources, composedPdf, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();

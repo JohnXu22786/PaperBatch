@@ -32,6 +32,49 @@ internal static class PreparedArtifactCoordinatorTests
         }
     }
 
+    internal static void PerItemPrintCopiesAreCompiledWhenLayoutCopiesAreAbsent()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "paperbatch-per-item-copies-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var sourcePath = Path.Combine(root, "source.pdf");
+            File.WriteAllBytes(sourcePath, RendererTests.OnePagePdf());
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+            var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+            var renderers = new RendererCoordinator([
+                new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts))
+            ]);
+            var runs = new SqliteRunStore(Path.Combine(root, "runs.db"));
+            runs.Initialize();
+            var coordinator = new PreparedArtifactCoordinator(new SourceIntakeService(cache), cache, renderers,
+                new FixturePageMetadataInspector(), new VerifiedStaticFixtureInspector(), new FixtureCompositionAdapter(pageCount =>
+                    pageCount == 1 ? [.. RendererTests.OnePagePdf(), (byte)' '] : PdfCompositionTests.TwoPagePdf()),
+                artifacts, runs);
+            var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter",
+                Orientation.Auto, ScalingMode.ShrinkToFit);
+
+            var result = coordinator.PrepareAsync(
+                [new SourceInput(sourcePath)], settings,
+                new LayoutOptions(NUp: NUpMode.One), "per-item-copies-layout-default-key",
+                new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true), FixedTime,
+                [settings with { Copies = 2 }],
+                [new LayoutDocumentSettings(NUp: NUpMode.One)])
+                .GetAwaiter().GetResult();
+
+            Assert.True(result.Succeeded, string.Join("; ", result.Diagnostics));
+            Assert.Equal(2, result.Run!.FinalArtifact!.PageCount);
+            Assert.Equal(1, result.Run.Items[0].PrintSettings.Copies);
+            Assert.True(result.Run.Segments.SelectMany(segment => segment.FinalPageNumbers).SequenceEqual([1, 2]));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
     internal static void ValidPreparationIdempotencyKeyReplaysThePersistedRun()
     {
         var root = Path.Combine(Path.GetTempPath(), "paperbatch-prepare-idempotency-" + Guid.NewGuid().ToString("N"));
@@ -240,18 +283,27 @@ internal static class PreparedArtifactCoordinatorTests
     {
         public Task<int> GetPageCountAsync(Stream pdf, CancellationToken cancellationToken) => Task.FromResult(1);
 
-        public Task<IReadOnlyList<PageSize>> GetPageSizesAsync(Stream pdf, CancellationToken cancellationToken) =>
-            Task.FromResult<IReadOnlyList<PageSize>>([new PageSize(612, 792)]);
+        public Task<IReadOnlyList<PageSize>> GetPageSizesAsync(Stream pdf, CancellationToken cancellationToken)
+        {
+            using var reader = new StreamReader(pdf, System.Text.Encoding.ASCII, leaveOpen: true);
+            var pageCount = reader.ReadToEnd().Contains("/Kids [3 0 R 5 0 R] /Count 2", StringComparison.Ordinal) ? 2 : 1;
+            pdf.Position = 0;
+            return Task.FromResult<IReadOnlyList<PageSize>>(Enumerable.Repeat(new PageSize(612, 792), pageCount).ToArray());
+        }
     }
 
-    private sealed class FixtureCompositionAdapter : IPageCompositionAdapter
+    private sealed class FixtureCompositionAdapter(Func<int, byte[]>? outputPdfForPageCount = null) : IPageCompositionAdapter
     {
         public Task ComposePdfAsync(LayoutCompilation compilation, IEnumerable<PdfCompositionSource> sources,
             Stream destination, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            destination.Write(sources.First().PdfBytes.Span);
-            destination.WriteByte((byte)' ');
+            if (outputPdfForPageCount is not null) destination.Write(outputPdfForPageCount(compilation.Pages.Length));
+            else
+            {
+                destination.Write(sources.First().PdfBytes.Span);
+                destination.WriteByte((byte)' ');
+            }
             return Task.CompletedTask;
         }
     }
