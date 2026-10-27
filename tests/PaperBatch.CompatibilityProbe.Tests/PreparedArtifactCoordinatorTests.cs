@@ -119,6 +119,50 @@ internal static class PreparedArtifactCoordinatorTests
         }
     }
 
+    internal static void MismatchedExpectedShaRejectsExistingIdempotentRunReplay()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "paperbatch-prepare-expected-sha-replay-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var sourcePath = Path.Combine(root, "source.pdf");
+            File.WriteAllBytes(sourcePath, RendererTests.OnePagePdf());
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+            var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+            var renderers = new RendererCoordinator([
+                new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts))
+            ]);
+            var runs = new SqliteRunStore(Path.Combine(root, "runs.db"));
+            runs.Initialize();
+            var coordinator = new PreparedArtifactCoordinator(new SourceIntakeService(cache), cache, renderers,
+                new FixturePageMetadataInspector(), new VerifiedStaticFixtureInspector(), new FixtureCompositionAdapter(),
+                artifacts, runs);
+            var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter",
+                Orientation.Auto, ScalingMode.ShrinkToFit);
+            var retention = new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true);
+
+            var first = coordinator.PrepareAsync([new SourceInput(sourcePath)], settings, new LayoutOptions(),
+                "expected-sha-replay-key", retention, FixedTime).GetAwaiter().GetResult();
+            var retry = coordinator.PrepareAsync([new SourceInput(sourcePath, ExpectedSha256: new string('0', 64))],
+                settings, new LayoutOptions(), "expected-sha-replay-key", retention, FixedTime.AddMinutes(1))
+                .GetAwaiter().GetResult();
+
+            Assert.True(first.Succeeded, string.Join("; ", first.Diagnostics));
+            Assert.False(first.Persistence!.Replayed);
+            Assert.False(retry.Succeeded, "A mismatched expected digest must be rejected before an existing run is replayed.");
+            Assert.True(retry.Run is null);
+            Assert.True(retry.Persistence is null);
+            Assert.True(retry.Diagnostics.Any(message => message.Contains("changed after queue preflight", StringComparison.Ordinal)));
+            Assert.True(runs.GetPreparedRun(first.Run!.RunId) is not null);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
     internal static void PipelineComposesOrderedSnapshotsAndPersistsExactFinalPdf()
     {
         if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
