@@ -245,7 +245,7 @@ var tests = new List<(string Name, Action Run)>
     ("GDI backend rejects bytes that do not match the artifact receipt", GdiBackendTests.RejectsArtifactBytesThatDoNotMatchReceipt),
     ("GDI backend rejects drivers that clear required DEVMODE fields", GdiBackendTests.RejectsDriverClearingRequiredDevModeFlags),
     ("GDI backend rejects incomplete native capability mappings", GdiBackendTests.RejectsIncompleteNativeCapabilityMappings),
-    ("GDI capability inventory does not invent duplex binding modes", GdiBackendTests.DuplexCapabilityDoesNotInventBindingModes),
+    ("native GDI duplex capability maps safe modes for print options", GdiBackendTests.NativeDuplexCapabilityMapsSafeModesForPrintOptions),
     ("intent and OS receipt writes roll back atomically", CoreTests.IntentAndOsReceiptWritesRollBackAtomically),
     ("OS receipt is idempotent and not physical completion", CoreTests.OsReceiptIsIdempotentAndNotPhysicalCompletion),
     ("unknown outcome can still record user-confirmed paper output", CoreTests.UnknownOutcomeCanStillRecordUserConfirmedPaperOutput),

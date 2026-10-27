@@ -319,8 +319,8 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
     internal static PrintOptionCapability MapDuplexCapability(int deviceCapabilitiesResult) => deviceCapabilitiesResult switch
     {
         < 0 => new(CapabilityState.Unavailable, [], "The driver did not report duplex capability."),
-        0 => new(CapabilityState.Unsupported, [], null),
-        _ => new(CapabilityState.Unknown, [], "The driver reports duplex support but does not report exact binding modes.")
+        0 => new(CapabilityState.Supported, ["Simplex"], null),
+        _ => new(CapabilityState.Supported, ["Simplex", "LongEdge", "ShortEdge"], null)
     };
 
     private static (uint Status, string? DocumentName)? ReadJob(SafePrinterHandle printer, uint jobId)
