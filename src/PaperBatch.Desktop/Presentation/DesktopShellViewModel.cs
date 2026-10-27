@@ -296,7 +296,12 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
             SheetSize: size, Ranges: ranges);
         var result = await source.PrepareQueueAsync(settings, options, _activeRecipe, cancellationToken).ConfigureAwait(true);
         OperationError = result.Succeeded ? null : LocalizePreparationError(string.Join(" ", result.Diagnostics));
-        if (result.Succeeded) await RefreshSelectedItemAsync().ConfigureAwait(true);
+        if (result.Succeeded)
+        {
+            await RefreshSelectedItemAsync().ConfigureAwait(true);
+            if (SelectedQueueItem is { } selectedQueueItem)
+                await RefreshPrintJobsAsync(selectedQueueItem.Id, cancellationToken).ConfigureAwait(true);
+        }
         OnPropertyChanged(nameof(PrepareLabel));
         OnPropertyChanged(nameof(PreparationResolutionNote));
         OnPropertyChanged(nameof(CanSubmitPreparedRun));
