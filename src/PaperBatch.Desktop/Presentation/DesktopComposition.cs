@@ -123,8 +123,10 @@ internal sealed class ProductionPresentationSources :
     private readonly IWindowsGdiNativeAdapter? _printerCapabilityReader;
     private readonly bool _printAvailable;
     private readonly ILocalCoordinatorTransport _coordinatorTransport;
+    private readonly object _queueStateSync = new();
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
+    private long _queueRevision;
     private readonly Dictionary<string, string> _queueLocations = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _queueSourceHashes = new(StringComparer.Ordinal);
     private IReadOnlyList<string> _resolutionSummaries = [];
@@ -335,20 +337,28 @@ internal sealed class ProductionPresentationSources :
 
     public void Move(string queueItemId, int delta)
     {
-        var index = _queue.FindIndex(item => string.Equals(item.Id, queueItemId, StringComparison.Ordinal));
-        var target = index + delta;
-        if (index < 0 || target < 0 || target >= _queue.Count) return;
-        var item = _queue[index];
-        _queue.RemoveAt(index);
-        _queue.Insert(target, item);
+        lock (_queueStateSync)
+        {
+            var index = _queue.FindIndex(item => string.Equals(item.Id, queueItemId, StringComparison.Ordinal));
+            var target = index + delta;
+            if (index < 0 || target < 0 || target >= _queue.Count) return;
+            var item = _queue[index];
+            _queue.RemoveAt(index);
+            _queue.Insert(target, item);
+            _queueRevision++;
+        }
     }
 
     public void Remove(string queueItemId)
     {
-        _queue.RemoveAll(item => string.Equals(item.Id, queueItemId, StringComparison.Ordinal));
-        _queueLocations.Remove(queueItemId);
-        _queueSourceHashes.Remove(queueItemId);
-        _preparableQueueItems.Remove(queueItemId);
+        lock (_queueStateSync)
+        {
+            _queue.RemoveAll(item => string.Equals(item.Id, queueItemId, StringComparison.Ordinal));
+            _queueLocations.Remove(queueItemId);
+            _queueSourceHashes.Remove(queueItemId);
+            _preparableQueueItems.Remove(queueItemId);
+            _queueRevision++;
+        }
     }
 
     public async Task<IReadOnlyList<QueueItemSnapshot>> ImportAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default)
@@ -360,7 +370,9 @@ internal sealed class ProductionPresentationSources :
         var queueItemIdBySnapshot = new Dictionary<string, string>(StringComparer.Ordinal);
         try
         {
-            foreach (var existing in _queue) InvalidatePreparedRun(existing.Id);
+            string[] existingIds;
+            lock (_queueStateSync) existingIds = _queue.Select(item => item.Id).ToArray();
+            foreach (var existingId in existingIds) InvalidatePreparedRun(existingId);
             foreach (var source in prepared.Items)
             {
                 // Queue identity belongs to the row. A source snapshot can be shared or
@@ -399,11 +411,15 @@ internal sealed class ProductionPresentationSources :
                                 : "No rendered artifact was returned.")));
                 }
                 var item = new QueueItemSnapshot(id, title, details, status);
-                _queue.Add(item);
-                _queueLocations[id] = source.SourcePath;
-                _findings[id] = findings;
+                lock (_queueStateSync)
+                {
+                    _queue.Add(item);
+                    _queueLocations[id] = source.SourcePath;
+                    _findings[id] = findings;
+                    _queueRevision++;
+                }
             }
-            return _queue.Skip(_queue.Count - prepared.Items.Length).ToArray();
+            lock (_queueStateSync) return _queue.Skip(_queue.Count - prepared.Items.Length).ToArray();
         }
         finally
         {
@@ -445,11 +461,19 @@ internal sealed class ProductionPresentationSources :
         if (!_preparationAvailable || _runStore is null || _queue.Count == 0)
             return new(null, null, ["A trusted PDFium runtime and a nonempty local queue are required before preparation."], false);
         var now = DateTimeOffset.UtcNow;
-        var seenPaths = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-        var paths = _queue.Select(item => _queueLocations.TryGetValue(item.Id, out var path) &&
-            _queueSourceHashes.TryGetValue(item.Id, out var expectedSha256)
-                ? new SourceInput(path, IntentionalCopy: !seenPaths.Add(Path.GetFullPath(path)), ExpectedSha256: expectedSha256)
-                : throw new InvalidOperationException("A queue source snapshot is no longer available. Reimport the source before preparing.")).ToArray();
+        QueueItemSnapshot[] queueItems;
+        SourceInput[] paths;
+        long queueRevision;
+        lock (_queueStateSync)
+        {
+            queueItems = _queue.ToArray();
+            queueRevision = _queueRevision;
+            var seenPaths = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            paths = queueItems.Select(item => _queueLocations.TryGetValue(item.Id, out var path) &&
+                _queueSourceHashes.TryGetValue(item.Id, out var expectedSha256)
+                    ? new SourceInput(path, IntentionalCopy: !seenPaths.Add(Path.GetFullPath(path)), ExpectedSha256: expectedSha256)
+                    : throw new InvalidOperationException("A queue source snapshot is no longer available. Reimport the source before preparing.")).ToArray();
+        }
         IReadOnlyList<PrintSettings>? perItemPrintSettings = null;
         IReadOnlyList<LayoutDocumentSettings>? perItemLayoutSettings = null;
         if (recipe is not null)
@@ -549,7 +573,11 @@ internal sealed class ProductionPresentationSources :
         var result = new PreparedArtifactResult(run, persisted, [], false);
         if (result.Run is { } preparedRun)
         {
-            foreach (var item in _queue) RegisterPreparedRun(item.Id, preparedRun);
+            lock (_queueStateSync)
+            {
+                if (_queueRevision == queueRevision && _queue.Select(item => item.Id).SequenceEqual(queueItems.Select(item => item.Id), StringComparer.Ordinal))
+                    foreach (var item in queueItems) RegisterPreparedRun(item.Id, preparedRun);
+            }
         }
         return result;
     }
@@ -633,7 +661,11 @@ internal sealed class ProductionPresentationSources :
     public void InvalidatePreparedRun(string queueItemId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(queueItemId);
-        _preparedRunsByQueueItem.Remove(queueItemId);
+        lock (_queueStateSync)
+        {
+            _preparedRunsByQueueItem.Remove(queueItemId);
+            _queueRevision++;
+        }
         PreparedArtifactChanged?.Invoke(queueItemId);
     }
 

@@ -37,6 +37,7 @@ var tests = new (string Name, Action Run)[]
     ("production presentation exposes unavailable production capabilities without demo rows", ProductionPresentationIsExplicitlyUnavailable),
     ("production preview raster comes from the persisted prepared artifact", ProductionPreviewReadsPreparedArtifact),
     ("source changes after queue preflight stop before final rendering or persistence", ChangedSourceAfterPreflightCreatesNoPreparedArtifact),
+    ("stale preparation cannot repopulate an invalidated queue row", StalePreparationCannotRepopulateInvalidatedQueueRow),
     ("preparation controls forward requested layout settings and invalidate previews", PreparationControlsForwardRequestedSettingsAndInvalidate),
     ("preparation errors follow the selected language", PreparationErrorsFollowSelectedLanguage),
     ("recipe device-profile conflicts do not persist or compose an artifact", RecipeDeviceConflictCreatesNoRunOrFinalArtifact),
@@ -672,6 +673,50 @@ static void ChangedSourceAfterPreflightCreatesNoPreparedArtifact()
     }
 }
 
+static void StalePreparationCannotRepopulateInvalidatedQueueRow()
+{
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-stale-registration-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var oldPath = Path.Combine(root, "old.pdf");
+        var sourcePdf = TestOnePagePdf();
+        var finalPdf = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "synthetic_two_page.pdf"));
+        File.WriteAllBytes(oldPath, sourcePdf);
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+        var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+        var renderer = new RendererCoordinator([new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts))]);
+        var intake = new SourceIntakeService(cache);
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
+        var coordinator = new PreparedArtifactCoordinator(intake, cache, renderer, new ConflictTestInspector(),
+            new ConflictTestInspector(), new SuccessfulTestComposer(finalPdf), artifacts, store);
+        var transport = new DelayedPreparationTransport(new PreparedArtifactTestTransport(coordinator));
+        var previewRenderer = new FakeArtifactPreviewRenderer(finalPdf);
+        var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
+            artifacts: artifacts, previewRenderer: previewRenderer, runStore: store, preparationAvailable: true,
+            coordinatorTransport: transport);
+        var oldItem = sources.ImportAsync([oldPath]).GetAwaiter().GetResult().Single();
+
+        var preparation = sources.PrepareQueueAsync(
+            new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit),
+            new LayoutOptions());
+        transport.RequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+
+        sources.InvalidatePreparedRun(oldItem.Id);
+        transport.ReleaseRequest.TrySetResult();
+        var result = preparation.GetAwaiter().GetResult();
+
+        Assert.True(result.Succeeded);
+        var preview = sources.GetPreviewAsync(oldItem.Id).GetAwaiter().GetResult();
+        Assert.Contains("no prepared artifact exists", preview.Description);
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
+
 static void PreparationControlsForwardRequestedSettingsAndInvalidate()
 {
     var source = new FakePreparationSource([new QueueItemSnapshot("a", "A.pdf", "ready", "Ready")]);
@@ -1243,6 +1288,16 @@ sealed class ConflictTestComposer : IPageCompositionAdapter
     }
 }
 
+sealed class SuccessfulTestComposer(byte[] pdf) : IPageCompositionAdapter
+{
+    public Task ComposePdfAsync(LayoutCompilation compilation, IEnumerable<PdfCompositionSource> sources,
+        Stream destination, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return destination.WriteAsync(pdf, cancellationToken).AsTask();
+    }
+}
+
 sealed class LayoutCaptureComposer : IPageCompositionAdapter
 {
     public int CompiledPageCount { get; private set; }
@@ -1287,6 +1342,19 @@ sealed class PreparedArtifactTestTransport(PreparedArtifactCoordinator preparati
             diagnostics = result.Diagnostics
         });
         return new IpcResponseEnvelope(IpcJson.CurrentProtocolVersion, request.CorrelationId, responsePayload, null);
+    }
+}
+
+sealed class DelayedPreparationTransport(ILocalCoordinatorTransport inner) : ILocalCoordinatorTransport
+{
+    public TaskCompletionSource RequestStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ReleaseRequest { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public async ValueTask<IpcResponseEnvelope> SendAsync(IpcRequestEnvelope request, CancellationToken cancellationToken = default)
+    {
+        RequestStarted.TrySetResult();
+        await ReleaseRequest.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return await inner.SendAsync(request, cancellationToken).ConfigureAwait(false);
     }
 }
 
