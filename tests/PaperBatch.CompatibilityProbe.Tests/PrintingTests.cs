@@ -288,6 +288,32 @@ internal static class PrintingTests
         Assert.True(backend.SubmittedPageNumbers[1].SequenceEqual([2]));
     }
 
+    internal static void CoordinatorSubmitsSplitOwnerBlocksInComposedOrder()
+    {
+        using var source = new Fixture();
+        var first = source.PreparedRun.Items[0];
+        var second = first with { ItemId = "item-2" };
+        var settings = first.PrintSettings;
+        var artifact = source.PreparedRun.FinalArtifact! with { PageCount = 3 };
+        var segments = new[]
+        {
+            new CompatibleSegment("first-block", 0, [first.ItemId], "compat", settings, [1]),
+            new CompatibleSegment("second-document", 1, [second.ItemId], "compat", settings, [2]),
+            new CompatibleSegment("first-copy", 2, [first.ItemId], "compat", settings, [3])
+        };
+        var run = PreparedRun.Create("run-split-owner-blocks", FixedTime, Hash, [first, second], segments, artifact);
+        using var fixture = new Fixture(run, RendererTests.OnePagePdf(), 3);
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "split-owner-blocks", fixture.Artifacts);
+
+        var results = coordinator.SubmitRunAsync(run, "split-owner-blocks-submit", FixedTime).GetAwaiter().GetResult();
+
+        Assert.Equal(3, results.Count);
+        Assert.True(results.All(result => result.Status == PrintSubmissionStatus.Accepted));
+        Assert.True(backend.SubmittedPageNumbers.SelectMany(pages => pages).SequenceEqual([1, 2, 3]));
+        Assert.True(backend.SubmittedPageNumbers.Select(pages => pages.Single()).SequenceEqual([1, 2, 3]));
+    }
+
     internal static void SubmissionPassesTheExactPersistedFinalPdf()
     {
         using var fixture = new Fixture();

@@ -106,7 +106,7 @@ internal static class LayoutTests
         Assert.True(mapped[1].FinalPageNumbers.SequenceEqual([3]));
     }
 
-    internal static void SegmentPageOwnershipRejectsInterleavedPrintSegments()
+    internal static void SegmentPageOwnershipSplitsInterleavedPrintSegmentsInLayoutOrder()
     {
         var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);
         var layout = LayoutCompiler.Compile([Doc("first", 1), Doc("second", 1)], new(Copies: 2));
@@ -117,11 +117,17 @@ internal static class LayoutTests
         };
         Assert.True(layout.Succeeded);
 
-        var message = string.Empty;
-        try { _ = SegmentPageOwnership.Assign(layout, segments); }
-        catch (InvalidDataException error) { message = error.Message; }
+        var mapped = SegmentPageOwnership.Assign(layout, segments);
 
-        Assert.Contains("interleaves print segments", message);
+        Assert.Equal(4, mapped.Count);
+        Assert.True(mapped.SelectMany(segment => segment.FinalPageNumbers)
+            .SequenceEqual(Enumerable.Range(1, layout.Pages.Length)));
+        Assert.True(mapped.Select(segment => segment.ItemIds.Single())
+            .SequenceEqual(["first", "second", "first", "second"]));
+        Assert.True(mapped.Select(segment => segment.FinalPageNumbers.Single())
+            .SequenceEqual([1, 2, 3, 4]));
+        Assert.True(mapped.Select(segment => segment.SegmentId)
+            .SequenceEqual(["first-segment", "second-segment", "first-segment_part2", "second-segment_part2"]));
     }
 
     internal static void DuplexFileBoundariesInsertBlankBackFace()

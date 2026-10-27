@@ -378,7 +378,26 @@ internal static class CoreTests
         Assert.Throws<JsonException>(() => PreparedRunJson.Parse(Encoding.UTF8.GetBytes(emptyOwnership.ToJsonString())));
     }
 
-    internal static void PreparedRunV3RejectsInterleavedSegmentPageRanges()
+    internal static void PreparedRunV3AllowsRepeatedItemsAcrossOrderedJobSegments()
+    {
+        var artifact = new FinalPdfArtifact("artifact_" + Hash, Hash, 2048, 2);
+        var item = CreateItem() with { ItemId = "item-1" };
+        var segments = new[]
+        {
+            CreateSegment(item.ItemId) with { Index = 0, FinalPageNumbers = [1] },
+            CreateSegment(item.ItemId) with { SegmentId = "segment-2", Index = 1, FinalPageNumbers = [2] }
+        };
+
+        var json = PreparedRunJson.Serialize(PreparedRun.Create("run-repeated-item", FixedTime, Hash,
+            [item], segments, artifact));
+        var restored = PreparedRunJson.Parse(Encoding.UTF8.GetBytes(json));
+
+        Assert.Equal(2, restored.Segments.Length);
+        Assert.True(restored.Segments.All(segment => segment.ItemIds.SequenceEqual([item.ItemId])));
+        Assert.True(restored.Segments.SelectMany(segment => segment.FinalPageNumbers).SequenceEqual([1, 2]));
+    }
+
+    internal static void PreparedRunV3RejectsNoncontiguousSegmentPageRanges()
     {
         var artifact = new FinalPdfArtifact("artifact_" + Hash, Hash, 2048, 4);
         var first = CreateItem() with { ItemId = "item-1" };
@@ -390,11 +409,11 @@ internal static class CoreTests
         };
         var validJson = PreparedRunJson.Serialize(PreparedRun.Create("run-interleaved-pages", FixedTime, Hash,
             [first, second], segments, artifact));
-        var interleaved = JsonNode.Parse(validJson)!.AsObject();
-        interleaved["run"]!["segments"]![0]!["finalPageNumbers"] = new JsonArray(1, 3);
-        interleaved["run"]!["segments"]![1]!["finalPageNumbers"] = new JsonArray(2, 4);
+        var noncontiguous = JsonNode.Parse(validJson)!.AsObject();
+        noncontiguous["run"]!["segments"]![0]!["finalPageNumbers"] = new JsonArray(1, 3);
+        noncontiguous["run"]!["segments"]![1]!["finalPageNumbers"] = new JsonArray(2, 4);
 
-        Assert.Throws<JsonException>(() => PreparedRunJson.Parse(Encoding.UTF8.GetBytes(interleaved.ToJsonString())));
+        Assert.Throws<JsonException>(() => PreparedRunJson.Parse(Encoding.UTF8.GetBytes(noncontiguous.ToJsonString())));
     }
 
     internal static void PreparedRunJsonRejectsNullArrayEntries()

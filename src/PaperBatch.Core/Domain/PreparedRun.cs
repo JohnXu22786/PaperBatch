@@ -250,6 +250,10 @@ public sealed record PreparedRun
             {
                 throw new ArgumentException("A compatible segment must contain at least one item.", nameof(segments));
             }
+            if (segment.ItemIds.Distinct(StringComparer.Ordinal).Count() != segment.ItemIds.Length)
+            {
+                throw new ArgumentException("A compatible segment cannot contain the same item more than once.", nameof(segments));
+            }
 
             if (string.IsNullOrWhiteSpace(segment.CompatibilityKey) || segment.CompatibilityKey.Length > 256)
             {
@@ -284,9 +288,9 @@ public sealed record PreparedRun
             }
         }
 
-        if (!flattenedItemIds.SequenceEqual(normalizedItems.Select(item => item.ItemId), StringComparer.Ordinal))
+        if (!flattenedItemIds.ToHashSet(StringComparer.Ordinal).SetEquals(itemsById.Keys))
         {
-            throw new ArgumentException("Segments must cover each prepared item exactly once and preserve its order.", nameof(segments));
+            throw new ArgumentException("Segments must cover every prepared item at least once.", nameof(segments));
         }
 
         if (finalArtifact is not null)

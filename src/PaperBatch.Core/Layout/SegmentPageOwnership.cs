@@ -63,26 +63,37 @@ public static class SegmentPageOwnership
 
         if (owners.Any(owner => owner is null))
             throw new InvalidDataException("A layout page has no prepared segment owner.");
-
-        var seenOwners = new HashSet<int>();
-        var previousSegmentOwner = -1;
-        foreach (var owner in owners.Select(value => value!.Value))
-        {
-            if (owner == previousSegmentOwner) continue;
-            if (!seenOwners.Add(owner))
-                throw new InvalidDataException("The composed layout interleaves print segments; reprepare with compatible segment settings to preserve page order.");
-            previousSegmentOwner = owner;
-        }
-
-        var pageNumbers = Enumerable.Range(0, segments.Count)
-            .Select(segmentIndex => owners.Select((owner, pageIndex) => (owner, pageIndex))
-                .Where(entry => entry.owner == segmentIndex)
-                .Select(entry => entry.pageIndex + 1)
-                .ToArray())
-            .ToArray();
-        if (pageNumbers.Any(pages => pages.Length == 0))
+        if (Enumerable.Range(0, segments.Count).Any(segmentIndex => !owners.Contains(segmentIndex)))
             throw new InvalidDataException("A prepared segment owns no pages in the composed final PDF.");
 
-        return segments.Select((segment, index) => segment with { FinalPageNumbers = pageNumbers[index].ToImmutableArray() }).ToArray();
+        var orderedOwners = owners.Select(owner => owner!.Value).ToArray();
+        var result = new List<CompatibleSegment>();
+        var splitCounts = new int[segments.Count];
+        var usedSegmentIds = new HashSet<string>(StringComparer.Ordinal);
+        var rangeStart = 0;
+        while (rangeStart < orderedOwners.Length)
+        {
+            var owner = orderedOwners[rangeStart];
+            var rangeEnd = rangeStart + 1;
+            while (rangeEnd < orderedOwners.Length && orderedOwners[rangeEnd] == owner) rangeEnd++;
+            var sourceSegment = segments[owner];
+            var splitIndex = ++splitCounts[owner];
+            var segmentId = splitIndex == 1 ? sourceSegment.SegmentId :
+                sourceSegment.SegmentId + "_part" + splitIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (segmentId.Length > 128 || !usedSegmentIds.Add(segmentId))
+            {
+                segmentId = "segment_" + result.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                while (!usedSegmentIds.Add(segmentId)) segmentId += "_";
+            }
+            result.Add(sourceSegment with
+            {
+                SegmentId = segmentId,
+                Index = result.Count,
+                FinalPageNumbers = Enumerable.Range(rangeStart + 1, rangeEnd - rangeStart).ToImmutableArray()
+            });
+            rangeStart = rangeEnd;
+        }
+
+        return result;
     }
 }
