@@ -20,6 +20,7 @@ public static class SegmentPageOwnership
                     throw new InvalidDataException($"Prepared item '{itemId}' belongs to more than one segment.");
 
         var owners = new int?[layout.Pages.Length];
+        var frontOwnerBySheet = new Dictionary<int, int>();
         for (var pageIndex = 0; pageIndex < layout.Pages.Length; pageIndex++)
         {
             var page = layout.Pages[pageIndex];
@@ -36,16 +37,17 @@ public static class SegmentPageOwnership
             if (pageOwners.Length > 1)
                 throw new InvalidDataException($"Layout page {page.Number} combines items from different print segments and cannot be submitted safely.");
             if (pageOwners.Length == 1) owners[pageIndex] = pageOwners[0];
+            if (page.Side == PageSide.Front && owners[pageIndex] is { } frontOwner)
+                frontOwnerBySheet[page.SheetNumber] = frontOwner;
         }
 
-        // A duplex back-side blank is the reverse of the preceding document's sheet, so it
-        // must stay with the segment that owns that front. Other source-less pages attach forward.
-        int? previousOwner = null;
+        // A duplex back-side blank belongs with the segment owning the front on its sheet.
         for (var index = 0; index < owners.Length; index++)
         {
-            if (owners[index] is { } owner) previousOwner = owner;
-            else if (layout.Pages[index].IsBlank && layout.Pages[index].Side == PageSide.Back && previousOwner is { } preceding)
-                owners[index] = preceding;
+            var page = layout.Pages[index];
+            if (owners[index] is null && page.IsBlank && page.Side == PageSide.Back &&
+                frontOwnerBySheet.TryGetValue(page.SheetNumber, out var frontOwner))
+                owners[index] = frontOwner;
         }
 
         int? nextOwner = null;
@@ -54,7 +56,7 @@ public static class SegmentPageOwnership
             if (owners[index] is { } owner) nextOwner = owner;
             else if (nextOwner is { } following) owners[index] = following;
         }
-        previousOwner = null;
+        int? previousOwner = null;
         for (var index = 0; index < owners.Length; index++)
         {
             if (owners[index] is { } owner) previousOwner = owner;

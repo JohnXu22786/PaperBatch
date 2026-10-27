@@ -106,6 +106,36 @@ internal static class LayoutTests
         Assert.True(mapped[1].FinalPageNumbers.SequenceEqual([3]));
     }
 
+    internal static void SegmentPageOwnershipKeepsSeparatorAndFollowingDuplexBlankWithNextDocument()
+    {
+        var firstSettings = new PrintSettings(1, ColorMode.Color, DuplexMode.LongEdge, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);
+        var secondSettings = firstSettings with { Media = "A4" };
+        var layout = LayoutCompiler.Compile(
+        [
+            new LayoutDocument("first", [new(612, 792)], "Letter") { SegmentCompatibilityKey = "compat-first" },
+            new LayoutDocument("second", [new(595, 842)], "A4") { SegmentCompatibilityKey = "compat-second" }
+        ],
+        new(CopyOrder: CopyOrder.PerDocument, Duplex: true, SeparateFilesOnFront: true, AddSeparatorsBetweenFiles: true));
+        var segments = new[]
+        {
+            new CompatibleSegment("first-segment", 0, ["first"], "compat-first", firstSettings),
+            new CompatibleSegment("second-segment", 1, ["second"], "compat-second", secondSettings)
+        };
+
+        var mapped = SegmentPageOwnership.Assign(layout, segments);
+
+        Assert.True(layout.Succeeded);
+        Assert.Equal(5, layout.Pages.Length);
+        Assert.True(layout.Pages.Select(page => page.Number).SequenceEqual([1, 2, 3, 4, 5]));
+        Assert.True(layout.Pages[1].IsBlank && layout.Pages[1].Side == PageSide.Back);
+        Assert.True(layout.Pages[2].Placements.Single().Kind == LayoutPageKind.Separator && layout.Pages[2].Side == PageSide.Front);
+        Assert.True(layout.Pages[3].IsBlank && layout.Pages[3].Side == PageSide.Back);
+        Assert.Equal(2, mapped.Count);
+        Assert.True(mapped[0].FinalPageNumbers.SequenceEqual([1, 2]));
+        Assert.True(mapped[1].FinalPageNumbers.SequenceEqual([3, 4, 5]));
+        Assert.True(mapped.SelectMany(segment => segment.FinalPageNumbers).SequenceEqual(Enumerable.Range(1, layout.Pages.Length)));
+    }
+
     internal static void SegmentPageOwnershipSplitsInterleavedPrintSegmentsInLayoutOrder()
     {
         var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);
