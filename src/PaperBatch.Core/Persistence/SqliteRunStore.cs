@@ -493,7 +493,8 @@ public sealed class SqliteRunStore
         return new JobOperationResult(updated, Replayed: false);
     }
 
-    public StoredJob TransitionJob(string jobId, JobState nextState, string reason, DateTimeOffset atUtc)
+    public StoredJob TransitionJob(
+        string jobId, JobState nextState, string reason, DateTimeOffset atUtc, JobState? expectedState = null)
     {
         EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
@@ -506,6 +507,11 @@ public sealed class SqliteRunStore
         using var transaction = connection.BeginTransaction();
         var job = ReadJob(connection, transaction, jobId)
             ?? throw new InvalidOperationException($"Job '{jobId}' does not exist.");
+        if (expectedState is { } expected && job.State != expected)
+        {
+            transaction.Commit();
+            return job;
+        }
         if (nextState is JobState.Submitting or JobState.AcceptedByOs)
         {
             throw new InvalidOperationException($"State {nextState} can only be entered through its idempotent repository operation.");

@@ -209,26 +209,33 @@ public sealed class WindowsPrintCoordinator(
         }
 
         var status = await backend.GetStatusAsync(job.OsReceipt, cancellationToken).ConfigureAwait(false);
-        var next = status switch
+        while (true)
         {
-            PrintBackendJobStatus.Accepted => job.State,
-            PrintBackendJobStatus.Processing => job.State == JobState.CancelRequested ? JobState.CancelRequested : JobState.OsProcessing,
-            PrintBackendJobStatus.ReportedComplete => JobState.OsReportsComplete,
-            PrintBackendJobStatus.Failed => JobState.NeedsReviewUnknown,
-            PrintBackendJobStatus.Cancelled => job.State == JobState.CancelRequested
-                ? JobState.CancelObserved
-                : JobState.NeedsReviewUnknown,
-            _ => JobState.NeedsReviewUnknown
-        };
-        if (next == job.State) return job;
-        try
-        {
-            return store.TransitionJob(jobId, next, $"OS status reported {status}.", atUtc);
-        }
-        catch (InvalidOperationException) when (store.GetJob(jobId) is { } changed && changed.State != job.State)
-        {
-            // A concurrent status/cancel request won; the current durable state is authoritative.
-            return store.GetJob(jobId)!;
+            job = store.GetJob(jobId) ?? throw new InvalidOperationException("The requested print job does not exist.");
+            if (job.State is JobState.FailedBeforeSubmit or JobState.OsReportsComplete or JobState.CancelObserved or JobState.UserConfirmedPaperOutput)
+                return job;
+            var next = status switch
+            {
+                PrintBackendJobStatus.Accepted => job.State,
+                PrintBackendJobStatus.Processing => job.State == JobState.CancelRequested ? JobState.CancelRequested : JobState.OsProcessing,
+                PrintBackendJobStatus.ReportedComplete => JobState.OsReportsComplete,
+                PrintBackendJobStatus.Failed => JobState.NeedsReviewUnknown,
+                PrintBackendJobStatus.Cancelled => job.State == JobState.CancelRequested
+                    ? JobState.CancelObserved
+                    : JobState.NeedsReviewUnknown,
+                _ => JobState.NeedsReviewUnknown
+            };
+            if (next == job.State) return job;
+            try
+            {
+                var updated = store.TransitionJob(jobId, next, $"OS status reported {status}.", atUtc, job.State);
+                if (updated.State == next) return updated;
+                // A concurrent request changed the durable state before this status was applied.
+            }
+            catch (InvalidOperationException) when (store.GetJob(jobId) is { } changed && changed.State != job.State)
+            {
+                // Re-evaluate the same response against the state that won the concurrent update.
+            }
         }
     }
 
