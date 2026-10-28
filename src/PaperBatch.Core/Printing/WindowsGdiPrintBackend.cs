@@ -170,6 +170,7 @@ public sealed class WindowsGdiPrintBackend(
             }
             pages = await rasterizer.RasterizePagesAsync(content, submission.Artifact.PageCount, pageNumbers, cancellationToken).ConfigureAwait(false);
             ValidatePages(pages, pageNumbers);
+            EnsureSingleAutoOrientation(submission.Segment.PrintSettings, pages);
         }
         catch (PrintSubmissionException) { throw; }
         catch (Exception error)
@@ -294,6 +295,18 @@ public sealed class WindowsGdiPrintBackend(
             if (Math.Abs(pdfRatio - rasterRatio) > Math.Max(0.01, pdfRatio * 0.001))
                 throw new InvalidDataException("PDFium raster geometry does not match the immutable PDF page geometry.");
         }
+    }
+
+    private static void EnsureSingleAutoOrientation(
+        PrintSettings settings, IReadOnlyList<WindowsPrintRasterPage> pages)
+    {
+        if (settings.Orientation != Orientation.Auto || pages.Count < 2) return;
+        var firstIsLandscape = pages[0].PdfSize.WidthPoints > pages[0].PdfSize.HeightPoints;
+        if (pages.Skip(1).Any(page =>
+                (page.PdfSize.WidthPoints > page.PdfSize.HeightPoints) != firstIsLandscape))
+            throw new PrintSubmissionException(
+                "Auto orientation cannot submit a GDI document with mixed page orientations.",
+                mayHaveReachedOs: false);
     }
 
     private static void ValidateReceipt(OsJobReceipt receipt)
