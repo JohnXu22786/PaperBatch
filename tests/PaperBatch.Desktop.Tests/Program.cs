@@ -666,6 +666,7 @@ static void InFlightSubmissionRemainsTrackedAfterPreparationSettingsChange()
     var root = Path.Combine(GetTestTempRoot(), "paperbatch-inflight-submitted-jobs-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     DelayedSubmittedJobCoordinatorTransport? transport = null;
+    Task<IReadOnlyList<PrintJobSnapshot>>? submission = null;
     try
     {
         var sourcePath = Path.Combine(root, "source.pdf");
@@ -690,13 +691,14 @@ static void InFlightSubmissionRemainsTrackedAfterPreparationSettingsChange()
         var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
 
-        var submission = sources.SubmitPreparedRunAsync(queueItem.Id);
+        submission = sources.SubmitPreparedRunAsync(queueItem.Id);
         try { transport.SubmitStarted.Task.WaitAsync(DelayedSubmittedJobCoordinatorTransport.GateTimeout).GetAwaiter().GetResult(); }
         catch (TimeoutException error) { throw new InvalidOperationException("Timed out waiting for the fake coordinator to start submission.", error); }
         viewModel.RequestedCopies = 2;
         transport.ReleaseSubmission.TrySetResult(true);
         try { submission.WaitAsync(DelayedSubmittedJobCoordinatorTransport.GateTimeout).GetAwaiter().GetResult(); }
         catch (TimeoutException error) { throw new InvalidOperationException("Timed out waiting for the fake submission to finish.", error); }
+        submission = null;
 
         viewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
         var submittedJob = viewModel.PrintJobs.Single();
@@ -709,6 +711,18 @@ static void InFlightSubmissionRemainsTrackedAfterPreparationSettingsChange()
     finally
     {
         transport?.ReleaseSubmission.TrySetResult(true);
+        if (submission is not null)
+        {
+            try { submission.WaitAsync(DelayedSubmittedJobCoordinatorTransport.GateTimeout).GetAwaiter().GetResult(); }
+            catch (TimeoutException error)
+            {
+                throw new InvalidOperationException("Timed out waiting for the fake submission to finish before cleaning up its run store.", error);
+            }
+            catch
+            {
+                // Observe a fault from a submission that was already failing; preserve the test's original failure.
+            }
+        }
         if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
 }
