@@ -392,6 +392,27 @@ internal static class SourceIntakeTests
         Assert.True(SourceFormatPreflight.Inspect(invalidNextTiffDirectory, ".tiff").Diagnostics.Any(diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
     }
 
+    internal static void PreflightAcceptsPdfXrefStreamPngUpPredictor()
+    {
+        using var predictedXref = new MemoryStream(PdfXrefStreamBytes(encrypted: false, pngUpPredictor: true));
+        Assert.Equal(SourcePreflightStatus.Ready, SourceFormatPreflight.Inspect(predictedXref, ".pdf").Status);
+
+        using var unsupportedPredictor = new MemoryStream(PdfXrefStreamBytes(encrypted: false, pngUpPredictor: true, unsupportedPredictor: true));
+        Assert.True(SourceFormatPreflight.Inspect(unsupportedPredictor, ".pdf").Diagnostics.Any(diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+
+        using var badPredictedXrefOffset = new MemoryStream(PdfXrefStreamBytes(encrypted: false, pngUpPredictor: true, invalidXrefRecord: true));
+        Assert.True(SourceFormatPreflight.Inspect(badPredictedXrefOffset, ".pdf").Diagnostics.Any(diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+
+        using var unsupportedXrefEntryType = new MemoryStream(PdfXrefStreamBytes(encrypted: false, pngUpPredictor: true, unsupportedXrefEntryType: true));
+        Assert.True(SourceFormatPreflight.Inspect(unsupportedXrefEntryType, ".pdf").Diagnostics.Any(diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+
+        using var invalidFreeObjectReference = new MemoryStream(PdfXrefStreamBytes(encrypted: false, pngUpPredictor: true, invalidFreeObjectReference: true));
+        Assert.True(SourceFormatPreflight.Inspect(invalidFreeObjectReference, ".pdf").Diagnostics.Any(diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+
+        using var invalidObjectStreamReference = new MemoryStream(PdfXrefStreamBytes(encrypted: false, pngUpPredictor: true, invalidObjectStreamReference: true));
+        Assert.True(SourceFormatPreflight.Inspect(invalidObjectStreamReference, ".pdf").Diagnostics.Any(diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+    }
+
     internal static void PreflightRejectsPngWithoutIdatPayload()
     {
         using var input = new MemoryStream(PngWithoutImageDataBytes());
@@ -1115,7 +1136,13 @@ internal static class SourceIntakeTests
         bool includeIndex = true,
         bool completeDefaultIndex = false,
         bool includeUnsupportedFilter = false,
-        bool compressWithFlate = false)
+        bool compressWithFlate = false,
+        bool pngUpPredictor = false,
+        bool unsupportedPredictor = false,
+        bool invalidXrefRecord = false,
+        bool unsupportedXrefEntryType = false,
+        bool invalidFreeObjectReference = false,
+        bool invalidObjectStreamReference = false)
     {
         using var output = new MemoryStream();
         output.Write(Encoding.ASCII.GetBytes("%PDF-1.7\n"));
@@ -1124,30 +1151,57 @@ internal static class SourceIntakeTests
         if (encrypted) output.Write(Encoding.ASCII.GetBytes("/Encrypt 2 0 R "));
         if (includeRequiredFields)
         {
-            output.Write(Encoding.ASCII.GetBytes(includeIndex ? "/Size 2 /W [1 4 3] /Index [1 1] " : "/Size 2 /W [1 4 3] "));
+            output.Write(Encoding.ASCII.GetBytes(pngUpPredictor
+                ? "/Size 2 /W [1 4 3] /Index [0 2] "
+                : includeIndex ? "/Size 2 /W [1 4 3] /Index [1 1] " : "/Size 2 /W [1 4 3] "));
         }
         if (includeUnsupportedFilter) output.Write(Encoding.ASCII.GetBytes("/Filter /DCTDecode "));
-        var recordCount = includeIndex || !completeDefaultIndex ? 1 : 2;
         byte[] records;
         using (var rawRecords = new MemoryStream())
         {
             Span<byte> xrefRecord = stackalloc byte[8];
-            if (!includeIndex && completeDefaultIndex) rawRecords.Write(xrefRecord);
+            xrefRecord.Clear();
+            if (pngUpPredictor)
+            {
+                if (unsupportedXrefEntryType) xrefRecord[0] = 3;
+                if (invalidObjectStreamReference)
+                {
+                    xrefRecord[0] = 2;
+                    System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(xrefRecord.Slice(1, 4), 2);
+                }
+                if (invalidFreeObjectReference)
+                    System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(xrefRecord.Slice(1, 4), 2);
+                xrefRecord[5] = 0;
+                xrefRecord[6] = 0xff;
+                xrefRecord[7] = 0xff;
+                rawRecords.Write(xrefRecord);
+                xrefRecord.Clear();
+            }
+            else if (!includeIndex && completeDefaultIndex) rawRecords.Write(xrefRecord);
             xrefRecord.Clear();
             xrefRecord[0] = 1;
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(xrefRecord.Slice(1, 4), checked((uint)xrefOffset));
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(xrefRecord.Slice(1, 4), checked((uint)(invalidXrefRecord ? xrefOffset - 1 : xrefOffset)));
+            if (pngUpPredictor)
+            {
+                var previousRow = rawRecords.ToArray();
+                for (var index = 0; index < xrefRecord.Length; index++) xrefRecord[index] -= previousRow[index];
+            }
             rawRecords.Write(xrefRecord);
             records = rawRecords.ToArray();
         }
 
         byte[] streamBytes;
-        if (compressWithFlate)
+        if (compressWithFlate || pngUpPredictor)
         {
             using var compressed = new MemoryStream();
             using (var compressor = new ZLibStream(compressed, CompressionLevel.Optimal, leaveOpen: true))
                 compressor.Write(records);
             streamBytes = compressed.ToArray();
             output.Write(Encoding.ASCII.GetBytes("/Filter /FlateDecode "));
+            if (pngUpPredictor)
+                output.Write(Encoding.ASCII.GetBytes(unsupportedPredictor
+                    ? "/DecodeParms << /Predictor 99 /Columns 8 >> "
+                    : "/DecodeParms << /Predictor 12 /Columns 8 >> "));
         }
         else
         {

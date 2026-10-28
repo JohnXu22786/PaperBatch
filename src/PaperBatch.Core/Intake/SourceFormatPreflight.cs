@@ -260,7 +260,7 @@ public static class SourceFormatPreflight
             return TryValidateClassicPdfXref(bytes, cursor + 4, fileLength, out declaresEncryption, out previousXrefOffset);
         }
 
-        return TryValidatePdfXrefStream(bytes, out declaresEncryption, out previousXrefOffset);
+        return TryValidatePdfXrefStream(bytes, xrefOffset, fileLength, out declaresEncryption, out previousXrefOffset);
     }
 
     private static bool TryValidateClassicPdfXref(
@@ -314,7 +314,12 @@ public static class SourceFormatPreflight
         return false;
     }
 
-    private static bool TryValidatePdfXrefStream(ReadOnlySpan<byte> bytes, out bool declaresEncryption, out long? previousXrefOffset)
+    private static bool TryValidatePdfXrefStream(
+        ReadOnlySpan<byte> bytes,
+        long xrefOffset,
+        long fileLength,
+        out bool declaresEncryption,
+        out long? previousXrefOffset)
     {
         declaresEncryption = false;
         previousXrefOffset = null;
@@ -323,7 +328,7 @@ public static class SourceFormatPreflight
             !TryReadPdfToken(bytes, ref cursor, out var generation) ||
             !TryReadPdfToken(bytes, ref cursor, out var objectKeyword) || objectKeyword != "obj" ||
             !long.TryParse(objectNumber, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var objectId) || objectId < 0 ||
-            !int.TryParse(generation, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var generationId) || generationId < 0)
+            !int.TryParse(generation, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var generationId) || generationId is < 0 or > 65535)
         {
             return false;
         }
@@ -341,8 +346,10 @@ public static class SourceFormatPreflight
         var hasDecodeParameters = false;
         long size = 0;
         long streamLength = 0;
+        var fieldWidths = Array.Empty<int>();
         var recordWidth = 0;
         long[]? indexRanges = null;
+        var decodeParameters = PdfXrefDecodeParameters.Default;
         while (cursor < bytes.Length)
         {
             SkipPdfTrivia(bytes, ref cursor);
@@ -365,7 +372,7 @@ public static class SourceFormatPreflight
                     hasSize = true;
                     break;
                 case "W":
-                    if (hasWidths || !TryReadPdfXrefWidths(bytes, ref cursor, out recordWidth)) return false;
+                    if (hasWidths || !TryReadPdfXrefWidths(bytes, ref cursor, out fieldWidths, out recordWidth)) return false;
                     hasWidths = true;
                     break;
                 case "Index":
@@ -391,8 +398,8 @@ public static class SourceFormatPreflight
                     hasFilter = true;
                     break;
                 case "DecodeParms":
+                    if (hasDecodeParameters || !TryReadPdfXrefDecodeParameters(bytes, ref cursor, out decodeParameters)) return false;
                     hasDecodeParameters = true;
-                    if (!SkipPdfValue(bytes, ref cursor, depth: 1)) return false;
                     break;
                 default:
                     if (!SkipPdfValue(bytes, ref cursor, depth: 1)) return false;
@@ -400,7 +407,8 @@ public static class SourceFormatPreflight
             }
         }
 
-        if (!hasType || !hasSize || !hasWidths || !hasLength || hasDecodeParameters || recordWidth <= 0 || objectId >= size)
+        if (!hasType || !hasSize || !hasWidths || !hasLength || recordWidth <= 0 || objectId >= size ||
+            hasDecodeParameters && !hasFilter)
             return false;
 
         long recordCount = 0;
@@ -429,30 +437,54 @@ public static class SourceFormatPreflight
         if (bytes[cursor++] == 13 && cursor < bytes.Length && bytes[cursor] == 10) cursor++;
         if (streamLength > bytes.Length - cursor) return false;
         var streamBytes = bytes.Slice(cursor, checked((int)streamLength));
-        if (hasFilter && !TryDecodePdfXrefFlate(streamBytes, checked((int)(recordCount * recordWidth)))) return false;
+        var expectedRecordBytes = checked((int)(recordCount * recordWidth));
+        byte[] decodedRecords;
+        if (hasFilter)
+        {
+            if (!TryDecodePdfXrefFlate(streamBytes, expectedRecordBytes, decodeParameters, out decodedRecords)) return false;
+        }
+        else
+        {
+            if (decodeParameters.Predictor != 1) return false;
+            decodedRecords = streamBytes.ToArray();
+        }
+
+        if (decodedRecords.Length != expectedRecordBytes ||
+            !TryValidatePdfXrefStreamRecords(decodedRecords, fieldWidths, recordWidth, indexRanges, size, objectId, generationId, xrefOffset, fileLength)) return false;
         cursor += checked((int)streamLength);
         if (!TryReadPdfToken(bytes, ref cursor, out var endStreamKeyword) || endStreamKeyword != "endstream" ||
             !TryReadPdfToken(bytes, ref cursor, out var endObjectKeyword) || endObjectKeyword != "endobj") return false;
         return true;
     }
 
-    private static bool TryDecodePdfXrefFlate(ReadOnlySpan<byte> compressed, int expectedLength)
+    private static bool TryDecodePdfXrefFlate(
+        ReadOnlySpan<byte> compressed,
+        int expectedLength,
+        PdfXrefDecodeParameters parameters,
+        out byte[] decodedRecords)
     {
-        if (expectedLength <= 0 || expectedLength > MaximumPdfXrefBytes) return false;
+        decodedRecords = [];
+        if (expectedLength <= 0 || expectedLength > MaximumPdfXrefBytes || parameters.Columns <= 0) return false;
+        if (parameters.Predictor != 1 && expectedLength % parameters.Columns != 0) return false;
+
+        var rowCount = parameters.Predictor == 1 ? 1 : expectedLength / parameters.Columns;
+        var encodedLength = parameters.Predictor == 15 ? expectedLength + rowCount : expectedLength;
+        if (encodedLength > MaximumPdfXrefBytes) return false;
         try
         {
             using var input = new MemoryStream(compressed.ToArray(), writable: false);
             using var decoder = new ZLibStream(input, CompressionMode.Decompress);
-            var decoded = new byte[expectedLength + 1];
+            var encoded = new byte[encodedLength + 1];
             var total = 0;
-            while (total < decoded.Length)
+            while (total < encoded.Length)
             {
-                var count = decoder.Read(decoded, total, decoded.Length - total);
+                var count = decoder.Read(encoded, total, encoded.Length - total);
                 if (count == 0) break;
                 total += count;
             }
 
-            return total == expectedLength && decoder.ReadByte() == -1;
+            if (total != encodedLength || decoder.ReadByte() != -1) return false;
+            return TryApplyPdfXrefPredictor(encoded.AsSpan(0, encodedLength), expectedLength, parameters, rowCount, out decodedRecords);
         }
         catch (InvalidDataException)
         {
@@ -464,6 +496,204 @@ public static class SourceFormatPreflight
         }
     }
 
+    private static bool TryApplyPdfXrefPredictor(
+        ReadOnlySpan<byte> encoded,
+        int expectedLength,
+        PdfXrefDecodeParameters parameters,
+        int rowCount,
+        out byte[] decoded)
+    {
+        decoded = new byte[expectedLength];
+        var columns = parameters.Columns;
+        switch (parameters.Predictor)
+        {
+            case 1:
+                encoded.CopyTo(decoded);
+                return true;
+            case 2:
+                for (var row = 0; row < rowCount; row++)
+                {
+                    var rowStart = row * columns;
+                    for (var column = 0; column < columns; column++)
+                    {
+                        var left = column == 0 ? 0 : decoded[rowStart + column - 1];
+                        decoded[rowStart + column] = unchecked((byte)(encoded[rowStart + column] + left));
+                    }
+                }
+                return true;
+            case >= 10 and <= 14:
+            case 15:
+                var encodedCursor = 0;
+                for (var row = 0; row < rowCount; row++)
+                {
+                    var filter = parameters.Predictor == 15 ? encoded[encodedCursor++] : (byte)(parameters.Predictor - 10);
+                    if (filter > 4) return false;
+                    var rowStart = row * columns;
+                    for (var column = 0; column < columns; column++)
+                    {
+                        var raw = encoded[encodedCursor++];
+                        var left = column == 0 ? 0 : decoded[rowStart + column - 1];
+                        var up = row == 0 ? 0 : decoded[rowStart - columns + column];
+                        var upperLeft = row == 0 || column == 0 ? 0 : decoded[rowStart - columns + column - 1];
+                        var predictor = filter switch
+                        {
+                            0 => 0,
+                            1 => left,
+                            2 => up,
+                            3 => (left + up) / 2,
+                            4 => PaethPredictor(left, up, upperLeft),
+                            _ => 0
+                        };
+                        decoded[rowStart + column] = unchecked((byte)(raw + predictor));
+                    }
+                }
+                return encodedCursor == encoded.Length;
+            default:
+                return false;
+        }
+    }
+
+    private static int PaethPredictor(int left, int up, int upperLeft)
+    {
+        var estimate = left + up - upperLeft;
+        var leftDistance = Math.Abs(estimate - left);
+        var upDistance = Math.Abs(estimate - up);
+        var upperLeftDistance = Math.Abs(estimate - upperLeft);
+        return leftDistance <= upDistance && leftDistance <= upperLeftDistance
+            ? left
+            : upDistance <= upperLeftDistance ? up : upperLeft;
+    }
+
+    private static bool TryReadPdfXrefDecodeParameters(
+        ReadOnlySpan<byte> bytes,
+        ref int cursor,
+        out PdfXrefDecodeParameters parameters)
+    {
+        parameters = PdfXrefDecodeParameters.Default;
+        SkipPdfTrivia(bytes, ref cursor);
+        if (cursor + 4 <= bytes.Length && bytes.Slice(cursor, 4).SequenceEqual("null"u8) &&
+            (cursor + 4 == bytes.Length || IsPdfDelimiter(bytes[cursor + 4])))
+        {
+            cursor += 4;
+            return true;
+        }
+        if (cursor + 1 >= bytes.Length || bytes[cursor] != (byte)'<' || bytes[cursor + 1] != (byte)'<') return false;
+        cursor += 2;
+        var predictor = 1;
+        var colors = 1;
+        var bitsPerComponent = 8;
+        var columns = 1;
+        var hasPredictor = false;
+        var hasColors = false;
+        var hasBitsPerComponent = false;
+        var hasColumns = false;
+        while (cursor < bytes.Length)
+        {
+            SkipPdfTrivia(bytes, ref cursor);
+            if (cursor + 1 < bytes.Length && bytes[cursor] == (byte)'>' && bytes[cursor + 1] == (byte)'>')
+            {
+                cursor += 2;
+                break;
+            }
+
+            if (cursor >= bytes.Length || bytes[cursor] != (byte)'/' || !TryReadPdfName(bytes, ref cursor, out var key) ||
+                !TryReadPdfNonNegativeInteger(bytes, ref cursor, out var value) || value > int.MaxValue)
+                return false;
+
+            switch (key)
+            {
+                case "Predictor" when !hasPredictor:
+                    predictor = (int)value;
+                    hasPredictor = true;
+                    break;
+                case "Colors" when !hasColors:
+                    colors = (int)value;
+                    hasColors = true;
+                    break;
+                case "BitsPerComponent" when !hasBitsPerComponent:
+                    bitsPerComponent = (int)value;
+                    hasBitsPerComponent = true;
+                    break;
+                case "Columns" when !hasColumns:
+                    columns = (int)value;
+                    hasColumns = true;
+                    break;
+                default:
+                    return false;
+            }
+        }
+
+        if (columns <= 0 || columns > MaximumPdfXrefBytes || colors != 1 || bitsPerComponent != 8 ||
+            predictor is not 1 and not 2 and not (>= 10 and <= 15))
+            return false;
+
+        parameters = new PdfXrefDecodeParameters(predictor, columns);
+        return true;
+    }
+
+    private static bool TryValidatePdfXrefStreamRecords(
+        ReadOnlySpan<byte> records,
+        int[] fieldWidths,
+        int recordWidth,
+        long[]? indexRanges,
+        long size,
+        long streamObjectId,
+        int streamGeneration,
+        long xrefOffset,
+        long fileLength)
+    {
+        var ranges = indexRanges ?? [0, records.Length / recordWidth];
+        var recordIndex = 0;
+        var foundStreamObject = false;
+        for (var range = 0; range < ranges.Length; range += 2)
+        {
+            var first = ranges[range];
+            var count = ranges[range + 1];
+            for (long item = 0; item < count; item++, recordIndex++)
+            {
+                var record = records.Slice(recordIndex * recordWidth, recordWidth);
+                if (!TryReadPdfXrefField(record, 0, fieldWidths[0], defaultValue: 1, out var entryType) ||
+                    !TryReadPdfXrefField(record, fieldWidths[0], fieldWidths[1], defaultValue: 0, out var field2) ||
+                    !TryReadPdfXrefField(record, fieldWidths[0] + fieldWidths[1], fieldWidths[2], defaultValue: 0, out var field3))
+                    return false;
+
+                var objectId = first + item;
+                switch (entryType)
+                {
+                    case 0 when field2 < (ulong)size && field3 <= 65535:
+                        break;
+                    case 1 when field2 < (ulong)fileLength && field3 <= 65535:
+                        break;
+                    case 2 when field2 > 0 && field2 < (ulong)size && field3 < (ulong)size:
+                        break;
+                    default:
+                        return false;
+                }
+                if (objectId != streamObjectId) continue;
+                if (foundStreamObject || entryType != 1 || field2 != (ulong)xrefOffset || field3 != (ulong)streamGeneration)
+                    return false;
+                foundStreamObject = true;
+            }
+        }
+
+        return recordIndex * recordWidth == records.Length && foundStreamObject;
+    }
+
+    private static bool TryReadPdfXrefField(ReadOnlySpan<byte> record, int offset, int width, ulong defaultValue, out ulong value)
+    {
+        value = defaultValue;
+        if (width == 0) return true;
+        if (width > 8 || offset < 0 || offset > record.Length - width) return false;
+        value = 0;
+        for (var index = 0; index < width; index++) value = (value << 8) | record[offset + index];
+        return true;
+    }
+
+    private readonly record struct PdfXrefDecodeParameters(int Predictor, int Columns)
+    {
+        public static PdfXrefDecodeParameters Default => new(1, 1);
+    }
+
     private static bool TryReadPdfNameValue(ReadOnlySpan<byte> bytes, ref int cursor, string expectedValue)
     {
         SkipPdfTrivia(bytes, ref cursor);
@@ -471,19 +701,24 @@ public static class SourceFormatPreflight
                string.Equals(value, expectedValue, StringComparison.Ordinal);
     }
 
-    private static bool TryReadPdfXrefWidths(ReadOnlySpan<byte> bytes, ref int cursor, out int totalWidth)
+    private static bool TryReadPdfXrefWidths(ReadOnlySpan<byte> bytes, ref int cursor, out int[] fieldWidths, out int totalWidth)
     {
+        fieldWidths = [];
         totalWidth = 0;
         SkipPdfTrivia(bytes, ref cursor);
         if (cursor >= bytes.Length || bytes[cursor++] != (byte)'[') return false;
+        var widths = new int[3];
         for (var index = 0; index < 3; index++)
         {
             if (!TryReadPdfNonNegativeInteger(bytes, ref cursor, out var width) || width > 8) return false;
-            totalWidth += (int)width;
+            widths[index] = (int)width;
+            totalWidth += widths[index];
         }
 
         SkipPdfTrivia(bytes, ref cursor);
-        return cursor < bytes.Length && bytes[cursor++] == (byte)']' && totalWidth > 0;
+        if (cursor >= bytes.Length || bytes[cursor++] != (byte)']' || totalWidth <= 0) return false;
+        fieldWidths = widths;
+        return true;
     }
 
     private static bool TryReadPdfXrefIndex(ReadOnlySpan<byte> bytes, ref int cursor, out long[]? ranges)
