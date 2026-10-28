@@ -242,6 +242,9 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
             await Task.Delay(retryInterval, cancellationToken).ConfigureAwait(false);
             results = await processor.ReconcileAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
         }
+        outcomes.AddRange(results
+            .Where(item => item.State == PaperBatch.Core.Watch.WatchProcessingState.Failed)
+            .Select(item => new WatchOutcome(item.Candidate.RelativePath, "preparation_failed", reason: item.FailureReason)));
         return Success(request, new
         {
             status = "scanned",
@@ -278,7 +281,8 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
                 new PaperBatch.Core.Layout.LayoutOptions(), candidate.IdempotencyKey,
                 new PaperBatch.Core.Persistence.RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true), now,
                 cancellationToken).ConfigureAwait(false);
-            if (!prepared.Succeeded) throw new InvalidOperationException(string.Join(" ", prepared.Diagnostics));
+            if (!prepared.Succeeded)
+                throw new PaperBatch.Core.Watch.WatchPreparationFailedException(string.Join(" ", prepared.Diagnostics));
             outcomes.Add(new WatchOutcome(candidate.RelativePath, "prepared_for_review", prepared.Run!.RunId));
         }
     }

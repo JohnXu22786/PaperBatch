@@ -204,6 +204,46 @@ internal static class WatchFolderTests
         Assert.Equal(true, processed.Single(item => item.Candidate.Kind == WatchFileKind.Office).Candidate.RequiresUserReview);
     }
 
+    public static void PreparationFailureDoesNotHideEarlierResultsOrSkipLaterCandidates()
+    {
+        using var tree = new TemporaryTree();
+        File.WriteAllBytes(Path.Combine(tree.Root, "01-first.pdf"), RendererTests.OnePagePdf());
+        File.WriteAllBytes(Path.Combine(tree.Root, "02-malformed.pdf"), [0x25, 0x50, 0x44, 0x58, 0x2d]);
+        File.WriteAllBytes(Path.Combine(tree.Root, "03-last.pdf"), RendererTests.OnePagePdf());
+
+        var scanner = new WatchFolderScanner(new WatchFolderOptions(tree.Root, "rule-a", TimeSpan.Zero));
+        var coordinator = new FailingPreparationCoordinator();
+        var processor = new WatchFolderProcessor(scanner, coordinator);
+        var now = DateTimeOffset.Parse("2026-10-28T12:00:00Z");
+
+        _ = processor.ReconcileAsync(now).AsTask().GetAwaiter().GetResult();
+        var processed = processor.ReconcileAsync(now).AsTask().GetAwaiter().GetResult();
+
+        Assert.Equal(3, processed.Count);
+        var failed = processed.Single(item => item.Candidate.RelativePath == "02-malformed.pdf");
+        Assert.Equal("Failed", failed.State.ToString());
+        Assert.True(new[] { "01-first.pdf", "03-last.pdf" }.SequenceEqual(
+            processed.Where(item => item.State.ToString() != "Failed").Select(item => item.Candidate.RelativePath)));
+        Assert.True(new[] { "run-01-first", "run-03-last" }.SequenceEqual(coordinator.PreparedRunIds));
+    }
+
+    private sealed class FailingPreparationCoordinator : IWatchFolderCoordinator
+    {
+        public List<string> PreparedRunIds { get; } = [];
+
+        public ValueTask ProcessAsync(WatchFolderCandidate candidate, bool submitAutomatically, CancellationToken cancellationToken = default)
+        {
+            var header = new byte[5];
+            using (var source = File.OpenRead(candidate.FullPath))
+                source.ReadExactly(header);
+            if (!header.SequenceEqual(new byte[] { 0x25, 0x50, 0x44, 0x46, 0x2d }))
+                throw new WatchPreparationFailedException("Preparation failed for malformed document.");
+
+            PreparedRunIds.Add("run-" + Path.GetFileNameWithoutExtension(candidate.RelativePath));
+            return ValueTask.CompletedTask;
+        }
+    }
+
     private sealed class RecordingCoordinator : IWatchFolderCoordinator
     {
         public Dictionary<string, bool> SubmitAutomaticallyByPath { get; } = new();

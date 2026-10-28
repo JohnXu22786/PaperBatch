@@ -2,9 +2,11 @@ namespace PaperBatch.Core.Watch;
 
 public sealed record WatchFolderPolicy(bool AutoSubmitTrustedRule = false, bool RuleIsTrusted = false);
 
-public enum WatchProcessingState { PreparedForReview, AutoSubmitRequested }
+public enum WatchProcessingState { PreparedForReview, AutoSubmitRequested, Failed }
 
-public sealed record WatchProcessingResult(WatchFolderCandidate Candidate, WatchProcessingState State, string IdempotencyKey);
+public sealed record WatchProcessingResult(WatchFolderCandidate Candidate, WatchProcessingState State, string IdempotencyKey, string? FailureReason = null);
+
+internal sealed class WatchPreparationFailedException(string message) : Exception(message);
 
 /// <summary>Adapter to the shared coordinator. Implementations must persist and enforce the supplied idempotency key.</summary>
 public interface IWatchFolderCoordinator
@@ -26,8 +28,15 @@ public sealed class WatchFolderProcessor(WatchFolderScanner scanner, IWatchFolde
         {
             cancellationToken.ThrowIfCancellationRequested();
             var autoSubmit = _policy.AutoSubmitTrustedRule && _policy.RuleIsTrusted && !candidate.RequiresUserReview;
-            await _coordinator.ProcessAsync(candidate, autoSubmit, cancellationToken);
-            results.Add(new WatchProcessingResult(candidate, autoSubmit ? WatchProcessingState.AutoSubmitRequested : WatchProcessingState.PreparedForReview, candidate.IdempotencyKey));
+            try
+            {
+                await _coordinator.ProcessAsync(candidate, autoSubmit, cancellationToken);
+                results.Add(new WatchProcessingResult(candidate, autoSubmit ? WatchProcessingState.AutoSubmitRequested : WatchProcessingState.PreparedForReview, candidate.IdempotencyKey));
+            }
+            catch (WatchPreparationFailedException exception)
+            {
+                results.Add(new WatchProcessingResult(candidate, WatchProcessingState.Failed, candidate.IdempotencyKey, exception.Message));
+            }
         }
         return results;
     }
