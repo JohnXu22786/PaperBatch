@@ -691,10 +691,12 @@ static void InFlightSubmissionRemainsTrackedAfterPreparationSettingsChange()
             new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
 
         var submission = sources.SubmitPreparedRunAsync(queueItem.Id);
-        transport.SubmitStarted.Task.GetAwaiter().GetResult();
+        try { transport.SubmitStarted.Task.WaitAsync(DelayedSubmittedJobCoordinatorTransport.GateTimeout).GetAwaiter().GetResult(); }
+        catch (TimeoutException error) { throw new InvalidOperationException("Timed out waiting for the fake coordinator to start submission.", error); }
         viewModel.RequestedCopies = 2;
         transport.ReleaseSubmission.TrySetResult(true);
-        submission.GetAwaiter().GetResult();
+        try { submission.WaitAsync(DelayedSubmittedJobCoordinatorTransport.GateTimeout).GetAwaiter().GetResult(); }
+        catch (TimeoutException error) { throw new InvalidOperationException("Timed out waiting for the fake submission to finish.", error); }
 
         viewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
         var submittedJob = viewModel.PrintJobs.Single();
@@ -1480,6 +1482,7 @@ sealed class LayoutCaptureComposer : IPageCompositionAdapter
 
 sealed class DelayedSubmittedJobCoordinatorTransport(SqliteRunStore store) : ILocalCoordinatorTransport
 {
+    public static readonly TimeSpan GateTimeout = TimeSpan.FromSeconds(30);
     public TaskCompletionSource<bool> SubmitStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource<bool> ReleaseSubmission { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public int CancellationCalls { get; private set; }
@@ -1491,7 +1494,7 @@ sealed class DelayedSubmittedJobCoordinatorTransport(SqliteRunStore store) : ILo
         if (request.Operation == "cli.submit")
         {
             SubmitStarted.TrySetResult(true);
-            await ReleaseSubmission.Task.WaitAsync(cancellationToken);
+            await ReleaseSubmission.Task.WaitAsync(GateTimeout, cancellationToken).ConfigureAwait(false);
             var now = DateTimeOffset.UtcNow;
             store.BeginSubmission(arguments[0], request.IdempotencyKey!, now);
             store.RecordOsReceipt(arguments[0], request.IdempotencyKey!,
