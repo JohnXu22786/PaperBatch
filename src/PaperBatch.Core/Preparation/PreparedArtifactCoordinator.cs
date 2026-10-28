@@ -120,13 +120,27 @@ public sealed class PreparedArtifactCoordinator(
                 if (diagnostics.Count == 0) diagnostics.Add("Every selected source must pass intake preflight before preparation.");
                 return new(null, null, diagnostics, IsCancelled: false);
             }
-            for (var sourceIndex = 0; sourceIndex < inputArray.Length; sourceIndex++)
+            var sourcePathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            var expectedSha256BySourcePath = new Dictionary<string, List<string>>(sourcePathComparer);
+            foreach (var input in inputArray)
             {
-                var expectedSha256 = inputArray[sourceIndex].ExpectedSha256;
-                if (expectedSha256 is not null && !string.Equals(expectedSha256,
-                    prepared.Items[sourceIndex].Snapshot!.Sha256, StringComparison.OrdinalIgnoreCase))
+                if (input.ExpectedSha256 is null) continue;
+                var sourcePath = Path.GetFullPath(input.Path);
+                if (!expectedSha256BySourcePath.TryGetValue(sourcePath, out var expectedHashes))
                 {
-                    diagnostics.Add($"{Path.GetFileName(prepared.Items[sourceIndex].SourcePath)} changed after queue preflight. Reimport the source before preparing; no final artifact was created.");
+                    expectedHashes = [];
+                    expectedSha256BySourcePath.Add(sourcePath, expectedHashes);
+                }
+                expectedHashes.Add(input.ExpectedSha256);
+            }
+            foreach (var source in prepared.Items)
+            {
+                if (!expectedSha256BySourcePath.TryGetValue(Path.GetFullPath(source.SourcePath), out var expectedHashes))
+                    continue;
+                if (expectedHashes.Any(expectedSha256 => !string.Equals(expectedSha256,
+                    source.Snapshot!.Sha256, StringComparison.OrdinalIgnoreCase)))
+                {
+                    diagnostics.Add($"{Path.GetFileName(source.SourcePath)} changed after queue preflight. Reimport the source before preparing; no final artifact was created.");
                     return new(null, null, diagnostics, IsCancelled: false);
                 }
             }

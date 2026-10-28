@@ -259,6 +259,67 @@ internal static class PreparedArtifactCoordinatorTests
         }
     }
 
+    internal static void ExpectedShaForExplicitFileSurvivesDirectoryExpansion()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "paperbatch-expanded-expected-sha-" + Guid.NewGuid().ToString("N"));
+        var inputDirectory = Path.Combine(root, "inputs");
+        Directory.CreateDirectory(inputDirectory);
+        try
+        {
+            var firstPath = Path.Combine(inputDirectory, "01-first.pdf");
+            var secondPath = Path.Combine(inputDirectory, "02-second.pdf");
+            var explicitPath = Path.Combine(root, "explicit.pdf");
+            File.WriteAllBytes(firstPath, RendererTests.OnePagePdf());
+            File.WriteAllBytes(secondPath, [.. RendererTests.OnePagePdf(), (byte)'\n']);
+            byte[] explicitBytes = [.. RendererTests.OnePagePdf(), (byte)'\n', (byte)'\n'];
+            File.WriteAllBytes(explicitPath, explicitBytes);
+
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+            var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+            var renderers = new RendererCoordinator([
+                new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts))
+            ]);
+            var runs = new SqliteRunStore(Path.Combine(root, "runs.db"));
+            runs.Initialize();
+            var coordinator = new PreparedArtifactCoordinator(new SourceIntakeService(cache), cache, renderers,
+                new FixturePageMetadataInspector(), new VerifiedStaticFixtureInspector(),
+                new FixtureCompositionAdapter(pageCount => pageCount == 3 ? ThreePagePdf() : RendererTests.OnePagePdf()),
+                artifacts, runs);
+            var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter",
+                Orientation.Auto, ScalingMode.ShrinkToFit);
+            var retention = new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true);
+            var explicitSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(explicitBytes))
+                .ToLowerInvariant();
+            var inputs = new[]
+            {
+                new SourceInput(inputDirectory),
+                new SourceInput(explicitPath, ExpectedSha256: explicitSha256)
+            };
+
+            var unchanged = coordinator.PrepareAsync(inputs, settings, new LayoutOptions(),
+                "expanded-expected-sha-unchanged", retention, FixedTime).GetAwaiter().GetResult();
+
+            Assert.True(unchanged.Succeeded, string.Join("; ", unchanged.Diagnostics));
+            Assert.Equal(3, unchanged.Run!.Items.Length);
+            Assert.Equal(explicitSha256, unchanged.Run.Items[2].Source.Sha256);
+
+            File.WriteAllBytes(explicitPath, [.. explicitBytes, (byte)'\n']);
+            var changed = coordinator.PrepareAsync(inputs, settings, new LayoutOptions(),
+                "expanded-expected-sha-changed", retention, FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
+
+            Assert.False(changed.Succeeded, "A changed explicit source must fail its own expected SHA check.");
+            Assert.True(changed.Run is null && changed.Persistence is null);
+            Assert.True(changed.Diagnostics.Any(message => message.Contains(
+                "explicit.pdf changed after queue preflight", StringComparison.Ordinal)), string.Join("; ", changed.Diagnostics));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
     internal static void MismatchedExpectedShaRejectsExistingIdempotentRunReplay()
     {
         var root = Path.Combine(Path.GetTempPath(), "paperbatch-prepare-expected-sha-replay-" + Guid.NewGuid().ToString("N"));
@@ -473,7 +534,9 @@ internal static class PreparedArtifactCoordinatorTests
         public Task<IReadOnlyList<PageSize>> GetPageSizesAsync(Stream pdf, CancellationToken cancellationToken)
         {
             using var reader = new StreamReader(pdf, System.Text.Encoding.ASCII, leaveOpen: true);
-            var pageCount = reader.ReadToEnd().Contains("/Kids [3 0 R 5 0 R] /Count 2", StringComparison.Ordinal) ? 2 : 1;
+            var pdfText = reader.ReadToEnd();
+            var pageCount = pdfText.Contains("/Kids [3 0 R 5 0 R 7 0 R] /Count 3", StringComparison.Ordinal) ? 3 :
+                pdfText.Contains("/Kids [3 0 R 5 0 R] /Count 2", StringComparison.Ordinal) ? 2 : 1;
             pdf.Position = 0;
             return Task.FromResult<IReadOnlyList<PageSize>>(Enumerable.Repeat(new PageSize(612, 792), pageCount).ToArray());
         }
@@ -510,5 +573,35 @@ internal static class PreparedArtifactCoordinatorTests
             throw new InvalidOperationException("Preparation enumerated its inputs before validating the idempotency key.");
 
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    private static byte[] ThreePagePdf()
+    {
+        var pageContent = new[] { "1 0 0 rg 10 20 20 20 re f", "0 1 0 rg 10 20 20 20 re f", "0 0 1 rg 10 20 20 20 re f" };
+        var objects = new[]
+        {
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /ProcSet [/PDF] >> /Contents 4 0 R >>",
+            $"<< /Length {pageContent[0].Length} >>\nstream\n{pageContent[0]}\nendstream",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /ProcSet [/PDF] >> /Contents 6 0 R >>",
+            $"<< /Length {pageContent[1].Length} >>\nstream\n{pageContent[1]}\nendstream",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /ProcSet [/PDF] >> /Contents 8 0 R >>",
+            $"<< /Length {pageContent[2].Length} >>\nstream\n{pageContent[2]}\nendstream"
+        };
+        var builder = new System.Text.StringBuilder("%PDF-1.7\n");
+        var offsets = new List<int> { 0 };
+        for (var index = 0; index < objects.Length; index++)
+        {
+            offsets.Add(System.Text.Encoding.ASCII.GetByteCount(builder.ToString()));
+            builder.Append(index + 1).Append(" 0 obj\n").Append(objects[index]).Append("\nendobj\n");
+        }
+        var xref = System.Text.Encoding.ASCII.GetByteCount(builder.ToString());
+        builder.Append("xref\n0 ").Append(objects.Length + 1).Append("\n0000000000 65535 f \n");
+        foreach (var offset in offsets.Skip(1))
+            builder.Append(offset.ToString("D10", System.Globalization.CultureInfo.InvariantCulture)).Append(" 00000 n \n");
+        builder.Append("trailer\n<< /Size ").Append(objects.Length + 1).Append(" /Root 1 0 R >>\nstartxref\n")
+            .Append(xref).Append("\n%%EOF\n");
+        return System.Text.Encoding.ASCII.GetBytes(builder.ToString());
     }
 }
