@@ -25,6 +25,7 @@ var tests = new (string Name, Action Run)[]
     ("print status and cancellation failures remain visible and block unsafe submission", PrintStatusFailuresAreVisibleAndBlockSubmission),
     ("known no-effect print failures can be retried from the desktop", KnownNoEffectPrintFailuresCanBeRetried),
     ("a newly prepared run can be submitted while canceled historical jobs remain visible", RepreparedRunCanSubmitAlongsideCancelledHistory),
+    ("print job refresh returns status persisted by the coordinator in the same refresh", PrintJobRefreshReturnsPersistedCoordinatorStatus),
     ("preparation refreshes newly persisted ready print jobs", PreparationRefreshesReadyPrintJobs),
     ("preparation refreshes the currently selected row", PreparationRefreshesCurrentlySelectedRow),
     ("queue ordering and removal are actionable and clear prepared previews", QueueEditsPreserveSelectionAndInvalidateRemovedPreview),
@@ -371,6 +372,50 @@ static void RepreparedRunCanSubmitAlongsideCancelledHistory()
     blockedViewModel.RefreshPreviewAsync().GetAwaiter().GetResult();
     blockedViewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
     Assert.True(!blockedViewModel.CanSubmitPreparedRun);
+}
+
+static void PrintJobRefreshReturnsPersistedCoordinatorStatus()
+{
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-desktop-refresh-status-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
+        var now = DateTimeOffset.UtcNow;
+        var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);
+        var item = new PreparedItem("item", new SourceSnapshot("snapshot", new string('a', 64), 1, now),
+            new RendererResult("renderer", "1", "source-artifact", new string('b', 64), 1, 1,
+                new RendererCapabilities(1, ["application/pdf"])),
+            [new PageMapping(1, 1)], settings);
+        var run = PreparedRun.Create("run-refresh-status", now, new string('c', 64), [item],
+            [new CompatibleSegment("segment", 0, [item.ItemId], "compat", settings)],
+            new FinalPdfArtifact("artifact_" + new string('d', 64), new string('d', 64), 100, 1));
+        store.CreateRun(run, "request-refresh-status", new RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true));
+        var storedJob = store.GetJobs(run.RunId).Single();
+        store.BeginSubmission(storedJob.JobId, "submit-refresh-status", now);
+        store.RecordOsReceipt(storedJob.JobId, "submit-refresh-status",
+            new OsJobReceipt("test-queue", "os-job-1", "run-nonce", now), now);
+        var transport = new StatusUpdatingCoordinatorTransport(store);
+        var sources = new ProductionPresentationSources(runStore: store, coordinatorTransport: transport);
+        sources.RegisterPreparedRun("queue-item", run);
+
+        var jobBeforeRefresh = store.GetJob(storedJob.JobId)!;
+        Assert.Equal(JobState.AcceptedByOs, jobBeforeRefresh.State);
+
+        var refreshedJob = sources.RefreshPrintJobsAsync("queue-item").GetAwaiter().GetResult().Single();
+
+        Assert.Equal(nameof(JobState.OsReportsComplete), refreshedJob.State);
+        Assert.Equal("Reported by the OS spooler; this does not confirm paper output.", refreshedJob.Detail);
+        Assert.True(!refreshedJob.CanCancel);
+        Assert.True(!refreshedJob.IsHistorical);
+        Assert.Equal(1, transport.StatusCalls);
+        Assert.Equal(JobState.OsReportsComplete, store.GetJob(storedJob.JobId)!.State);
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
 }
 
 static void SourceIntakeErrorsRemainVisibleAndAppend()
@@ -1609,6 +1654,25 @@ sealed class SubmittedJobCoordinatorTransport(SqliteRunStore store) : ILocalCoor
     private static ValueTask<IpcResponseEnvelope> Response(IpcRequestEnvelope request, object payload) =>
         ValueTask.FromResult(new IpcResponseEnvelope(IpcJson.CurrentProtocolVersion, request.CorrelationId,
             JsonSerializer.SerializeToElement(payload), null));
+}
+
+sealed class StatusUpdatingCoordinatorTransport(SqliteRunStore store) : ILocalCoordinatorTransport
+{
+    public int StatusCalls { get; private set; }
+
+    public ValueTask<IpcResponseEnvelope> SendAsync(IpcRequestEnvelope request, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (request.Operation != "cli.status")
+            return ValueTask.FromResult(IpcJson.CreateErrorResponse(request.CorrelationId, "unavailable", "Unsupported fake coordinator operation."));
+
+        StatusCalls++;
+        var jobId = request.Payload.GetProperty("arguments").EnumerateArray().Single().GetString()!;
+        store.TransitionJob(jobId, JobState.OsReportsComplete, "fake status reports completion", DateTimeOffset.UtcNow,
+            expectedState: JobState.AcceptedByOs);
+        return ValueTask.FromResult(new IpcResponseEnvelope(IpcJson.CurrentProtocolVersion, request.CorrelationId,
+            JsonSerializer.SerializeToElement(new { status = nameof(JobState.OsReportsComplete) }), null));
+    }
 }
 
 sealed class PreparedArtifactTestTransport(PreparedArtifactCoordinator preparation) : ILocalCoordinatorTransport
