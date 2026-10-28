@@ -161,6 +161,14 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
         else _preparationUnavailable = "Preparation requires the explicitly configured, hash-pinned PDFium runtime.";
     }
 
+    internal ProductionCoordinatorRequestHandler(
+        PaperBatch.Core.Persistence.SqliteRunStore runs,
+        PaperBatch.Core.Printing.WindowsPrintCoordinator printing)
+    {
+        _runs = runs ?? throw new ArgumentNullException(nameof(runs));
+        _printing = printing ?? throw new ArgumentNullException(nameof(printing));
+    }
+
     public async ValueTask<IpcResponseEnvelope> HandleAsync(IpcRequestEnvelope request, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
