@@ -132,6 +132,18 @@ internal static class GdiBackendTests
         Assert.Equal(PrintBackendJobStatus.Cancelled, WindowsGdiNativeAdapter.MapWinspoolJobStatus(0x00008000u));
     }
 
+    internal static void NativeAdapterMapsPausedBlockedAndUserInterventionStatusesToReview()
+    {
+        Assert.Equal(PrintBackendJobStatus.Unknown, WindowsGdiNativeAdapter.MapWinspoolJobStatus(0x00000001u));
+        Assert.Equal(PrintBackendJobStatus.Unknown, WindowsGdiNativeAdapter.MapWinspoolJobStatus(0x00000200u));
+        Assert.Equal(PrintBackendJobStatus.Unknown, WindowsGdiNativeAdapter.MapWinspoolJobStatus(0x00000400u));
+
+        // Attention flags take precedence over recognized activity, completion, and failure bits.
+        Assert.Equal(PrintBackendJobStatus.Unknown, WindowsGdiNativeAdapter.MapWinspoolJobStatus(0x00000009u));
+        Assert.Equal(PrintBackendJobStatus.Unknown, WindowsGdiNativeAdapter.MapWinspoolJobStatus(0x00000280u));
+        Assert.Equal(PrintBackendJobStatus.Unknown, WindowsGdiNativeAdapter.MapWinspoolJobStatus(0x00000402u));
+    }
+
     internal static void RejectsPageSelectionOutsideSegmentOwnership()
     {
         var pdf = RendererTests.OnePagePdf();
