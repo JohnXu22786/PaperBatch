@@ -324,8 +324,12 @@ internal static class GdiBackendTests
             Capabilities() with { Options = Capabilities().Options.SetItem(PrintOption.Duplex, simplex) }, baseSettings));
 
         var duplex = WindowsGdiNativeAdapter.MapDuplexCapability(1);
-        Assert.Equal(CapabilityState.Unknown, duplex.State);
-        Assert.Equal(0, duplex.Values.Length);
+        Assert.Equal(CapabilityState.Supported, duplex.State);
+        Assert.True(duplex.Values.SequenceEqual(["Simplex"]));
+        var duplexSimplexOptions = WindowsPrintJobOptions.Map("queue-identity",
+            Capabilities() with { Options = Capabilities().Options.SetItem(PrintOption.Duplex, duplex) },
+            baseSettings with { DuplexMode = DuplexMode.Simplex });
+        Assert.Equal("Simplex", duplexSimplexOptions.Duplex);
         foreach (var mode in new[] { DuplexMode.LongEdge, DuplexMode.ShortEdge })
         {
             var settings = baseSettings with { DuplexMode = mode };
