@@ -860,6 +860,24 @@ internal static class CoreTests
         Directory.Delete(dataRoot, recursive: true);
     }
 
+    internal static void WatchPreparationCancellationIsNotReportedAsFileFailure()
+    {
+        var cancelledResult = new PaperBatch.Core.Preparation.PreparedArtifactResult(
+            null, null, ["Preparation was cancelled."], IsCancelled: true);
+        Assert.Throws<OperationCanceledException>(() => ProductionCoordinatorRequestHandler.EnsureWatchPreparationSucceeded(
+            cancelledResult, CancellationToken.None));
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var failedResult = new PaperBatch.Core.Preparation.PreparedArtifactResult(
+            null, null, ["Source could not be prepared."], IsCancelled: false);
+        Assert.Throws<OperationCanceledException>(() => ProductionCoordinatorRequestHandler.EnsureWatchPreparationSucceeded(
+            failedResult, cancellation.Token));
+
+        Assert.Throws<PaperBatch.Core.Watch.WatchPreparationFailedException>(() =>
+            ProductionCoordinatorRequestHandler.EnsureWatchPreparationSucceeded(failedResult, CancellationToken.None));
+    }
+
     internal static void CoordinatorCapabilitiesRequireValidatedPdfiumRuntime()
     {
         var originalPath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH");

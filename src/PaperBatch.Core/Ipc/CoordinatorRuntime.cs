@@ -221,6 +221,17 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
         });
     }
 
+    internal static void EnsureWatchPreparationSucceeded(
+        PaperBatch.Core.Preparation.PreparedArtifactResult prepared, CancellationToken cancellationToken)
+    {
+        if (prepared.IsCancelled) throw new OperationCanceledException(cancellationToken);
+        if (!prepared.Succeeded)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new PaperBatch.Core.Watch.WatchPreparationFailedException(string.Join(" ", prepared.Diagnostics));
+        }
+    }
+
     private async ValueTask<IpcResponseEnvelope> WatchAsync(IpcRequestEnvelope request, CancellationToken cancellationToken)
     {
         var root = Path.GetFullPath(GetArguments(request, 1)[0]);
@@ -242,6 +253,9 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
             await Task.Delay(retryInterval, cancellationToken).ConfigureAwait(false);
             results = await processor.ReconcileAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
         }
+        outcomes.AddRange(results
+            .Where(item => item.State == PaperBatch.Core.Watch.WatchProcessingState.Failed)
+            .Select(item => new WatchOutcome(item.Candidate.RelativePath, "preparation_failed", reason: item.FailureReason)));
         return Success(request, new
         {
             status = "scanned",
@@ -278,7 +292,7 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
                 new PaperBatch.Core.Layout.LayoutOptions(), candidate.IdempotencyKey,
                 new PaperBatch.Core.Persistence.RetentionMetadata(now.AddDays(30), RetainWhileUnresolved: true), now,
                 cancellationToken).ConfigureAwait(false);
-            if (!prepared.Succeeded) throw new InvalidOperationException(string.Join(" ", prepared.Diagnostics));
+            EnsureWatchPreparationSucceeded(prepared, cancellationToken);
             outcomes.Add(new WatchOutcome(candidate.RelativePath, "prepared_for_review", prepared.Run!.RunId));
         }
     }
