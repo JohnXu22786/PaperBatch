@@ -37,6 +37,7 @@ var tests = new (string Name, Action Run)[]
     ("file picker reports all skipped and mixed local selections", FilePickerClassifiesSkippedSelections),
     ("headless shell identifies demo data and has no print action", HeadlessShellIsExplicitlyDemoOnly),
     ("production presentation exposes unavailable production capabilities without demo rows", ProductionPresentationIsExplicitlyUnavailable),
+    ("submitted job status and cancellation survive preparation setting changes", SubmittedJobsRemainVisibleAfterPreparationSettingsChange),
     ("production preview raster comes from the persisted prepared artifact", ProductionPreviewReadsPreparedArtifact),
     ("source changes after queue preflight stop before final rendering or persistence", ChangedSourceAfterPreflightCreatesNoPreparedArtifact),
     ("stale preparation cannot repopulate an invalidated queue row", StalePreparationCannotRepopulateInvalidatedQueueRow),
@@ -603,6 +604,57 @@ static void ProductionPresentationIsExplicitlyUnavailable()
     finally
     {
         window.Close();
+    }
+}
+
+static void SubmittedJobsRemainVisibleAfterPreparationSettingsChange()
+{
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-submitted-jobs-settings-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var sourcePath = Path.Combine(root, "source.pdf");
+        File.WriteAllBytes(sourcePath, TestOnePagePdf());
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
+        var transport = new SubmittedJobCoordinatorTransport(store);
+        var sources = new ProductionPresentationSources(new SourceIntakeService(cache), new RendererCoordinator([]), cache,
+            runStore: store, printAvailable: true, coordinatorTransport: transport);
+        var queueItem = sources.ImportAsync([sourcePath]).GetAwaiter().GetResult().Single();
+        var now = DateTimeOffset.UtcNow;
+        var item = new PreparedItem("item", new SourceSnapshot("snapshot", new string('a', 64), 1, now),
+            new RendererResult("renderer", "1", "source-artifact", new string('b', 64), 1, 1,
+                new RendererCapabilities(1, ["application/pdf"])), [new PageMapping(1, 1)],
+            new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit));
+        var run = PreparedRun.Create("run-submitted-settings", now, new string('c', 64), [item],
+            [new CompatibleSegment("segment", 0, [item.ItemId], "compat",
+                new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit))],
+            new FinalPdfArtifact("artifact_" + new string('d', 64), new string('d', 64), 100, 1));
+        sources.RegisterPreparedRun(queueItem.Id, run);
+        var jobId = store.GetJobs(run.RunId).Single().JobId;
+        transport.AcceptSubmittedJob(jobId);
+        var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
+            new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+
+        viewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
+        var submittedJob = viewModel.PrintJobs.Single();
+        Assert.Equal(nameof(JobState.AcceptedByOs), submittedJob.State);
+        Assert.True(submittedJob.CanCancel);
+
+        viewModel.RequestedCopies = 2;
+        viewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
+        submittedJob = viewModel.PrintJobs.Single();
+        Assert.Equal(nameof(JobState.AcceptedByOs), submittedJob.State);
+        Assert.True(submittedJob.CanCancel);
+
+        viewModel.CancelPrintJobAsync(submittedJob.JobId).GetAwaiter().GetResult();
+        Assert.Equal(nameof(JobState.CancelObserved), viewModel.PrintJobs.Single().State);
+        Assert.Equal(1, transport.CancellationCalls);
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
 }
 
@@ -1371,6 +1423,37 @@ sealed class LayoutCaptureComposer : IPageCompositionAdapter
             .Select(placement => (placement.ItemId, placement.TargetBounds)).ToArray();
         throw new LayoutCapturedException();
     }
+}
+
+sealed class SubmittedJobCoordinatorTransport(SqliteRunStore store) : ILocalCoordinatorTransport
+{
+    public int CancellationCalls { get; private set; }
+
+    public void AcceptSubmittedJob(string jobId)
+    {
+        var now = DateTimeOffset.UtcNow;
+        store.BeginSubmission(jobId, "fake-submit-key", now);
+        store.RecordOsReceipt(jobId, "fake-submit-key", new OsJobReceipt("test-queue", "os-job-1", "run-nonce", now), now);
+    }
+
+    public ValueTask<IpcResponseEnvelope> SendAsync(IpcRequestEnvelope request, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var arguments = request.Payload.GetProperty("arguments").EnumerateArray().Select(value => value.GetString()!).ToArray();
+        if (request.Operation == "cli.status") return Response(request, new { status = "Processing" });
+        if (request.Operation == "cli.cancel")
+        {
+            CancellationCalls++;
+            store.TransitionJob(arguments[0], JobState.CancelRequested, "fake coordinator received cancellation", DateTimeOffset.UtcNow);
+            store.TransitionJob(arguments[0], JobState.CancelObserved, "fake coordinator observed cancellation", DateTimeOffset.UtcNow);
+            return Response(request, new { status = nameof(JobState.CancelObserved) });
+        }
+        return ValueTask.FromResult(IpcJson.CreateErrorResponse(request.CorrelationId, "unavailable", "Unsupported fake coordinator operation."));
+    }
+
+    private static ValueTask<IpcResponseEnvelope> Response(IpcRequestEnvelope request, object payload) =>
+        ValueTask.FromResult(new IpcResponseEnvelope(IpcJson.CurrentProtocolVersion, request.CorrelationId,
+            JsonSerializer.SerializeToElement(payload), null));
 }
 
 sealed class PreparedArtifactTestTransport(PreparedArtifactCoordinator preparation) : ILocalCoordinatorTransport

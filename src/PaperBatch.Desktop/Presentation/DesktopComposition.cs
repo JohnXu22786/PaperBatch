@@ -125,6 +125,7 @@ internal sealed class ProductionPresentationSources :
     private readonly ILocalCoordinatorTransport _coordinatorTransport;
     private readonly object _queueStateSync = new();
     private readonly Dictionary<string, PreparedRun> _preparedRunsByQueueItem = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, HashSet<string>> _submittedRunIdsByQueueItem = new(StringComparer.Ordinal);
     private readonly List<QueueItemSnapshot> _queue = [];
     private long _queueRevision;
     private readonly Dictionary<string, string> _queueLocations = new(StringComparer.Ordinal);
@@ -191,15 +192,43 @@ internal sealed class ProductionPresentationSources :
 
     public async Task<IReadOnlyList<PrintJobSnapshot>> RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken = default)
     {
-        if (_runStore is null || !_preparedRunsByQueueItem.TryGetValue(queueItemId, out var run)) return [];
-        foreach (var job in _runStore.GetJobs(run.RunId).Where(job => job.OsReceipt is not null))
+        if (_runStore is null) return [];
+        var runs = new Dictionary<string, PreparedRun>(StringComparer.Ordinal);
+        if (_preparedRunsByQueueItem.TryGetValue(queueItemId, out var preparedRun))
+            runs[preparedRun.RunId] = preparedRun;
+        string[] submittedRunIds;
+        lock (_queueStateSync)
+            submittedRunIds = _submittedRunIdsByQueueItem.TryGetValue(queueItemId, out var runIds)
+                ? runIds.ToArray() : [];
+        foreach (var runId in submittedRunIds)
+        {
+            var submittedRun = _runStore.GetPreparedRun(runId);
+            if (submittedRun is not null) runs[runId] = submittedRun;
+        }
+        if (runs.Count == 0) return [];
+
+        var storedJobsByRun = runs.Values.ToDictionary(run => run.RunId, run => _runStore.GetJobs(run.RunId), StringComparer.Ordinal);
+        var submittedRunIdsToRemember = storedJobsByRun
+            .Where(entry => entry.Value.Any(job => job.OsReceipt is not null))
+            .Select(entry => entry.Key).ToArray();
+        if (submittedRunIdsToRemember.Length > 0)
+        {
+            lock (_queueStateSync)
+            {
+                if (!_submittedRunIdsByQueueItem.TryGetValue(queueItemId, out var runIds))
+                    _submittedRunIdsByQueueItem[queueItemId] = runIds = new HashSet<string>(StringComparer.Ordinal);
+                runIds.UnionWith(submittedRunIdsToRemember);
+            }
+        }
+
+        foreach (var job in storedJobsByRun.Values.SelectMany(jobs => jobs).Where(job => job.OsReceipt is not null))
         {
             var response = await SendCoordinatorRequestAsync("cli.status", null,
                 new { arguments = new[] { job.JobId } }, cancellationToken).ConfigureAwait(false);
             if (response.Error is { } error)
                 throw new InvalidOperationException($"Coordinator could not refresh print status ({error.Code}): {error.Message}");
         }
-        return _runStore.GetJobs(run.RunId).Select(job => new PrintJobSnapshot(job.JobId, job.SegmentIndex,
+        return storedJobsByRun.Keys.SelectMany(runId => _runStore.GetJobs(runId)).DistinctBy(job => job.JobId).Select(job => new PrintJobSnapshot(job.JobId, job.SegmentIndex,
             job.State.ToString(), job.State is JobState.NeedsReviewUnknown
                 ? "Submission outcome unknown; automatic retry is blocked."
                 : job.State is JobState.AcceptedByOs or JobState.OsProcessing or JobState.OsReportsComplete
@@ -354,6 +383,7 @@ internal sealed class ProductionPresentationSources :
         lock (_queueStateSync)
         {
             _queue.RemoveAll(item => string.Equals(item.Id, queueItemId, StringComparison.Ordinal));
+            _submittedRunIdsByQueueItem.Remove(queueItemId);
             _queueLocations.Remove(queueItemId);
             _queueSourceHashes.Remove(queueItemId);
             _preparableQueueItems.Remove(queueItemId);
