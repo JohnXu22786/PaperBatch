@@ -149,10 +149,20 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
 
     private PrinterCapabilitySnapshot GetCapabilitiesBeforeStartDoc(string queueIdentity, CancellationToken cancellationToken)
     {
-        try { return GetCapabilitiesAsync(queueIdentity, cancellationToken).GetAwaiter().GetResult(); }
+        return GetCapabilitySnapshotBeforeStartDoc(() => GetCapabilitiesAsync(queueIdentity, cancellationToken).GetAwaiter().GetResult());
+    }
+
+    internal static T GetCapabilitySnapshotBeforeStartDoc<T>(Func<T> capabilityLookup)
+    {
+        ArgumentNullException.ThrowIfNull(capabilityLookup);
+        try { return capabilityLookup(); }
         catch (OperationCanceledException error)
         {
             throw new PrintSubmissionException("GDI submission was canceled before StartDoc.", mayHaveReachedOs: false, error);
+        }
+        catch (Exception error)
+        {
+            throw new PrintSubmissionException("Queue capability lookup failed before GDI StartDoc.", mayHaveReachedOs: false, error);
         }
     }
 
