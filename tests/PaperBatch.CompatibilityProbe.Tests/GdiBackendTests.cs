@@ -3,6 +3,7 @@ using PaperBatch.Core.Layout;
 using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Printing;
 using PaperBatch.Core.Rendering;
+using System.Text;
 
 internal static class GdiBackendTests
 {
@@ -53,6 +54,40 @@ internal static class GdiBackendTests
         Assert.True(rasterizer.RequestedPageNumbers!.SequenceEqual([1, 3]));
         Assert.Equal(2, native.LastDocument!.CompletedPages);
         Assert.Equal(1, native.StartDocCount);
+    }
+
+    internal static void RejectsMixedOrientationAutoSubmissionBeforeStartDoc()
+    {
+        var pdf = TwoPageMixedOrientationPdf();
+        var pdfText = Encoding.ASCII.GetString(pdf);
+        Assert.Contains("/MediaBox [0 0 612 792]", pdfText);
+        Assert.Contains("/MediaBox [0 0 792 612]", pdfText);
+        var artifact = new FinalPdfArtifact("artifact-mixed", Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(pdf)), pdf.Length, 2);
+        var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.LongEdge, "Letter", Orientation.Auto,
+            ScalingMode.ActualSize, "queue-identity", "Tray1");
+        var segment = new CompatibleSegment("segment", 0, ["item"], "compat", settings, [1, 2]);
+        var options = WindowsPrintJobOptions.Map("queue-identity", Capabilities(), settings);
+        var submission = new WindowsPrintSubmission(options, segment, "run-nonce", At, artifact,
+            new MemoryStream(pdf), [1, 2]);
+        var native = new FakeNative(Capabilities());
+        var rasterizer = new FakeRasterizer
+        {
+            PageSizes = [new PageSize(612, 792), new PageSize(792, 612)]
+        };
+        var backend = new WindowsGdiPrintBackend(native, rasterizer);
+
+        PrintSubmissionException? failure = null;
+        try { _ = backend.SubmitAsync(submission).GetAwaiter().GetResult(); }
+        catch (PrintSubmissionException error) { failure = error; }
+
+        Assert.True(failure is not null, "Auto orientation must not submit mixed portrait and landscape pages in one GDI document.");
+        Assert.False(failure!.MayHaveReachedOs);
+        Assert.Contains("mixed page orientations", failure.Message);
+        Assert.Equal(0, native.StartDocCount);
+        Assert.True(rasterizer.ReceivedBytes.SequenceEqual(pdf));
+        Assert.True(rasterizer.RequestedPageNumbers!.SequenceEqual([1, 2]));
+        Assert.True(rasterizer.PageSizes!.Select(size => size.WidthPoints > size.HeightPoints).SequenceEqual([false, true]));
     }
 
     internal static void NativeAdapterValidatesSelectedPageIdentityForNonPrefixPages()
@@ -313,6 +348,31 @@ internal static class GdiBackendTests
     private static FinalPdfArtifact Artifact(byte[] pdf) => new("artifact-1",
         Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(pdf)), pdf.Length, 1);
 
+    private static byte[] TwoPageMixedOrientationPdf()
+    {
+        var objects = new[]
+        {
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /ProcSet [/PDF] >> /Contents 4 0 R >>",
+            "<< /Length 0 >>\nstream\n\nendstream",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 792 612] /Resources << /ProcSet [/PDF] >> /Contents 6 0 R >>",
+            "<< /Length 0 >>\nstream\n\nendstream"
+        };
+        var builder = new StringBuilder("%PDF-1.7\n%PaperBatch synthetic mixed-orientation fixture\n");
+        var offsets = new List<int> { 0 };
+        for (var index = 0; index < objects.Length; index++)
+        {
+            offsets.Add(Encoding.ASCII.GetByteCount(builder.ToString()));
+            builder.Append(index + 1).Append(" 0 obj\n").Append(objects[index]).Append("\nendobj\n");
+        }
+        var xref = Encoding.ASCII.GetByteCount(builder.ToString());
+        builder.Append("xref\n0 7\n0000000000 65535 f \n");
+        foreach (var offset in offsets.Skip(1)) builder.Append(offset.ToString("D10", System.Globalization.CultureInfo.InvariantCulture)).Append(" 00000 n \n");
+        builder.Append("trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n").Append(xref).Append("\n%%EOF\n");
+        return Encoding.ASCII.GetBytes(builder.ToString());
+    }
+
     private static PrinterCapabilitySnapshot Capabilities() => new("queue-identity", "Queue", "driver-v1", "port-v1", "fingerprint-v1",
         new Dictionary<PrintOption, PrintOptionCapability>
         {
@@ -326,6 +386,7 @@ internal static class GdiBackendTests
     private sealed class FakeRasterizer : IWindowsPrintPdfRasterizer
     {
         public bool CancelDuringRasterization { get; init; }
+        public IReadOnlyList<PageSize>? PageSizes { get; init; }
         public byte[] ReceivedBytes { get; private set; } = [];
         public IReadOnlyList<int>? RequestedPageNumbers { get; private set; }
         public async Task<IReadOnlyList<WindowsPrintRasterPage>> RasterizeAsync(Stream pdf, int expectedPageCount, CancellationToken cancellationToken = default)
@@ -339,8 +400,15 @@ internal static class GdiBackendTests
             ReceivedBytes = content.ToArray();
             RequestedPageNumbers = pageNumbers.ToArray();
             if (CancelDuringRasterization) throw new OperationCanceledException(cancellationToken);
-            return pageNumbers.Select(page => new WindowsPrintRasterPage(page, new PageSize(612, 792),
-                new PdfRasterPage(17, 22, 68, new byte[1496]))).ToArray();
+            return pageNumbers.Select(page =>
+            {
+                var pageSize = PageSizes?[page - 1] ?? new PageSize(612, 792);
+                var landscape = pageSize.WidthPoints > pageSize.HeightPoints;
+                var width = landscape ? 22 : 17;
+                var height = landscape ? 17 : 22;
+                return new WindowsPrintRasterPage(page, pageSize,
+                    new PdfRasterPage(width, height, width * 4, new byte[width * height * 4]));
+            }).ToArray();
         }
     }
 
