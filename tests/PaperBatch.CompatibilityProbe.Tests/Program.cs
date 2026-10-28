@@ -237,6 +237,7 @@ var tests = new List<(string Name, Action Run)>
     ("initial EnumPrinters failures are not reported as an empty queue list", PrintingTests.InitialEnumPrintersFailureIsNotTreatedAsEmpty),
     ("production GDI adapter capability P/Invoke is read-only", PrintingTests.NativeGdiCapabilityBoundaryIsReadOnly),
     ("GDI backend verifies immutable artifact bytes and returns the StartDoc job receipt", GdiBackendTests.VerifiesArtifactAndReturnsReceipt),
+    ("GDI cleanup failure after EndDoc preserves the receipt for status and cancel", GdiBackendTests.CleanupFailureAfterEndDocPreservesReceiptForStatusAndCancel),
     ("GDI backend rasterizes and submits only selected final PDF pages", GdiBackendTests.RasterizesAndSubmitsOnlySelectedFinalPages),
     ("GDI backend rejects mixed-orientation Auto pages before StartDoc", GdiBackendTests.RejectsMixedOrientationAutoSubmissionBeforeStartDoc),
     ("native GDI adapter validates selected page identity for non-prefix pages", GdiBackendTests.NativeAdapterValidatesSelectedPageIdentityForNonPrefixPages),
