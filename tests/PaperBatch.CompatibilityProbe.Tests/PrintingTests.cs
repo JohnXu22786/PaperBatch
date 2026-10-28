@@ -1,4 +1,5 @@
 using PaperBatch.Core.Domain;
+using PaperBatch.Core.Ipc;
 using PaperBatch.Core.Intake;
 using PaperBatch.Core.Layout;
 using PaperBatch.Core.Persistence;
@@ -311,6 +312,62 @@ internal static class PrintingTests
         Assert.Equal(1, backend.OsSubmissionCount);
         Assert.Equal(2, backend.SubmissionCount);
         Assert.Equal(JobState.AcceptedByOs, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+    }
+
+    internal static void RemovedQueueDuringCapabilityLookupIsRejectedBeforeSubmission()
+    {
+        foreach (var missingQueueRead in new[] { 1, 2 })
+        {
+            using var fixture = new Fixture();
+            var backend = new TestOnlySimulatedPrintBackend(Capabilities())
+            {
+                MissingQueueOnCapabilityRead = missingQueueRead
+            };
+            var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "unused", fixture.Artifacts);
+
+            var result = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun,
+                $"removed-queue-read-{missingQueueRead}", FixedTime).GetAwaiter().GetResult();
+
+            Assert.Equal(PrintSubmissionStatus.Rejected, result.Status);
+            Assert.Contains("no longer present", result.Reason!);
+            Assert.Equal(0, backend.SubmissionCount);
+            Assert.Equal(0, backend.OsSubmissionCount);
+            Assert.Equal(JobState.Ready, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+            Assert.Equal(1, fixture.Store.GetTransitions(fixture.Job.JobId).Length);
+        }
+    }
+
+    internal static void RemovedQueueDuringSubmitReturnsStructuredIpcRejection()
+    {
+        using var fixture = new Fixture();
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities()) { MissingQueueOnCapabilityRead = 1 };
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "unused", fixture.Artifacts);
+        var handler = new ProductionCoordinatorRequestHandler(fixture.Store, coordinator);
+        var pipeName = "paperbatch-test-" + Guid.NewGuid().ToString("N");
+        var server = new NamedPipeCoordinatorServer(pipeName, handler.HandleAsync);
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+        try
+        {
+            var transport = new NamedPipeLocalCoordinatorTransport(pipeName);
+            using var payload = JsonDocument.Parse(JsonSerializer.Serialize(new { arguments = new[] { fixture.Job.JobId } }));
+            var request = new IpcRequestEnvelope(IpcJson.CurrentProtocolVersion, Guid.NewGuid(),
+                "cli.submit", "removed-queue-ipc", payload.RootElement.Clone());
+            var response = transport.SendAsync(request).AsTask().GetAwaiter().GetResult();
+
+            Assert.True(response.Error is null, "A removed queue should return the normal structured submit response.");
+            Assert.Equal("Rejected", response.Payload!.Value.GetProperty("status").GetString());
+            Assert.Equal(JobState.Ready, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+            Assert.Equal(1, fixture.Store.GetTransitions(fixture.Job.JobId).Length);
+            Assert.Equal(0, backend.OsSubmissionCount);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            try { serverTask.GetAwaiter().GetResult(); }
+            catch (OperationCanceledException) { }
+            server.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
     }
 
     internal static void AcceptedCancellationIsObservedOnlyAfterCancelledStatus()
@@ -1149,6 +1206,7 @@ internal static class PrintingTests
         public bool ThrowBeforeSubmit { get; init; }
         public bool ThrowCancellationBeforeSubmit { get; set; }
         public bool ThrowCapabilityLookupBeforeSubmit { get; set; }
+        public int? MissingQueueOnCapabilityRead { get; init; }
         public int ThrowCancellationOnSubmissionNumber { get; init; }
         public bool ThrowCapabilityAfterSubmit { get; init; }
         public bool CancelReturnsFalse { get; set; }
@@ -1170,8 +1228,13 @@ internal static class PrintingTests
         public System.Collections.Concurrent.ConcurrentBag<OsJobReceipt> Receipts { get; } = [];
         public List<int[]> SubmittedPageNumbers { get; } = [];
 
-        public Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(string queueIdentity, CancellationToken cancellationToken = default) =>
-            Task.FromResult(++_capabilityReads >= 2 ? CapabilitiesOnSecondRead ?? capabilities : capabilities);
+        public Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(string queueIdentity, CancellationToken cancellationToken = default)
+        {
+            var capabilityRead = Interlocked.Increment(ref _capabilityReads);
+            if (capabilityRead == MissingQueueOnCapabilityRead)
+                return Task.FromException<PrinterCapabilitySnapshot>(new KeyNotFoundException("The selected local printer queue is no longer present."));
+            return Task.FromResult(capabilityRead >= 2 ? CapabilitiesOnSecondRead ?? capabilities : capabilities);
+        }
 
         public async Task<OsJobReceipt> SubmitAsync(WindowsPrintSubmission submission, CancellationToken cancellationToken = default)
         {

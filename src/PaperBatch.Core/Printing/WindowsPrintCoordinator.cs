@@ -111,6 +111,10 @@ public sealed class WindowsPrintCoordinator(
         {
             return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job, exception.Message);
         }
+        catch (KeyNotFoundException exception)
+        {
+            return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job, exception.Message);
+        }
 
         PrinterCapabilitySnapshot current;
         WindowsPrintJobOptions options;
@@ -123,6 +127,10 @@ public sealed class WindowsPrintCoordinator(
             options = WindowsPrintJobOptions.Map(queueIdentity, current, segment.PrintSettings);
         }
         catch (PrintCapabilityException exception)
+        {
+            return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job, exception.Message);
+        }
+        catch (KeyNotFoundException exception)
         {
             return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job, exception.Message);
         }
