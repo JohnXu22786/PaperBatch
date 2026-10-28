@@ -120,6 +120,23 @@ internal static class GdiBackendTests
         Assert.Equal(0, native.StartDocCount);
     }
 
+    internal static void CapabilityLookupFailureInsideAdapterIsKnownNoEffect()
+    {
+        var pdf = RendererTests.OnePagePdf();
+        var native = new FakeNative(Capabilities()) { FailCapabilityLookupInStartDoc = true };
+        var backend = new WindowsGdiPrintBackend(native, new FakeRasterizer());
+
+        PrintSubmissionException? failure = null;
+        try { _ = backend.SubmitAsync(Submission(pdf, Artifact(pdf))).GetAwaiter().GetResult(); }
+        catch (PrintSubmissionException error) { failure = error; }
+
+        Assert.True(failure is not null);
+        Assert.False(failure!.MayHaveReachedOs);
+        Assert.True(failure.InnerException is IOException);
+        Assert.Equal(1, native.StartDocCount);
+        Assert.Equal(0, native.GdiStartDocCount);
+    }
+
     internal static void RasterizationCancellationIsKnownNoEffect()
     {
         var pdf = RendererTests.OnePagePdf();
@@ -333,7 +350,9 @@ internal static class GdiBackendTests
         public PrinterCapabilitySnapshot? SecondCapabilities { get; init; }
         public bool FailWritingPage { get; init; }
         public bool CancelWritingPage { get; init; }
+        public bool FailCapabilityLookupInStartDoc { get; init; }
         public int StartDocCount { get; private set; }
+        public int GdiStartDocCount { get; private set; }
         public int EndDocCount { get; private set; }
         public FakeDocument? LastDocument { get; private set; }
         public OsJobReceipt? LastReceipt { get; private set; }
@@ -342,6 +361,10 @@ internal static class GdiBackendTests
         public Task<IWindowsGdiDocument> StartDocAsync(WindowsPrintSubmission submission, IReadOnlyList<WindowsPrintRasterPage> pages, CancellationToken cancellationToken = default)
         {
             StartDocCount++;
+            if (FailCapabilityLookupInStartDoc)
+                _ = WindowsGdiNativeAdapter.GetCapabilitySnapshotBeforeStartDoc<PrinterCapabilitySnapshot>(
+                    () => throw new IOException("queue disappeared during capability enumeration"));
+            GdiStartDocCount++;
             LastDocument = new FakeDocument(this, FailWritingPage, CancelWritingPage);
             return Task.FromResult<IWindowsGdiDocument>(LastDocument);
         }
