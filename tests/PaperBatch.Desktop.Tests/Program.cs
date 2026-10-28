@@ -24,6 +24,7 @@ var tests = new (string Name, Action Run)[]
     ("printer inspection is explicit, read-only, and keeps demo mode disabled", PrinterInspectionIsReadOnly),
     ("print status and cancellation failures remain visible and block unsafe submission", PrintStatusFailuresAreVisibleAndBlockSubmission),
     ("known no-effect print failures can be retried from the desktop", KnownNoEffectPrintFailuresCanBeRetried),
+    ("a newly prepared run can be submitted while canceled historical jobs remain visible", RepreparedRunCanSubmitAlongsideCancelledHistory),
     ("preparation refreshes newly persisted ready print jobs", PreparationRefreshesReadyPrintJobs),
     ("preparation refreshes the currently selected row", PreparationRefreshesCurrentlySelectedRow),
     ("queue ordering and removal are actionable and clear prepared previews", QueueEditsPreserveSelectionAndInvalidateRemovedPreview),
@@ -333,6 +334,43 @@ static void KnownNoEffectPrintFailuresCanBeRetried()
     uncertainViewModel.RefreshPreviewAsync().GetAwaiter().GetResult();
     uncertainViewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
     Assert.True(!uncertainViewModel.CanSubmitPreparedRun);
+}
+
+static void RepreparedRunCanSubmitAlongsideCancelledHistory()
+{
+    var source = new FakeRetryablePrintSource(
+        [new QueueItemSnapshot("queue-item", "Prepared.pdf", "4 pages", "Ready")],
+        [new PrintJobSnapshot("cancelled-old-job", 0, nameof(JobState.CancelObserved), "OS cancellation observed", false,
+            IsHistorical: true),
+         new PrintJobSnapshot("new-ready-job", 0, nameof(JobState.Ready), "Prepared and ready", false)]);
+    var viewModel = new DesktopShellViewModel(source, new FakeSettingsSource(), new FakePrintablePreviewSource(),
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    SelectSupportedPrinter(viewModel);
+    viewModel.RefreshPreviewAsync().GetAwaiter().GetResult();
+    viewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
+
+    Assert.True(viewModel.PrintJobs.Any(job => job.JobId == "cancelled-old-job" && job.IsHistorical && job.State == nameof(JobState.CancelObserved)));
+    Assert.True(viewModel.PrintJobs.Any(job => job.JobId == "new-ready-job" && !job.IsHistorical && job.State == nameof(JobState.Ready)));
+    Assert.True(viewModel.CanSubmitPreparedRun);
+
+    viewModel.SubmitPreparedRunAsync().GetAwaiter().GetResult();
+
+    Assert.Equal(1, source.SubmissionCalls);
+    Assert.True(viewModel.PrintJobs.Any(job => job.JobId == "cancelled-old-job" && job.State == nameof(JobState.CancelObserved)));
+    Assert.True(viewModel.PrintJobs.Any(job => job.JobId == "new-ready-job" && job.State == nameof(JobState.AcceptedByOs)));
+
+    var currentRunCancellation = new FakeRetryablePrintSource(
+        [new QueueItemSnapshot("queue-item", "Prepared.pdf", "4 pages", "Ready")],
+        [new PrintJobSnapshot("current-cancelled-job", 0, nameof(JobState.CancelObserved), "OS cancellation observed", false),
+         new PrintJobSnapshot("current-ready-job", 1, nameof(JobState.Ready), "Prepared and ready", false)]);
+    var blockedViewModel = new DesktopShellViewModel(currentRunCancellation, new FakeSettingsSource(), new FakePrintablePreviewSource(),
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    SelectSupportedPrinter(blockedViewModel);
+    blockedViewModel.RefreshPreviewAsync().GetAwaiter().GetResult();
+    blockedViewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
+    Assert.True(!blockedViewModel.CanSubmitPreparedRun);
 }
 
 static void SourceIntakeErrorsRemainVisibleAndAppend()
@@ -652,6 +690,18 @@ static void SubmittedJobsRemainVisibleAfterPreparationSettingsChange()
         viewModel.CancelPrintJobAsync(submittedJob.JobId).GetAwaiter().GetResult();
         Assert.Equal(nameof(JobState.CancelObserved), viewModel.PrintJobs.Single().State);
         Assert.Equal(1, transport.CancellationCalls);
+
+        var changedSettings = new PrintSettings(2, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit);
+        var repreparedItem = item with { PrintSettings = changedSettings };
+        var repreparedRun = PreparedRun.Create("run-reprepared-settings", now.AddMinutes(1), new string('e', 64), [repreparedItem],
+            [new CompatibleSegment("segment-reprepared", 0, [repreparedItem.ItemId], "compat-reprepared", changedSettings)],
+            new FinalPdfArtifact("artifact_" + new string('f', 64), new string('f', 64), 100, 1));
+        sources.RegisterPreparedRun(queueItem.Id, repreparedRun);
+        viewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
+
+        Assert.Equal(2, viewModel.PrintJobs.Count);
+        Assert.True(viewModel.PrintJobs.Any(job => job.State == nameof(JobState.CancelObserved) && job.IsHistorical));
+        Assert.True(viewModel.PrintJobs.Any(job => job.State == nameof(JobState.Ready) && !job.IsHistorical));
     }
     finally
     {
@@ -1292,7 +1342,7 @@ sealed class FakeRetryablePrintSource(IReadOnlyList<QueueItemSnapshot> items, IR
     {
         SubmissionCalls++;
         return Task.FromResult<IReadOnlyList<PrintJobSnapshot>>(
-            initialJobs.Select(job => job with { State = "AcceptedByOs", Detail = "Accepted" }).ToArray());
+            initialJobs.Select(job => job.IsHistorical ? job : job with { State = "AcceptedByOs", Detail = "Accepted" }).ToArray());
     }
     public Task<IReadOnlyList<PrintJobSnapshot>> RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken = default) =>
         Task.FromResult(initialJobs);
