@@ -226,6 +226,7 @@ var tests = new List<(string Name, Action Run)>
     ("unknown print status after a cancel request does not confirm cancellation", PrintingTests.UnknownStatusDoesNotConfirmCancellationAfterRequest),
     ("concurrent print jobs keep separate submission nonces", PrintingTests.ConcurrentJobsKeepDistinctReceipts),
     ("print cancellation race preserves the winning OS status", PrintingTests.CancellationRacePreservesOsStatus),
+    ("delayed processing status does not overwrite cancellation", PrintingTests.DelayedProcessingStatusDoesNotOverwriteCancellation),
     ("print cancellation retries the exact receipt after restart", PrintingTests.CancellationRetryAfterRestartUsesReceipt),
     ("reported completion is not paper output confirmation", PrintingTests.OsCompletionDoesNotConfirmPaperOutput),
     ("partial-failure report describes the page-selection evidence it checks", PrintingTests.PartialFailureReportAccuratelyDescribesPageSelection),

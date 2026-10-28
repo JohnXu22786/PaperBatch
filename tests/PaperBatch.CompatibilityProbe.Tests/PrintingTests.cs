@@ -1021,6 +1021,38 @@ internal static class PrintingTests
         Assert.Equal(JobState.OsReportsComplete, fixture.Store.GetJob(fixture.Job.JobId)!.State);
     }
 
+    internal static void DelayedProcessingStatusDoesNotOverwriteCancellation()
+    {
+        using var fixture = new Fixture();
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1", fixture.Artifacts);
+        coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "submit-key", FixedTime).GetAwaiter().GetResult();
+
+        var pendingStatus = new TaskCompletionSource<PrintBackendJobStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.PendingStatusResponse = pendingStatus.Task;
+        var refreshTask = coordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(1));
+        backend.StatusRequested.Task.GetAwaiter().GetResult();
+
+        var cancelled = coordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
+        Assert.Equal(JobState.CancelRequested, cancelled.State);
+        Assert.Equal(JobState.CancelRequested, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+        var staleUpdate = fixture.Store.TransitionJob(fixture.Job.JobId, JobState.OsProcessing,
+            "A delayed Processing response was based on the earlier accepted state.", FixedTime.AddMinutes(2), JobState.AcceptedByOs);
+        Assert.Equal(JobState.CancelRequested, staleUpdate.State);
+
+        pendingStatus.SetResult(PrintBackendJobStatus.Processing);
+        var afterDelayedProcessing = refreshTask.GetAwaiter().GetResult();
+        Assert.Equal(JobState.CancelRequested, afterDelayedProcessing.State);
+        Assert.Equal(JobState.CancelRequested, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+
+        backend.PendingStatusResponse = null;
+        backend.LastStatus = PrintBackendJobStatus.Cancelled;
+        var afterCancellationObserved = coordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(3))
+            .GetAwaiter().GetResult();
+        Assert.Equal(JobState.CancelObserved, afterCancellationObserved.State);
+        Assert.Equal(JobState.CancelObserved, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+    }
+
     internal static void CancellationRetryAfterRestartUsesReceipt()
     {
         using var fixture = new Fixture();
@@ -1096,6 +1128,8 @@ internal static class PrintingTests
         public byte[]? LastPdfBytes { get; private set; }
         public PrintBackendJobStatus LastStatus { get; set; } = PrintBackendJobStatus.Accepted;
         public Action? OnCancel { get; set; }
+        public Task<PrintBackendJobStatus>? PendingStatusResponse { get; set; }
+        public TaskCompletionSource StatusRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public System.Collections.Concurrent.ConcurrentBag<OsJobReceipt> Receipts { get; } = [];
         public List<int[]> SubmittedPageNumbers { get; } = [];
 
@@ -1131,6 +1165,11 @@ internal static class PrintingTests
             LastQueueIdentity = receipt.QueueIdentity;
             LastJobId = receipt.OsJobId;
             LastRunNonce = receipt.RunNonce;
+            if (PendingStatusResponse is { } pendingStatus)
+            {
+                StatusRequested.TrySetResult();
+                return pendingStatus;
+            }
             return Task.FromResult(LastStatus);
         }
 
