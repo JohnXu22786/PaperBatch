@@ -172,6 +172,7 @@ var tests = new List<(string Name, Action Run)>
     ("preparation validates idempotency keys before reading inputs", PreparedArtifactCoordinatorTests.PreparationRejectsInvalidIdempotencyKeysBeforeReadingInputs),
     ("valid preparation idempotency keys replay the persisted run", PreparedArtifactCoordinatorTests.ValidPreparationIdempotencyKeyReplaysThePersistedRun),
     ("directory preparation idempotency tracks every expanded source", PreparedArtifactCoordinatorTests.DirectoryPreparationIdempotencyTracksEveryExpandedSource),
+    ("expected SHA for an explicit file survives directory expansion", PreparedArtifactCoordinatorTests.ExpectedShaForExplicitFileSurvivesDirectoryExpansion),
     ("mismatched expected source hash rejects an existing idempotent run replay", PreparedArtifactCoordinatorTests.MismatchedExpectedShaRejectsExistingIdempotentRunReplay),
     ("prepared-run invariants reject invalid hashes and copy collections", CoreTests.PreparedRunInvariantsRejectInvalidHashesAndCopyCollections),
     ("prepared-run v2 persists final artifact and reads legacy v1", CoreTests.PreparedRunV2PersistsFinalArtifactAndReadsLegacyV1),
