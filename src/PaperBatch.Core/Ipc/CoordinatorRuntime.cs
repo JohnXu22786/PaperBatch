@@ -230,10 +230,18 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
         var outcomes = new List<WatchOutcome>();
         var processor = new PaperBatch.Core.Watch.WatchFolderProcessor(scanner,
             new WatchPreparationAdapter(this, outcomes));
+        var watchStartedAt = Stopwatch.GetTimestamp();
         var observedAt = DateTimeOffset.UtcNow;
         _ = await processor.ReconcileAsync(observedAt, cancellationToken).ConfigureAwait(false);
         await Task.Delay(WatchStabilityWindow, cancellationToken).ConfigureAwait(false);
         var results = await processor.ReconcileAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        var maximumWait = WatchStabilityWindow + TimeSpan.FromMilliseconds(500);
+        var retryInterval = TimeSpan.FromMilliseconds(25);
+        while (results.Count == 0 && Stopwatch.GetElapsedTime(watchStartedAt) < maximumWait)
+        {
+            await Task.Delay(retryInterval, cancellationToken).ConfigureAwait(false);
+            results = await processor.ReconcileAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
         return Success(request, new
         {
             status = "scanned",
