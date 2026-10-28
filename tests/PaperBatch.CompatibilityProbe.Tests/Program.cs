@@ -260,6 +260,7 @@ var tests = new List<(string Name, Action Run)>
     ("recipe setting rules use first match then per-file override", CoreTests.RecipeRulesUseFirstMatchThenPerFileOverrideAndRoundTrip),
     ("auto-starting transport launches and observes host exit", CoreTests.AutoStartingTransportLaunchesAndExitsCoordinatorProcess),
     ("coordinator host serves production capabilities and exits cleanly", CoreTests.CoordinatorHostServesProductionStatusAndUnavailableOperations),
+    ("watch preparation cancellation is not reported as a file failure", CoreTests.WatchPreparationCancellationIsNotReportedAsFileFailure),
     ("coordinator capabilities require a validated PDFium runtime", CoreTests.CoordinatorCapabilitiesRequireValidatedPdfiumRuntime),
     ("coordinator instance lease prevents duplicate owners", CoreTests.CoordinatorInstanceLeaseAllowsOnlyOneOwner),
     ("named pipe transport negotiates capabilities and preserves request identity", CoreTests.NamedPipeTransportNegotiatesAndPreservesRequestIdentity),
