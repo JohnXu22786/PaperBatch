@@ -842,6 +842,7 @@ internal static class CoreTests
         Assert.True(watch.Error is null);
         Assert.Equal(false, watch.Payload!.Value.GetProperty("submissionPerformed").GetBoolean());
         Assert.True(watch.Payload.Value.GetProperty("results").GetArrayLength() > 0);
+        Assert.Equal("office.docx", watch.Payload.Value.GetProperty("results")[0].GetProperty("relativePath").GetString()!);
         Assert.Equal("requires_review", watch.Payload.Value.GetProperty("results")[0].GetProperty("state").GetString()!);
         var cli = new NamedPipeCliCoordinator(transport);
         Assert.Throws<NotSupportedException>(() => cli.ExecuteAsync("status", ["missing-job"], stop.Token).AsTask().GetAwaiter().GetResult());
