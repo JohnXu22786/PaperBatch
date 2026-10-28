@@ -239,12 +239,14 @@ internal sealed class ProductionPresentationSources :
             if (response.Error is { } error)
                 throw new InvalidOperationException($"Coordinator could not refresh print status ({error.Code}): {error.Message}");
         }
-        return storedJobsByRun.Keys.SelectMany(runId => _runStore.GetJobs(runId)).DistinctBy(job => job.JobId).Select(job => new PrintJobSnapshot(job.JobId, job.SegmentIndex,
+        return storedJobsByRun.SelectMany(entry => entry.Value.Select(job => new PrintJobSnapshot(job.JobId, job.SegmentIndex,
             job.State.ToString(), job.State is JobState.NeedsReviewUnknown
                 ? "Submission outcome unknown; automatic retry is blocked."
                 : job.State is JobState.AcceptedByOs or JobState.OsProcessing or JobState.OsReportsComplete
                     ? "Reported by the OS spooler; this does not confirm paper output."
-                    : job.State.ToString(), job.OsReceipt is not null && job.State is JobState.AcceptedByOs or JobState.OsProcessing or JobState.CancelRequested, job.State.ToString())).ToArray();
+                    : job.State.ToString(), job.OsReceipt is not null && job.State is JobState.AcceptedByOs or JobState.OsProcessing or JobState.CancelRequested,
+            job.State.ToString(), IsHistorical: !string.Equals(entry.Key, preparedRun?.RunId, StringComparison.Ordinal))))
+            .DistinctBy(job => job.JobId).ToArray();
     }
 
     public async Task<bool> CancelPrintJobAsync(string jobId, CancellationToken cancellationToken = default)

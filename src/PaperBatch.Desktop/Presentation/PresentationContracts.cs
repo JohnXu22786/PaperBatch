@@ -58,7 +58,7 @@ internal interface IPrintSubmissionPresentationSource
     Task<bool> CancelPrintJobAsync(string jobId, CancellationToken cancellationToken = default);
 }
 
-internal sealed record PrintJobSnapshot(string JobId, int SegmentIndex, string State, string Detail, bool CanCancel, string DisplayState = "");
+internal sealed record PrintJobSnapshot(string JobId, int SegmentIndex, string State, string Detail, bool CanCancel, string DisplayState = "", bool IsHistorical = false);
 
 internal interface IQueuePresentationSource
 {
