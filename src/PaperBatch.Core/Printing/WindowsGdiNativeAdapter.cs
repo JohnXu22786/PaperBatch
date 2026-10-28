@@ -330,7 +330,7 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
     {
         < 0 => new(CapabilityState.Unavailable, [], "The driver did not report duplex capability."),
         0 => new(CapabilityState.Supported, ["Simplex"], null),
-        _ => new(CapabilityState.Supported, ["Simplex", "LongEdge", "ShortEdge"], null)
+        _ => new(CapabilityState.Unknown, [], "Winspool's legacy duplex flag does not identify the supported edge modes.")
     };
 
     private static (uint Status, string? DocumentName)? ReadJob(SafePrinterHandle printer, uint jobId)
