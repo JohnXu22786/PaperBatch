@@ -164,6 +164,7 @@ internal sealed class ProductionPresentationSources :
         if (!CanSubmitPrintJobs || _runStore is null ||
             !_preparedRunsByQueueItem.TryGetValue(queueItemId, out var run) || run.FinalArtifact is null)
             throw new InvalidOperationException("A persisted prepared PDF and configured Windows print backend are required.");
+        RememberSubmittedRun(queueItemId, run.RunId);
         var refreshedJobs = new List<PrintJobSnapshot>();
         foreach (var job in _runStore.GetJobs(run.RunId))
         {
@@ -188,6 +189,16 @@ internal sealed class ProductionPresentationSources :
         }
         var refreshed = await RefreshPrintJobsAsync(queueItemId, cancellationToken).ConfigureAwait(false);
         return refreshedJobs.Count == 0 ? refreshed : refreshed.Select(job => refreshedJobs.FirstOrDefault(rejected => rejected.JobId == job.JobId) ?? job).ToArray();
+    }
+
+    private void RememberSubmittedRun(string queueItemId, string runId)
+    {
+        lock (_queueStateSync)
+        {
+            if (!_submittedRunIdsByQueueItem.TryGetValue(queueItemId, out var runIds))
+                _submittedRunIdsByQueueItem[queueItemId] = runIds = new HashSet<string>(StringComparer.Ordinal);
+            runIds.Add(runId);
+        }
     }
 
     public async Task<IReadOnlyList<PrintJobSnapshot>> RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken = default)
