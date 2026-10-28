@@ -225,6 +225,41 @@ internal static class PrintingTests
             cancellationFixture.Store.GetJob(cancellationFixture.Job.JobId)!.State);
     }
 
+    internal static void ConcurrentDuplicateSubmissionKeepsActiveIntent()
+    {
+        using var fixture = new Fixture();
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var submissionRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.PendingSubmissionRelease = submissionRelease;
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-active", fixture.Artifacts);
+        var firstTask = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "active-submit-key", FixedTime);
+        PrintSubmissionResult? duplicate = null;
+        PrintSubmissionResult? first = null;
+
+        try
+        {
+            Assert.True(backend.SubmissionStarted.Task.Wait(TimeSpan.FromSeconds(5)),
+                "The first backend submission did not reach its deterministic gate.");
+            duplicate = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "active-submit-key", FixedTime)
+                .GetAwaiter().GetResult();
+            Assert.Equal(JobState.Submitting, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+        }
+        finally
+        {
+            submissionRelease.TrySetResult();
+            first = firstTask.GetAwaiter().GetResult();
+        }
+
+        Assert.Equal(PrintSubmissionStatus.Accepted, duplicate!.Status);
+        Assert.Equal(JobState.Submitting, duplicate.Job!.State);
+        Assert.Equal(PrintSubmissionStatus.Accepted, first!.Status);
+        Assert.Equal(JobState.AcceptedByOs, first.Job!.State);
+        Assert.Equal(1, backend.SubmissionCount);
+        Assert.Equal(1, backend.OsSubmissionCount);
+        Assert.Equal(1, backend.Receipts.Count);
+        Assert.Equal(backend.Receipts.Single(), fixture.Store.GetJob(fixture.Job.JobId)!.OsReceipt);
+    }
+
     internal static void StatusAndCancellationAreScopedToOwnedReceipt()
     {
         using var fixture = new Fixture();
@@ -1130,13 +1165,15 @@ internal static class PrintingTests
         public Action? OnCancel { get; set; }
         public Task<PrintBackendJobStatus>? PendingStatusResponse { get; set; }
         public TaskCompletionSource StatusRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource? PendingSubmissionRelease { get; set; }
+        public TaskCompletionSource SubmissionStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public System.Collections.Concurrent.ConcurrentBag<OsJobReceipt> Receipts { get; } = [];
         public List<int[]> SubmittedPageNumbers { get; } = [];
 
         public Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(string queueIdentity, CancellationToken cancellationToken = default) =>
             Task.FromResult(++_capabilityReads >= 2 ? CapabilitiesOnSecondRead ?? capabilities : capabilities);
 
-        public Task<OsJobReceipt> SubmitAsync(WindowsPrintSubmission submission, CancellationToken cancellationToken = default)
+        public async Task<OsJobReceipt> SubmitAsync(WindowsPrintSubmission submission, CancellationToken cancellationToken = default)
         {
             var submissionNumber = Interlocked.Increment(ref _submissionCount);
             SubmittedPageNumbers.Add(submission.FinalPageNumbers.ToArray());
@@ -1156,8 +1193,13 @@ internal static class PrintingTests
             if (ThrowAfterSubmitSideEffect) throw new IOException("receipt channel interrupted after acceptance");
             var receipt = new OsJobReceipt(LastQueueIdentity, "job-1", submission.RunNonce, FixedTime,
                 "Test Driver", "PORT1", submission.Options.CapabilityFingerprint);
+            if (PendingSubmissionRelease is { } pendingSubmissionRelease)
+            {
+                SubmissionStarted.TrySetResult();
+                await pendingSubmissionRelease.Task.ConfigureAwait(false);
+            }
             Receipts.Add(receipt);
-            return Task.FromResult(receipt);
+            return receipt;
         }
 
         public Task<PrintBackendJobStatus> GetStatusAsync(OsJobReceipt receipt, CancellationToken cancellationToken = default)

@@ -223,6 +223,7 @@ var tests = new List<(string Name, Action Run)>
     ("capability changes stop before spool side effects", PrintingTests.CapabilityMutationStopsBeforeSubmission),
     ("mutated prepared run with same id is rejected before backend access", PrintingTests.SameRunIdWithMutatedPreparedRunIsRejectedBeforeCapabilityOrSubmission),
     ("ambiguous print submission remains unknown across restart", PrintingTests.AmbiguousSubmissionIsNotRetriedAfterRestart),
+    ("concurrent duplicate submit preserves active intent until receipt", PrintingTests.ConcurrentDuplicateSubmissionKeepsActiveIntent),
     ("queue capability lookup failure is failed before submit and retryable", PrintingTests.CapabilityLookupFailureIsFailedBeforeSubmitAndRetryable),
     ("print status and cancellation use exact owned job receipt", PrintingTests.StatusAndCancellationAreScopedToOwnedReceipt),
     ("accepted cancellation is observed only after a cancelled status", PrintingTests.AcceptedCancellationIsObservedOnlyAfterCancelledStatus),
