@@ -14,6 +14,8 @@ public sealed class WindowsPrintCoordinator(
 {
     private const int MaximumRasterizedPageCount = 500;
     private readonly Func<string> _nonceFactory = nonceFactory ?? (() => Guid.NewGuid().ToString("N"));
+    private readonly object _submissionSync = new();
+    private readonly Dictionary<string, (string IdempotencyKey, object Owner)> _activeSubmissionKeys = new(StringComparer.Ordinal);
 
     /// <summary>Submits ready segments in order and stops at the first non-accepted result.</summary>
     public async Task<IReadOnlyList<PrintSubmissionResult>> SubmitRunAsync(
@@ -70,21 +72,8 @@ public sealed class WindowsPrintCoordinator(
         await using var pdfContent = artifacts.OpenRead(finalArtifact.ArtifactId);
         if (job.State is not (JobState.Ready or JobState.FailedBeforeSubmit))
         {
-            var replay = store.BeginSubmission(jobId, idempotencyKey, atUtc);
-            if (replay.Job.State == JobState.Submitting)
-            {
-                var unknown = store.TransitionJob(jobId, JobState.NeedsReviewUnknown,
-                    "Restart found a durable submission intent without a persisted OS receipt; automatic resubmission is blocked.", atUtc);
-                return new PrintSubmissionResult(PrintSubmissionStatus.NeedsReviewUnknown, unknown, "Submission outcome is unknown.");
-            }
-            var status = replay.Job.State switch
-            {
-                JobState.NeedsReviewUnknown => PrintSubmissionStatus.NeedsReviewUnknown,
-                JobState.FailedBeforeSubmit => PrintSubmissionStatus.FailedBeforeSubmit,
-                _ => PrintSubmissionStatus.Accepted
-            };
-            return new PrintSubmissionResult(status, replay.Job,
-                status == PrintSubmissionStatus.NeedsReviewUnknown ? "Submission outcome is unknown." : null);
+            return BeginSubmissionOrReplay(jobId, idempotencyKey, atUtc, allowNewSubmission: false)
+                ?? throw new InvalidOperationException("A replay unexpectedly started a new submission.");
         }
         var segment = preparedRun.Segments.SingleOrDefault(value => value.Index == job.SegmentIndex)
             ?? throw new InvalidDataException("The persisted job refers to a missing prepared segment.");
@@ -142,24 +131,10 @@ public sealed class WindowsPrintCoordinator(
         if (string.IsNullOrWhiteSpace(nonce) || nonce.Length > 256 || nonce.Any(char.IsControl))
             throw new InvalidOperationException("The run nonce must be nonempty, bounded, and contain no control characters.");
 
-        var intent = store.BeginSubmission(jobId, idempotencyKey, atUtc);
-        if (intent.Replayed)
-        {
-            if (intent.Job.State == JobState.Submitting)
-            {
-                var unknown = store.TransitionJob(jobId, JobState.NeedsReviewUnknown,
-                    "Restart found a durable submission intent without a persisted OS receipt; automatic resubmission is blocked.", atUtc);
-                return new PrintSubmissionResult(PrintSubmissionStatus.NeedsReviewUnknown, unknown, "Submission outcome is unknown.");
-            }
-            var replayStatus = intent.Job.State switch
-            {
-                JobState.NeedsReviewUnknown => PrintSubmissionStatus.NeedsReviewUnknown,
-                JobState.FailedBeforeSubmit => PrintSubmissionStatus.FailedBeforeSubmit,
-                _ => PrintSubmissionStatus.Accepted
-            };
-            return new PrintSubmissionResult(replayStatus, intent.Job,
-                replayStatus == PrintSubmissionStatus.NeedsReviewUnknown ? "Submission outcome is unknown." : null);
-        }
+        var submissionOwner = new object();
+        var replayResult = BeginSubmissionOrReplay(jobId, idempotencyKey, atUtc,
+            allowNewSubmission: true, submissionOwner: submissionOwner);
+        if (replayResult is not null) return replayResult;
 
         try
         {
@@ -193,6 +168,51 @@ public sealed class WindowsPrintCoordinator(
             var unknown = store.TransitionJob(jobId, JobState.NeedsReviewUnknown,
                 "Submission was interrupted after durable intent; the OS outcome cannot be inferred.", atUtc);
             return new PrintSubmissionResult(PrintSubmissionStatus.NeedsReviewUnknown, unknown, "Submission outcome is unknown.");
+        }
+        finally
+        {
+            lock (_submissionSync)
+            {
+                if (_activeSubmissionKeys.TryGetValue(jobId, out var activeSubmission) &&
+                    ReferenceEquals(activeSubmission.Owner, submissionOwner))
+                    _activeSubmissionKeys.Remove(jobId);
+            }
+        }
+    }
+
+    private PrintSubmissionResult? BeginSubmissionOrReplay(
+        string jobId, string idempotencyKey, DateTimeOffset atUtc, bool allowNewSubmission, object? submissionOwner = null)
+    {
+        lock (_submissionSync)
+        {
+            var intent = store.BeginSubmission(jobId, idempotencyKey, atUtc);
+            if (!intent.Replayed && allowNewSubmission)
+            {
+                _activeSubmissionKeys[jobId] = (idempotencyKey,
+                    submissionOwner ?? throw new InvalidOperationException("A new submission requires an ownership token."));
+                return null;
+            }
+
+            if (intent.Job.State == JobState.Submitting)
+            {
+                if (_activeSubmissionKeys.TryGetValue(jobId, out var activeSubmission) &&
+                    string.Equals(activeSubmission.IdempotencyKey, idempotencyKey, StringComparison.Ordinal))
+                    return new PrintSubmissionResult(PrintSubmissionStatus.Accepted, intent.Job,
+                        "The matching submission is still in progress.");
+
+                var unknown = store.TransitionJob(jobId, JobState.NeedsReviewUnknown,
+                    "Restart found a durable submission intent without a persisted OS receipt; automatic resubmission is blocked.", atUtc);
+                return new PrintSubmissionResult(PrintSubmissionStatus.NeedsReviewUnknown, unknown, "Submission outcome is unknown.");
+            }
+
+            var status = intent.Job.State switch
+            {
+                JobState.NeedsReviewUnknown => PrintSubmissionStatus.NeedsReviewUnknown,
+                JobState.FailedBeforeSubmit => PrintSubmissionStatus.FailedBeforeSubmit,
+                _ => PrintSubmissionStatus.Accepted
+            };
+            return new PrintSubmissionResult(status, intent.Job,
+                status == PrintSubmissionStatus.NeedsReviewUnknown ? "Submission outcome is unknown." : null);
         }
     }
 
