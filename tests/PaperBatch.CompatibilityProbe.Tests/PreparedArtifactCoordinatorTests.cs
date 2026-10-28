@@ -193,6 +193,72 @@ internal static class PreparedArtifactCoordinatorTests
         }
     }
 
+    internal static void DirectoryPreparationIdempotencyTracksEveryExpandedSource()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "paperbatch-directory-prepare-idempotency-" + Guid.NewGuid().ToString("N"));
+        var inputDirectory = Path.Combine(root, "inputs");
+        Directory.CreateDirectory(inputDirectory);
+        try
+        {
+            var firstPath = Path.Combine(inputDirectory, "01-first.pdf");
+            var laterPath = Path.Combine(inputDirectory, "02-later.pdf");
+            File.WriteAllBytes(firstPath, RendererTests.OnePagePdf());
+            File.WriteAllBytes(laterPath, [.. RendererTests.OnePagePdf(), (byte)'\n']);
+
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+            var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+            var renderers = new RendererCoordinator([
+                new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts))
+            ]);
+            var runs = new SqliteRunStore(Path.Combine(root, "runs.db"));
+            runs.Initialize();
+            var coordinator = new PreparedArtifactCoordinator(new SourceIntakeService(cache), cache, renderers,
+                new FixturePageMetadataInspector(), new VerifiedStaticFixtureInspector(),
+                new FixtureCompositionAdapter(pageCount => pageCount == 2
+                    ? PdfCompositionTests.TwoPagePdf() : RendererTests.OnePagePdf()), artifacts, runs);
+            var settings = new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter",
+                Orientation.Auto, ScalingMode.ShrinkToFit);
+            var retention = new RetentionMetadata(FixedTime.AddDays(2), RetainWhileUnresolved: true);
+            var input = new[] { new SourceInput(inputDirectory) };
+
+            var first = coordinator.PrepareAsync(input, settings, new LayoutOptions(),
+                "directory-prepare-idempotency-key", retention, FixedTime).GetAwaiter().GetResult();
+            var unchangedRetry = coordinator.PrepareAsync(input, settings, new LayoutOptions(),
+                "directory-prepare-idempotency-key", retention, FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
+
+            Assert.True(first.Succeeded, string.Join("; ", first.Diagnostics));
+            Assert.Equal(2, first.Run!.Items.Length);
+            Assert.False(first.Persistence!.Replayed);
+            Assert.True(unchangedRetry.Succeeded, string.Join("; ", unchangedRetry.Diagnostics));
+            Assert.True(unchangedRetry.Persistence!.Replayed);
+            Assert.Equal(first.Run.RunId, unchangedRetry.Run!.RunId);
+
+            File.WriteAllBytes(laterPath, [.. RendererTests.OnePagePdf(), (byte)'\n', (byte)'\n']);
+            var changedRetry = coordinator.PrepareAsync(input, settings, new LayoutOptions(),
+                "directory-prepare-idempotency-key", retention, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
+
+            Assert.True(changedRetry.Succeeded, string.Join("; ", changedRetry.Diagnostics));
+            Assert.False(changedRetry.Persistence!.Replayed);
+            Assert.False(first.Run.RunId == changedRetry.Run!.RunId);
+            Assert.Equal(2, changedRetry.Run.Items.Length);
+            var expectedHashes = new[] { firstPath, laterPath }
+                .Select(path => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path)))
+                    .ToLowerInvariant())
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            var actualHashes = changedRetry.Run.Items.Select(item => item.Source.Sha256)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            Assert.True(expectedHashes.SequenceEqual(actualHashes));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
     internal static void MismatchedExpectedShaRejectsExistingIdempotentRunReplay()
     {
         var root = Path.Combine(Path.GetTempPath(), "paperbatch-prepare-expected-sha-replay-" + Guid.NewGuid().ToString("N"));

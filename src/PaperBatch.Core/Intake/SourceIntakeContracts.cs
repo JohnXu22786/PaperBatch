@@ -501,7 +501,10 @@ public sealed record SourcePreparationItem(
     SourceFormat? Format,
     bool IsReady,
     bool IsDuplicate,
-    ImmutableArray<IntakeDiagnostic> Diagnostics);
+    ImmutableArray<IntakeDiagnostic> Diagnostics)
+{
+    public bool IsIntentionalCopy { get; init; }
+}
 
 public sealed record SourcePreparationResult(ImmutableArray<SourcePreparationItem> Items, bool IsCancelled);
 
@@ -531,13 +534,19 @@ public sealed class SourceIntakeService(
             {
                 diagnostics.Add(new IntakeDiagnostic(IntakeSeverity.Warning, IntakeDiagnosticCode.CancellationRequested,
                     "Source preparation was cancelled."));
-                results.Add(new SourcePreparationItem(selected.Path, null, null, false, selected.IsDuplicate, diagnostics.ToImmutable()));
+                results.Add(new SourcePreparationItem(selected.Path, null, null, false, selected.IsDuplicate, diagnostics.ToImmutable())
+                {
+                    IsIntentionalCopy = selected.IsIntentionalCopy
+                });
                 continue;
             }
 
             if (selected.HasErrors || (selected.IsDuplicate && !selected.IsIntentionalCopy))
             {
-                results.Add(new SourcePreparationItem(selected.Path, null, null, false, selected.IsDuplicate, diagnostics.ToImmutable()));
+                results.Add(new SourcePreparationItem(selected.Path, null, null, false, selected.IsDuplicate, diagnostics.ToImmutable())
+                {
+                    IsIntentionalCopy = selected.IsIntentionalCopy
+                });
                 continue;
             }
 
@@ -549,7 +558,10 @@ public sealed class SourceIntakeService(
             catch (SourceIntakeException exception)
             {
                 diagnostics.Add(exception.Diagnostic);
-                results.Add(new SourcePreparationItem(selected.Path, null, null, false, selected.IsDuplicate, diagnostics.ToImmutable()));
+                results.Add(new SourcePreparationItem(selected.Path, null, null, false, selected.IsDuplicate, diagnostics.ToImmutable())
+                {
+                    IsIntentionalCopy = selected.IsIntentionalCopy
+                });
                 continue;
             }
 
@@ -571,7 +583,10 @@ public sealed class SourceIntakeService(
                 TryRelease(snapshot.SnapshotId, diagnostics);
                 diagnostics.Add(new IntakeDiagnostic(IntakeSeverity.Error, IntakeDiagnosticCode.CacheEntryCorrupt,
                     "The cached snapshot could not be read during preflight."));
-                results.Add(new SourcePreparationItem(selected.Path, null, null, false, selected.IsDuplicate, diagnostics.ToImmutable()));
+                results.Add(new SourcePreparationItem(selected.Path, null, null, false, selected.IsDuplicate, diagnostics.ToImmutable())
+                {
+                    IsIntentionalCopy = selected.IsIntentionalCopy
+                });
                 continue;
             }
 
@@ -579,11 +594,17 @@ public sealed class SourceIntakeService(
             if (preflight.Status != SourcePreflightStatus.Ready)
             {
                 TryRelease(snapshot.SnapshotId, diagnostics);
-                results.Add(new SourcePreparationItem(selected.Path, null, preflight.Format, false, selected.IsDuplicate, diagnostics.ToImmutable()));
+                results.Add(new SourcePreparationItem(selected.Path, null, preflight.Format, false, selected.IsDuplicate, diagnostics.ToImmutable())
+                {
+                    IsIntentionalCopy = selected.IsIntentionalCopy
+                });
                 continue;
             }
 
-            results.Add(new SourcePreparationItem(selected.Path, snapshot, preflight.Format, true, selected.IsDuplicate, diagnostics.ToImmutable()));
+            results.Add(new SourcePreparationItem(selected.Path, snapshot, preflight.Format, true, selected.IsDuplicate, diagnostics.ToImmutable())
+            {
+                IsIntentionalCopy = selected.IsIntentionalCopy
+            });
         }
 
         return new SourcePreparationResult(results.MoveToImmutable(), enumeration.IsCancelled || cancellationToken.IsCancellationRequested);

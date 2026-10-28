@@ -130,7 +130,7 @@ public sealed class PreparedArtifactCoordinator(
                     return new(null, null, diagnostics, IsCancelled: false);
                 }
             }
-            var effectiveRequestKey = ComputeEffectiveRequestKey(idempotencyKey, inputArray, prepared.Items,
+            var effectiveRequestKey = ComputeEffectiveRequestKey(idempotencyKey, prepared.Items,
                 printSettings, layoutOptions, perItemPrintSettings, perItemLayoutSettings);
             var existingRun = runs.GetRunByRequestKey(effectiveRequestKey);
             if (existingRun is not null)
@@ -292,18 +292,18 @@ public sealed class PreparedArtifactCoordinator(
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 
-    private static string ComputeEffectiveRequestKey(string idempotencyKey, IReadOnlyList<SourceInput> inputs,
+    private static string ComputeEffectiveRequestKey(string idempotencyKey,
         IReadOnlyList<SourcePreparationItem> preparedItems, PrintSettings settings, LayoutOptions options,
         IReadOnlyList<PrintSettings>? perItemPrintSettings, IReadOnlyList<LayoutDocumentSettings>? perItemLayoutSettings)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         void Add(string value) => hash.AppendData(Encoding.UTF8.GetBytes(value + "\n"));
         Add(idempotencyKey);
-        for (var index = 0; index < inputs.Count; index++)
+        foreach (var preparedItem in preparedItems)
         {
-            Add(Path.GetFullPath(inputs[index].Path));
-            Add(inputs[index].IntentionalCopy ? "copy" : "source");
-            Add(preparedItems[index].Snapshot!.Sha256);
+            Add(Path.GetFullPath(preparedItem.SourcePath));
+            Add(preparedItem.IsIntentionalCopy ? "copy" : "source");
+            Add(preparedItem.Snapshot!.Sha256);
         }
         Add(System.Text.Json.JsonSerializer.Serialize(settings));
         Add(System.Text.Json.JsonSerializer.Serialize(perItemPrintSettings));
