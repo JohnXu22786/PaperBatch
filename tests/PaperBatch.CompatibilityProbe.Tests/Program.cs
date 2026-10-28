@@ -276,6 +276,7 @@ var tests = new List<(string Name, Action Run)>
     ("Windows extended local paths are not treated as network paths", SourceIntakeTests.WindowsExtendedLocalPathIsNotTreatedAsNetworkPath),
     ("source preflight recognizes supported format families", SourceIntakeTests.PreflightRecognizesSupportedFormatFamilies),
     ("source preflight rejects mismatches malformed encryption and unsafe packages", SourceIntakeTests.PreflightRejectsMismatchMalformedEncryptionAndUnsafePackages),
+    ("source preflight accepts PDF xref stream PNG Up predictors", SourceIntakeTests.PreflightAcceptsPdfXrefStreamPngUpPredictor),
     ("source preflight rejects PNG files without IDAT payload", SourceIntakeTests.PreflightRejectsPngWithoutIdatPayload),
     ("source preflight rejects non-finite package compression limits", SourceIntakeTests.PreflightRejectsNonFinitePackageCompressionLimits),
     ("source preflight rejects ZIP entries without a final DEFLATE block", SourceIntakeTests.PreflightRejectsTruncatedDeflateStream),
