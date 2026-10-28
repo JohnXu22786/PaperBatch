@@ -194,6 +194,7 @@ public sealed class WindowsGdiPrintBackend(
 
         IWindowsGdiDocument? document = null;
         var startDocReturned = false;
+        var endDocSucceeded = false;
         try
         {
             document = await native.StartDocAsync(submission, pages, cancellationToken).ConfigureAwait(false);
@@ -208,6 +209,7 @@ public sealed class WindowsGdiPrintBackend(
                 await document.EndPageAsync(cancellationToken).ConfigureAwait(false);
             }
             await document.EndDocAsync(cancellationToken).ConfigureAwait(false);
+            endDocSucceeded = true;
             return new OsJobReceipt(queue, document.OsJobId, submission.RunNonce,
                 submission.SubmittedAtUtc, current.DriverName, current.PortName, current.Fingerprint);
         }
@@ -222,7 +224,10 @@ public sealed class WindowsGdiPrintBackend(
         finally
         {
             if (document is not null)
-                await document.DisposeAsync().ConfigureAwait(false);
+            {
+                try { await document.DisposeAsync().ConfigureAwait(false); }
+                catch when (endDocSucceeded) { }
+            }
         }
     }
 

@@ -34,6 +34,21 @@ internal static class GdiBackendTests
         Assert.Equal("run-nonce", native.LastReceipt.RunNonce);
     }
 
+    internal static void CleanupFailureAfterEndDocPreservesReceiptForStatusAndCancel()
+    {
+        var pdf = RendererTests.OnePagePdf();
+        var native = new FakeNative(Capabilities()) { FailDisposeAfterEndDoc = true };
+        var backend = new WindowsGdiPrintBackend(native, new FakeRasterizer());
+
+        var receipt = backend.SubmitAsync(Submission(pdf, Artifact(pdf))).GetAwaiter().GetResult();
+
+        Assert.Equal("job-from-startdoc", receipt.OsJobId);
+        Assert.Equal(PrintBackendJobStatus.Processing, backend.GetStatusAsync(receipt).GetAwaiter().GetResult());
+        Assert.True(backend.CancelAsync(receipt).GetAwaiter().GetResult());
+        Assert.Equal("job-from-startdoc", native.LastReceipt!.OsJobId);
+        Assert.Equal(1, native.EndDocCount);
+    }
+
     internal static void RasterizesAndSubmitsOnlySelectedFinalPages()
     {
         var pdf = RendererTests.OnePagePdf();
@@ -421,6 +436,7 @@ internal static class GdiBackendTests
         public PrinterCapabilitySnapshot? SecondCapabilities { get; init; }
         public bool FailWritingPage { get; init; }
         public bool CancelWritingPage { get; init; }
+        public bool FailDisposeAfterEndDoc { get; init; }
         public bool FailCapabilityLookupInStartDoc { get; init; }
         public int StartDocCount { get; private set; }
         public int GdiStartDocCount { get; private set; }
@@ -436,7 +452,7 @@ internal static class GdiBackendTests
                 _ = WindowsGdiNativeAdapter.GetCapabilitySnapshotBeforeStartDoc<PrinterCapabilitySnapshot>(
                     () => throw new IOException("queue disappeared during capability enumeration"));
             GdiStartDocCount++;
-            LastDocument = new FakeDocument(this, FailWritingPage, CancelWritingPage);
+            LastDocument = new FakeDocument(this, FailWritingPage, CancelWritingPage, FailDisposeAfterEndDoc);
             return Task.FromResult<IWindowsGdiDocument>(LastDocument);
         }
         public Task<PrintBackendJobStatus> GetStatusAsync(OsJobReceipt receipt, CancellationToken cancellationToken = default)
@@ -444,7 +460,7 @@ internal static class GdiBackendTests
         public Task<bool> CancelAsync(OsJobReceipt receipt, CancellationToken cancellationToken = default)
         { LastReceipt = receipt; return Task.FromResult(true); }
 
-        public sealed class FakeDocument(FakeNative owner, bool failWrite, bool cancelWrite) : IWindowsGdiDocument
+        public sealed class FakeDocument(FakeNative owner, bool failWrite, bool cancelWrite, bool failDisposeAfterEndDoc) : IWindowsGdiDocument
         {
             public string OsJobId => "job-from-startdoc";
             public int CompletedPages { get; private set; }
@@ -455,7 +471,13 @@ internal static class GdiBackendTests
                 failWrite ? Task.FromException(new IOException("write failed")) : Task.CompletedTask;
             public Task EndPageAsync(CancellationToken cancellationToken = default) { CompletedPages++; return Task.CompletedTask; }
             public Task EndDocAsync(CancellationToken cancellationToken = default) { owner.EndDocCount++; return Task.CompletedTask; }
-            public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
+            public ValueTask DisposeAsync()
+            {
+                Disposed = true;
+                return failDisposeAfterEndDoc && owner.EndDocCount > 0
+                    ? ValueTask.FromException(new IOException("DeleteDC failed after successful EndDoc."))
+                    : ValueTask.CompletedTask;
+            }
         }
     }
 }
