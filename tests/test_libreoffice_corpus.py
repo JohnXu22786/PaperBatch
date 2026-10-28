@@ -690,6 +690,8 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             corpus = Path(directory) / "corpus"
             corpus.mkdir()
+            temporary_root = Path(directory) / "n0000000000000"
+            temporary_root.mkdir()
             source = CORPUS_DIR / "variants/docx_000.docx"
             fixtures = []
             for index in range(2):
@@ -709,6 +711,7 @@ class LibreOfficeCorpusTests(unittest.TestCase):
             pinned = SimpleNamespace(sha256="a" * 64, runtime_directory_sha256="b" * 64, close=lambda: None)
             profiles = []
             temporary_directories = []
+            input_paths = []
             launcher_modes = []
 
             def invoke(_engine, args, profile, _timeout, **kwargs):
@@ -717,9 +720,10 @@ class LibreOfficeCorpusTests(unittest.TestCase):
                 if "--version" in args:
                     return {"stdout": "LibreOffice 26.2.2.2", "stderr": "", "exitCode": 0, "timedOut": False, "identityVerified": True}
                 temporary_directories.append(kwargs["temporary_directory"])
+                input_paths.append(Path(args[-1]))
                 output_dir = Path(args[args.index("--outdir") + 1])
                 output_dir.joinpath(Path(args[-1]).stem + ".pdf").write_bytes(b"synthetic pdf placeholder")
-                exit_code = 1 if "000" in args[-1] else 0
+                exit_code = 1 if Path(args[-1]).name == "docx_variant_000.docx" else 0
                 return {"stdout": "", "stderr": "failure" if exit_code else "", "exitCode": exit_code, "timedOut": False, "identityVerified": True}
 
             with (
@@ -727,6 +731,7 @@ class LibreOfficeCorpusTests(unittest.TestCase):
                 mock.patch.object(run_libreoffice_corpus.probe, "open_pinned_engine", return_value=pinned),
                 mock.patch.object(run_libreoffice_corpus.probe, "invoke", side_effect=invoke),
                 mock.patch.object(run_libreoffice_corpus.probe, "inspect_pdf", return_value=(100, True, True, False, "c" * 64)),
+                mock.patch.object(tempfile, "tempdir", str(temporary_root)),
             ):
                 report, exit_code = run_libreoffice_corpus.run_corpus(str(engine), "a" * 64, 60, 900, corpus)
 
@@ -736,6 +741,8 @@ class LibreOfficeCorpusTests(unittest.TestCase):
         self.assertEqual(len(set(profiles)), 3)
         self.assertEqual(len(set(temporary_directories)), 2)
         self.assertTrue(all(path.name == "intermediate" for path in temporary_directories))
+        self.assertTrue(all("000" in str(path) for path in input_paths))
+        self.assertEqual([path.name for path in input_paths], ["docx_variant_000.docx", "docx_variant_001.docx"])
         expected_launcher = sys.platform in ("linux", "darwin")
         self.assertEqual(launcher_modes, [False, expected_launcher, expected_launcher])
 
