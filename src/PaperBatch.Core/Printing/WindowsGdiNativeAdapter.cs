@@ -37,6 +37,9 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
     private const int GdiError = -1;
     private const uint JobStatusDeleted = 0x00000100;
     private const uint JobStatusCancelled = 0x00008000;
+    private const uint JobStatusPaused = 0x00000001;
+    private const uint JobStatusBlockedDevq = 0x00000200;
+    private const uint JobStatusUserIntervention = 0x00000400;
 
     public Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(string queueIdentity, CancellationToken cancellationToken = default)
     {
@@ -314,6 +317,8 @@ public sealed class WindowsGdiNativeAdapter : IWindowsGdiNativeAdapter
     internal static PrintBackendJobStatus MapWinspoolJobStatus(uint status)
     {
         if ((status & JobStatusDeleted) != 0) return PrintBackendJobStatus.Unknown;
+        if ((status & (JobStatusPaused | JobStatusBlockedDevq | JobStatusUserIntervention)) != 0)
+            return PrintBackendJobStatus.Unknown;
         if ((status & (0x00000002u | 0x00000040u)) != 0) return PrintBackendJobStatus.Failed;
         if ((status & JobStatusCancelled) != 0) return PrintBackendJobStatus.Cancelled;
         if ((status & (0x00000004u | 0x00000010u | 0x00000020u | 0x00000008u)) != 0) return PrintBackendJobStatus.Processing;

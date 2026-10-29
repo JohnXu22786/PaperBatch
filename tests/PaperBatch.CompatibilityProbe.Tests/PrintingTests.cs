@@ -404,6 +404,24 @@ internal static class PrintingTests
         Assert.True(refreshed.State != JobState.CancelObserved);
     }
 
+    internal static void UnknownQueueStatusRequiresReviewAndBlocksResubmission()
+    {
+        using var fixture = new Fixture();
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1", fixture.Artifacts);
+        coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "attention-submit", FixedTime).GetAwaiter().GetResult();
+
+        backend.LastStatus = PrintBackendJobStatus.Unknown;
+        var refreshed = coordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
+        Assert.Equal(JobState.NeedsReviewUnknown, refreshed.State);
+
+        var replayed = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "attention-submit", FixedTime.AddMinutes(2))
+            .GetAwaiter().GetResult();
+        Assert.Equal(PrintSubmissionStatus.NeedsReviewUnknown, replayed.Status);
+        Assert.Equal(1, backend.SubmissionCount);
+        Assert.Equal(1, backend.OsSubmissionCount);
+    }
+
     internal static void SubmissionRejectsLegacyRunWithoutFinalArtifact()
     {
         using var fixture = new Fixture();
