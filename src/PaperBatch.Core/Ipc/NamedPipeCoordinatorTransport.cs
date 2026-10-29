@@ -67,13 +67,17 @@ public sealed class NamedPipeCoordinatorServer : IAsyncDisposable
             var pipe = new NamedPipeServerStream(_pipeName, PipeDirection.InOut, MaximumConcurrentClients,
                 PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
                 ConnectBufferSize, ConnectBufferSize);
+            var connected = false;
             try
             {
-                await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
-                var clientTask = ProcessClientAsync(pipe, cancellationToken);
-                _clientTasks.TryAdd(clientTask, 0);
-                _ = clientTask.ContinueWith(completed => _clientTasks.TryRemove(completed, out var removed), CancellationToken.None,
-                    TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                connected = await WaitForConnectionOrRecoverAsync(pipe.WaitForConnectionAsync, cancellationToken).ConfigureAwait(false);
+                if (connected)
+                {
+                    var clientTask = ProcessClientAsync(pipe, cancellationToken);
+                    _clientTasks.TryAdd(clientTask, 0);
+                    _ = clientTask.ContinueWith(completed => _clientTasks.TryRemove(completed, out var removed), CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                }
             }
             catch
             {
@@ -81,8 +85,30 @@ public sealed class NamedPipeCoordinatorServer : IAsyncDisposable
                 _clients.Release();
                 throw;
             }
+            if (!connected)
+            {
+                pipe.Dispose();
+                _clients.Release();
+                cancellationToken.ThrowIfCancellationRequested();
+            }
         }
     }
+
+    internal static async Task<bool> WaitForConnectionOrRecoverAsync(
+        Func<CancellationToken, Task> waitForConnection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await waitForConnection(cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (IOException exception) when (cancellationToken.IsCancellationRequested || IsExpectedPipeClosure(exception))
+        {
+            return false;
+        }
+    }
+
+    private static bool IsExpectedPipeClosure(IOException exception) => (exception.HResult & 0xFFFF) is 109 or 232 or 233;
 
     private async Task ProcessClientAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
     {
