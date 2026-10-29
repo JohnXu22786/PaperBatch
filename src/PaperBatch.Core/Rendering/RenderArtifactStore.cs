@@ -148,6 +148,41 @@ public sealed class RenderArtifactStore
 
     public StoredPdfArtifact GetReceipt(string artifactId) => ReadReceipt(artifactId);
 
+    /// <summary>Deletes owned artifacts absent from the caller's complete retained-run reference set.</summary>
+    public IReadOnlyList<string> DeleteUnreferencedArtifacts(IReadOnlySet<string> retainedArtifactIds)
+    {
+        ArgumentNullException.ThrowIfNull(retainedArtifactIds);
+        var deleted = new List<string>();
+        foreach (var path in Directory.EnumerateDirectories(_root))
+        {
+            var artifactId = Path.GetFileName(path);
+            if (!IsArtifactId(artifactId) || retainedArtifactIds.Contains(artifactId)) continue;
+            var attributes = File.GetAttributes(path);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                throw new IOException("An artifact directory cannot be a reparse point.");
+            var entries = Directory.GetFileSystemEntries(path);
+            if (entries.Length != 2 || !entries.Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal)
+                    .SetEquals(["content.pdf", "receipt.json"]))
+                throw new IOException("An artifact directory contains unexpected entries.");
+            foreach (var entry in entries)
+            {
+                if ((File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("An artifact file cannot be a reparse point.");
+            }
+            _ = ReadReceipt(artifactId);
+            using (_ = OpenRead(artifactId)) { }
+            foreach (var entry in entries) File.Delete(entry);
+            Directory.Delete(path);
+            deleted.Add(artifactId);
+        }
+        return deleted;
+    }
+
+    private static bool IsArtifactId(string artifactId) =>
+        artifactId.Length == 73 && artifactId.StartsWith("artifact_", StringComparison.Ordinal) &&
+        artifactId.AsSpan(9).ToString().All(Uri.IsHexDigit);
+
+
     private static void ValidatePdfStructure(Stream pdf)
     {
         if (!pdf.CanRead || !pdf.CanSeek || pdf.Length < 16)
