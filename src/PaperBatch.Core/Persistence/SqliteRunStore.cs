@@ -311,6 +311,24 @@ public sealed class SqliteRunStore
     }
 
     /// <summary>Deletes expired runs atomically while preserving unresolved OS jobs when their policy requires it.</summary>
+    /// <summary>Returns every render and composed artifact referenced by a run that remains retained.</summary>
+    public ImmutableHashSet<string> GetRetainedArtifactIds()
+    {
+        EnsureInitialized();
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT prepared_run_json FROM runs ORDER BY run_id;";
+        using var reader = command.ExecuteReader();
+        var artifactIds = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            var run = PreparedRunJson.Parse(Encoding.UTF8.GetBytes(reader.GetString(0)));
+            foreach (var item in run.Items) artifactIds.Add(item.Render.ArtifactId);
+            if (run.FinalArtifact is not null) artifactIds.Add(run.FinalArtifact.ArtifactId);
+        }
+        return artifactIds.ToImmutable();
+    }
+
     public ImmutableArray<string> DeleteExpiredRuns(DateTimeOffset nowUtc)
     {
         EnsureInitialized();

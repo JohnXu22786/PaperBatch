@@ -108,7 +108,12 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
     private static readonly TimeSpan WatchStabilityWindow = TimeSpan.FromSeconds(2);
     private readonly PaperBatch.Core.Preparation.PreparedArtifactCoordinator? _preparation;
     private readonly PaperBatch.Core.Persistence.SqliteRunStore _runs;
+    private readonly PaperBatch.Core.Rendering.RenderArtifactStore? _artifacts;
     private readonly PaperBatch.Core.Printing.WindowsPrintCoordinator? _printing;
+    private readonly object _requestStateLock = new();
+    private int _activeRequests;
+    private bool _cleanupInProgress;
+    private TaskCompletionSource? _cleanupFinished;
     private readonly string? _preparationUnavailable;
 
     public ProductionCoordinatorRequestHandler(string? dataRoot = null)
@@ -122,6 +127,7 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
             RootPath = Path.Combine(root, "SourceCache")
         });
         var artifacts = new PaperBatch.Core.Rendering.RenderArtifactStore(Path.Combine(root, "RenderArtifacts"));
+        _artifacts = artifacts;
         var renderer = new PaperBatch.Core.Rendering.RendererCoordinator([
             new PaperBatch.Core.Rendering.PdfPassThroughRendererAdapter(new PaperBatch.Core.Rendering.PdfPassThroughArtifactService(cache, artifacts)),
             new PaperBatch.Core.Rendering.BuiltInImageRendererAdapter(cache, artifacts)
@@ -172,43 +178,112 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
     public async ValueTask<IpcResponseEnvelope> HandleAsync(IpcRequestEnvelope request, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var requestEntered = false;
         try
         {
-            return request.Operation switch
+            var cleanupFailure = await EnterRequestAsync(cancellationToken).ConfigureAwait(false);
+            requestEntered = true;
+            try
             {
-                "runtime.status" => Success(request, new
+                if (cleanupFailure is not null) throw cleanupFailure;
+                return request.Operation switch
                 {
-                    protocolVersion = IpcJson.CurrentProtocolVersion,
-                    maximumMessageBytes = IpcJson.MaximumMessageBytes,
-                    dryRun = true,
-                    prepare = _preparation is not null,
-                    submit = _printing is not null,
-                    status = true,
-                    cancel = _printing is not null,
-                    watch = OperatingSystem.IsWindows() ||
-                        OperatingSystem.IsLinux() && System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64,
-                    officeWps = false,
-                    physicalOutput = false
-                }),
-                "cli.dry-run" => DryRun(request),
-                "cli.prepare" => await PrepareAsync(request, cancellationToken).ConfigureAwait(false),
-                "desktop.prepare" => await PrepareDesktopAsync(request, cancellationToken).ConfigureAwait(false),
-                "cli.submit" => await SubmitAsync(request, cancellationToken).ConfigureAwait(false),
-                "cli.status" => await StatusAsync(request, cancellationToken).ConfigureAwait(false),
-                "cli.cancel" => await CancelAsync(request, cancellationToken).ConfigureAwait(false),
-                "cli.watch" => await WatchAsync(request, cancellationToken).ConfigureAwait(false),
-                _ => Unavailable(request, "The requested coordinator operation is unavailable.")
-            };
+                    "runtime.status" => Success(request, new
+                    {
+                        protocolVersion = IpcJson.CurrentProtocolVersion,
+                        maximumMessageBytes = IpcJson.MaximumMessageBytes,
+                        dryRun = true,
+                        prepare = _preparation is not null,
+                        submit = _printing is not null,
+                        status = true,
+                        cancel = _printing is not null,
+                        watch = OperatingSystem.IsWindows() ||
+                            OperatingSystem.IsLinux() && System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64,
+                        officeWps = false,
+                        physicalOutput = false
+                    }),
+                    "cli.dry-run" => DryRun(request),
+                    "cli.prepare" => await PrepareAsync(request, cancellationToken).ConfigureAwait(false),
+                    "desktop.prepare" => await PrepareDesktopAsync(request, cancellationToken).ConfigureAwait(false),
+                    "cli.submit" => await SubmitAsync(request, cancellationToken).ConfigureAwait(false),
+                    "cli.status" => await StatusAsync(request, cancellationToken).ConfigureAwait(false),
+                    "cli.cancel" => await CancelAsync(request, cancellationToken).ConfigureAwait(false),
+                    "cli.watch" => await WatchAsync(request, cancellationToken).ConfigureAwait(false),
+                    _ => Unavailable(request, "The requested coordinator operation is unavailable.")
+                };
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (UnauthorizedAccessException)
+            {
+                return PermissionDenied(request, "The coordinator cannot access the requested local file or state.");
+            }
+            catch (Exception exception) when (exception is ArgumentException or InvalidDataException or IOException or JsonException or InvalidOperationException or NotSupportedException)
+            {
+                return Unavailable(request, exception.Message);
+            }
         }
-        catch (OperationCanceledException) { throw; }
-        catch (UnauthorizedAccessException)
+        finally
         {
-            return PermissionDenied(request, "The coordinator cannot access the requested local file or state.");
+            if (requestEntered) ExitRequest();
         }
-        catch (Exception exception) when (exception is ArgumentException or InvalidDataException or IOException or JsonException or InvalidOperationException or NotSupportedException)
+    }
+
+    private async Task<Exception?> EnterRequestAsync(CancellationToken cancellationToken)
+    {
+        while (true)
         {
-            return Unavailable(request, exception.Message);
+            Task? pendingCleanup = null;
+            TaskCompletionSource? cleanupCompletion = null;
+            lock (_requestStateLock)
+            {
+                if (_cleanupInProgress)
+                {
+                    pendingCleanup = _cleanupFinished!.Task;
+                }
+                else if (_activeRequests != 0)
+                {
+                    _activeRequests++;
+                    return null;
+                }
+                else
+                {
+                    _cleanupInProgress = true;
+                    _cleanupFinished = cleanupCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                }
+            }
+
+            if (pendingCleanup is not null)
+            {
+                await pendingCleanup.WaitAsync(cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            Exception? failure = null;
+            try { CleanupExpiredArtifacts(); }
+            catch (Exception exception) { failure = exception; }
+            finally
+            {
+                lock (_requestStateLock)
+                {
+                    _activeRequests++;
+                    _cleanupInProgress = false;
+                    cleanupCompletion!.TrySetResult();
+                }
+            }
+            return failure;
         }
+    }
+
+    private void ExitRequest()
+    {
+        lock (_requestStateLock) _activeRequests--;
+    }
+
+    private void CleanupExpiredArtifacts()
+    {
+        if (_artifacts is null) return;
+        _runs.DeleteExpiredRuns(DateTimeOffset.UtcNow);
+        _artifacts.DeleteUnreferencedArtifacts(_runs.GetRetainedArtifactIds());
     }
 
     private IpcResponseEnvelope DryRun(IpcRequestEnvelope request)

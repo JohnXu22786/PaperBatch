@@ -261,6 +261,44 @@ internal static class PrintingTests
         Assert.Equal(backend.Receipts.Single(), fixture.Store.GetJob(fixture.Job.JobId)!.OsReceipt);
     }
 
+    internal static void CoordinatorStatusRemainsAvailableDuringLongSubmission()
+    {
+        using var fixture = new Fixture();
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var submissionRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.PendingSubmissionRelease = submissionRelease;
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-active", fixture.Artifacts);
+        var handler = new ProductionCoordinatorRequestHandler(fixture.Store, coordinator);
+        using var submitPayload = JsonDocument.Parse(JsonSerializer.Serialize(new { arguments = new[] { fixture.Job.JobId } }));
+        using var statusPayload = JsonDocument.Parse("{}");
+        var submitRequest = new IpcRequestEnvelope(IpcJson.CurrentProtocolVersion, Guid.NewGuid(),
+            "cli.submit", "handler-concurrent-submit", submitPayload.RootElement.Clone());
+        var statusRequest = new IpcRequestEnvelope(IpcJson.CurrentProtocolVersion, Guid.NewGuid(),
+            "runtime.status", null, statusPayload.RootElement.Clone());
+        Task<IpcResponseEnvelope>? submitTask = null;
+        Task<IpcResponseEnvelope>? statusTask = null;
+        var statusCompletedBeforeRelease = false;
+
+        try
+        {
+            submitTask = handler.HandleAsync(submitRequest).AsTask();
+            Assert.True(backend.SubmissionStarted.Task.Wait(TimeSpan.FromSeconds(5)),
+                "The print submission did not reach its deterministic backend gate.");
+            statusTask = handler.HandleAsync(statusRequest).AsTask();
+            statusCompletedBeforeRelease = statusTask.Wait(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            submissionRelease.TrySetResult();
+            if (submitTask is not null) _ = submitTask.GetAwaiter().GetResult();
+            if (statusTask is not null) _ = statusTask.GetAwaiter().GetResult();
+        }
+
+        Assert.True(statusCompletedBeforeRelease, "A status request waited for the unrelated print submission to finish.");
+        Assert.True(statusTask!.Result.Error is null);
+        Assert.Equal(true, statusTask.Result.Payload!.Value.GetProperty("submit").GetBoolean());
+    }
+
     internal static void StatusAndCancellationAreScopedToOwnedReceipt()
     {
         using var fixture = new Fixture();

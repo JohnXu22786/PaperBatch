@@ -492,6 +492,38 @@ internal static class CoreTests
         Assert.Equal(JobState.Ready, store.GetJobs("future")[0].State);
     }
 
+    internal static void ExpiredRunArtifactsAreRemovedOnlyWhenNoRetainedRunReferencesThem()
+    {
+        using var temporary = new TemporaryDirectory();
+        var artifacts = new PaperBatch.Core.Rendering.RenderArtifactStore(Path.Combine(temporary.Path, "artifacts"));
+        var pdf = RendererTests.OnePagePdf();
+        var shared = artifacts.PersistPdfAsync(new MemoryStream(pdf), "test-renderer", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        var expiredOnly = artifacts.PersistPdfAsync(new MemoryStream(PdfCompositionTests.TwoPagePdf()), "test-renderer", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        var unresolvedArtifact = artifacts.PersistPdfAsync(new MemoryStream([.. RendererTests.OnePagePdf(), (byte)' ']), "test-renderer", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        var store = new SqliteRunStore(Path.Combine(temporary.Path, "runs.db"));
+        store.Initialize();
+        var expiredRetention = new RetentionMetadata(FixedTime.AddDays(1), RetainWhileUnresolved: true);
+        var retained = new RetentionMetadata(FixedTime.AddDays(30), RetainWhileUnresolved: true);
+        store.CreateRun(CreateRunWithArtifact("expired", expiredOnly), "expired-artifact-run", expiredRetention);
+        store.CreateRun(CreateRunWithArtifact("retained", shared), "live-artifact-run", retained);
+        var unresolved = store.CreateRun(CreateRunWithArtifact("unresolved", unresolvedArtifact), "unresolved-artifact-run", expiredRetention);
+        store.BeginSubmission(unresolved.Jobs[0].JobId, "submit-unresolved-artifact", FixedTime.AddMinutes(1));
+        store.TransitionJob(unresolved.Jobs[0].JobId, JobState.NeedsReviewUnknown, "unknown", FixedTime.AddMinutes(2));
+        store.DeleteExpiredRuns(FixedTime.AddDays(2));
+
+        var liveArtifactIds = store.GetRetainedArtifactIds();
+        var deleted = artifacts.DeleteUnreferencedArtifacts(liveArtifactIds);
+
+        Assert.True(liveArtifactIds.SetEquals([shared.Artifact.ArtifactId, unresolvedArtifact.Artifact.ArtifactId]));
+        Assert.True(deleted.SequenceEqual([expiredOnly.Artifact.ArtifactId]));
+        Assert.False(Directory.Exists(Path.Combine(temporary.Path, "artifacts", expiredOnly.Artifact.ArtifactId)));
+        using var stillReadable = artifacts.OpenRead(shared.Artifact.ArtifactId);
+        using var unresolvedStillReadable = artifacts.OpenRead(unresolvedArtifact.Artifact.ArtifactId);
+    }
+
     internal static void StoreInitializationPrunesExpiredRuns()
     {
         using var temporary = new TemporaryDirectory();
@@ -1094,6 +1126,20 @@ internal static class CoreTests
 
     private static CompatibleSegment CreateSegment(string itemId) => new(
         "segment-1", 0, [itemId], "compat-v1", new PrintSettings(1, ColorMode.Color, DuplexMode.LongEdge, "default", Orientation.Auto, ScalingMode.ShrinkToFit));
+
+    private static PreparedRun CreateRunWithArtifact(string runId, PaperBatch.Core.Rendering.StoredPdfArtifact artifact)
+    {
+        var item = CreateItem() with
+        {
+            Render = CreateItem().Render with
+            {
+                ArtifactId = artifact.Artifact.ArtifactId,
+                ArtifactSha256 = artifact.Artifact.Sha256,
+                ArtifactLengthBytes = artifact.Artifact.LengthBytes
+            }
+        };
+        return PreparedRun.Create(runId, FixedTime, Hash, [item], [CreateSegment(item.ItemId)]);
+    }
 
     private static PreparedRun CreateRun(string runId, string segmentId) => PreparedRun.Create(
         runId,
