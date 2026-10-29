@@ -248,7 +248,7 @@ public sealed class WindowsPrintCoordinator(
                 PrintBackendJobStatus.Processing => job.State == JobState.CancelRequested ? JobState.CancelRequested : JobState.OsProcessing,
                 PrintBackendJobStatus.ReportedComplete => JobState.OsReportsComplete,
                 PrintBackendJobStatus.Failed => JobState.NeedsReviewUnknown,
-                PrintBackendJobStatus.Cancelled => job.State == JobState.CancelRequested
+                PrintBackendJobStatus.Cancelled => job.State is JobState.CancelRequested or JobState.NeedsReviewUnknown
                     ? JobState.CancelObserved
                     : JobState.NeedsReviewUnknown,
                 _ => JobState.NeedsReviewUnknown

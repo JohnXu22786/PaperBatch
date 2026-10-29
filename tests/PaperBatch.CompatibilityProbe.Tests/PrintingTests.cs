@@ -1189,6 +1189,30 @@ internal static class PrintingTests
         Assert.Equal("cancel-retry-nonce", backend.LastRunNonce);
     }
 
+    internal static void RejectedCancellationCanLaterBeObservedAsCancelled()
+    {
+        using var fixture = new Fixture();
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities()) { CancelReturnsFalse = true };
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "late-cancel-nonce", fixture.Artifacts);
+        coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "late-cancel-submit", FixedTime).GetAwaiter().GetResult();
+
+        var rejected = coordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
+        Assert.Equal(JobState.NeedsReviewUnknown, rejected.State);
+        Assert.False(fixture.Store.GetTransitions(fixture.Job.JobId)
+            .Any(transition => transition.ToState == JobState.CancelObserved));
+
+        backend.LastStatus = PrintBackendJobStatus.Cancelled;
+        var observed = coordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
+
+        Assert.Equal(JobState.CancelObserved, observed.State);
+        Assert.Equal(JobState.CancelObserved, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+        Assert.Equal(1, backend.OsSubmissionCount);
+        Assert.Equal(1, backend.CancelCount);
+        Assert.Equal("queue-identity", backend.LastQueueIdentity);
+        Assert.Equal("job-1", backend.LastJobId);
+        Assert.Equal("late-cancel-nonce", backend.LastRunNonce);
+    }
+
     private static PrinterCapabilitySnapshot Capabilities() => new(
         "queue-identity", "Test Queue", "Test Driver", "PORT1", "capability-v1",
         new Dictionary<PrintOption, PrintOptionCapability>

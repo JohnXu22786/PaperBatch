@@ -235,6 +235,7 @@ var tests = new List<(string Name, Action Run)>
     ("print cancellation race preserves the winning OS status", PrintingTests.CancellationRacePreservesOsStatus),
     ("delayed processing status does not overwrite cancellation", PrintingTests.DelayedProcessingStatusDoesNotOverwriteCancellation),
     ("rejected print cancellation requires review without claiming observation", PrintingTests.RejectedCancellationRequiresReviewAndDoesNotClaimObservation),
+    ("rejected cancellation can later be observed as cancelled", PrintingTests.RejectedCancellationCanLaterBeObservedAsCancelled),
     ("reported completion is not paper output confirmation", PrintingTests.OsCompletionDoesNotConfirmPaperOutput),
     ("partial-failure report describes the page-selection evidence it checks", PrintingTests.PartialFailureReportAccuratelyDescribesPageSelection),
     ("Windows queue capability enumeration is read-only", PrintingTests.NativeQueueEnumerationIsReadOnlyAndBounded),
