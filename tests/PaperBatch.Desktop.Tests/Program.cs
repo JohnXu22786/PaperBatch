@@ -32,6 +32,7 @@ var tests = new (string Name, Action Run)[]
     ("removing a batch source clears its shared prepared run until re-preparation", RemovingBatchSourceInvalidatesSharedPreparedRun),
     ("language selection localizes desktop section labels", LanguageSelectionLocalizesSectionLabels),
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
+    ("overlapping imports return only their own rows and keep the view-model queue complete", OverlappingImportsKeepOperationRowsIsolated),
     ("real production queue import reports per-format intake and renderer outcomes", ApplicationImportEvidenceTests.ProductionQueueImportReportsFormatOutcomes),
     ("intentional duplicate sources have independent queue row identities", IntentionalDuplicateQueueRowsRemainIndependent),
     ("cancelled renderer batch releases every captured snapshot", CancelledRendererBatchReleasesEverySnapshot),
@@ -444,6 +445,59 @@ static void SourceIntakeErrorsRemainVisibleAndAppend()
     finally
     {
         if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
+    }
+}
+
+static void OverlappingImportsKeepOperationRowsIsolated()
+{
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-overlapping-imports-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var firstPath = Path.Combine(root, "first.pdf");
+        var secondPath = Path.Combine(root, "second.pdf");
+        var concurrentPath = Path.Combine(root, "concurrent.pdf");
+        File.WriteAllBytes(firstPath, TestOnePagePdf());
+        File.WriteAllBytes(secondPath, TestOnePagePdf());
+        File.WriteAllBytes(concurrentPath, TestOnePagePdf());
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+        var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+        var passThrough = new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts));
+        var renderer = new BlockingSecondRendererAdapter(passThrough);
+        var sources = new ProductionPresentationSources(new SourceIntakeService(cache), new RendererCoordinator([renderer]), cache,
+            rendererAvailable: true, artifacts: artifacts);
+        IReadOnlyList<QueueItemSnapshot>? secondImportRows = null;
+        var firstImport = Task.Run(() => sources.ImportAsync([firstPath, secondPath]));
+        try
+        {
+            Assert.True(renderer.SecondRenderStarted.Wait(TimeSpan.FromSeconds(5)), "The first import did not reach its second render.");
+            secondImportRows = sources.ImportAsync([concurrentPath]).GetAwaiter().GetResult();
+            Assert.Equal(1, secondImportRows.Count);
+            Assert.Equal("concurrent.pdf", secondImportRows[0].Title);
+        }
+        finally
+        {
+            renderer.ReleaseSecondRender();
+        }
+        var returnedFirstRows = firstImport.GetAwaiter().GetResult();
+        var sourceRows = sources.GetQueueItems();
+        Assert.Equal(2, returnedFirstRows.Count);
+        Assert.True(returnedFirstRows.All(item => item.Title is "first.pdf" or "second.pdf"));
+        Assert.True(!returnedFirstRows.Any(item => item.Title == "concurrent.pdf"));
+        Assert.Equal(3, sourceRows.Count);
+        Assert.Equal(3, sourceRows.Select(item => item.Id).Distinct(StringComparer.Ordinal).Count());
+        Assert.True(returnedFirstRows.Concat(secondImportRows!)
+            .Select(item => item.Id).OrderBy(id => id)
+            .SequenceEqual(sourceRows.Select(item => item.Id).OrderBy(id => id)));
+
+        var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
+            new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+        Assert.True(sourceRows.Select(item => item.Id).OrderBy(id => id)
+            .SequenceEqual(viewModel.QueueItems.Select(item => item.Id).OrderBy(id => id)));
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
 }
 
@@ -1877,6 +1931,29 @@ sealed class CancellingRendererAdapter(CancellationTokenSource cancellation) : I
     {
         cancellation.Cancel();
         return Task.FromResult(RenderResult.Unsupported("Cancellation cleanup fixture."));
+    }
+}
+
+sealed class BlockingSecondRendererAdapter(IRendererAdapter inner) : IRendererAdapter
+{
+    private int _renderCount;
+    private readonly TaskCompletionSource _releaseSecondRender = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public ManualResetEventSlim SecondRenderStarted { get; } = new();
+
+    public void ReleaseSecondRender() => _releaseSecondRender.TrySetResult();
+
+    public ValueTask<bool> CanRenderAsync(RenderRequest request, CancellationToken cancellationToken) =>
+        inner.CanRenderAsync(request, cancellationToken);
+
+    public async Task<RenderResult> RenderAsync(RenderRequest request, CancellationToken cancellationToken)
+    {
+        if (Interlocked.Increment(ref _renderCount) == 2)
+        {
+            SecondRenderStarted.Set();
+            await _releaseSecondRender.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        return await inner.RenderAsync(request, cancellationToken).ConfigureAwait(false);
     }
 }
 

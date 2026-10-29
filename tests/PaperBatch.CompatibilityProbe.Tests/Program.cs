@@ -277,6 +277,7 @@ var tests = new List<(string Name, Action Run)>
     ("named pipe transport enforces negotiated message limits", CoreTests.NamedPipeTransportEnforcesNegotiatedMessageLimit),
     ("named pipe request deadlines report timeout and preserve cancellation", CoreTests.NamedPipeRequestDeadlineReturnsTimeoutAndPreservesCancellation),
     ("named pipe server releases slots for stalled frame clients", CoreTests.NamedPipeServerClosesClientsThatWithholdFrameHeaders),
+    ("named pipe listener recovers from expected close and preserves fatal accept errors", CoreTests.NamedPipeListenerRecoversFromExpectedClose),
     ("IPC envelopes preserve correlation and negotiate capabilities", CoreTests.IpcEnvelopesPreserveCorrelationAndNegotiateCapabilities),
     ("IPC rejects malformed and oversized messages", CoreTests.IpcRejectsMalformedAndOversizedMessages),
     ("source enumeration preserves explicit order and natural folder order", SourceIntakeTests.EnumerationPreservesOrderAndNaturalFolderOrdering),

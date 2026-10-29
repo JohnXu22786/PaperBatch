@@ -1024,6 +1024,26 @@ internal static class CoreTests
         server.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
+    internal static void NamedPipeListenerRecoversFromExpectedClose()
+    {
+        var closedPipe = new IOException("The pipe is being closed.", unchecked((int)0x800700E8));
+        Assert.False(NamedPipeCoordinatorServer.WaitForConnectionOrRecoverAsync(
+            _ => Task.FromException(closedPipe), CancellationToken.None).GetAwaiter().GetResult());
+
+        using var shutdown = new CancellationTokenSource();
+        shutdown.Cancel();
+        Assert.False(NamedPipeCoordinatorServer.WaitForConnectionOrRecoverAsync(
+            _ => Task.FromException(new IOException("listener closed during shutdown")), shutdown.Token)
+            .GetAwaiter().GetResult());
+
+        var fatalPipeFailure = new IOException("fatal listener failure", unchecked((int)0x80070005));
+        Assert.Throws<IOException>(() => NamedPipeCoordinatorServer.WaitForConnectionOrRecoverAsync(
+            _ => Task.FromException(fatalPipeFailure), CancellationToken.None).GetAwaiter().GetResult());
+        Assert.Throws<InvalidOperationException>(() => NamedPipeCoordinatorServer.WaitForConnectionOrRecoverAsync(
+            _ => Task.FromException(new InvalidOperationException("fatal listener failure")), CancellationToken.None)
+            .GetAwaiter().GetResult());
+    }
+
     internal static void NamedPipeServerClosesClientsThatWithholdFrameHeaders()
     {
         var pipeName = "paperbatch-stalled-" + Guid.NewGuid().ToString("N");
