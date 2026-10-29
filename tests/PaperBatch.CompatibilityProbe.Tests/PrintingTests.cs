@@ -1163,23 +1163,27 @@ internal static class PrintingTests
         Assert.Equal(JobState.CancelObserved, fixture.Store.GetJob(fixture.Job.JobId)!.State);
     }
 
-    internal static void CancellationRetryAfterRestartUsesReceipt()
+    internal static void RejectedCancellationRequiresReviewAndDoesNotClaimObservation()
     {
         using var fixture = new Fixture();
         var backend = new TestOnlySimulatedPrintBackend(Capabilities()) { CancelReturnsFalse = true };
         var firstCoordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "cancel-retry-nonce", fixture.Artifacts);
         firstCoordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "cancel-retry-submit", FixedTime).GetAwaiter().GetResult();
         var first = firstCoordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
-        Assert.Equal(JobState.CancelRequested, first.State);
+        Assert.Equal(JobState.NeedsReviewUnknown, first.State);
+        Assert.Equal(JobState.NeedsReviewUnknown, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+        Assert.False(fixture.Store.GetTransitions(fixture.Job.JobId)
+            .Any(transition => transition.ToState == JobState.CancelObserved));
+        Assert.Equal(1, backend.CancelCount);
 
-        backend.CancelReturnsFalse = false;
         var restartedCoordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "unused-after-restart", fixture.Artifacts);
-        var retried = restartedCoordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(2)).GetAwaiter().GetResult();
-        Assert.Equal(JobState.CancelRequested, retried.State);
-        backend.LastStatus = PrintBackendJobStatus.Cancelled;
-        retried = restartedCoordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(3)).GetAwaiter().GetResult();
-        Assert.Equal(JobState.CancelObserved, retried.State);
-        Assert.Equal(2, backend.CancelCount);
+        Assert.Throws<InvalidOperationException>(() =>
+            restartedCoordinator.CancelAsync(fixture.Job.JobId, FixedTime.AddMinutes(2)).GetAwaiter().GetResult());
+        Assert.Equal(1, backend.CancelCount);
+        var replayed = restartedCoordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun,
+            "cancel-retry-submit", FixedTime.AddMinutes(3)).GetAwaiter().GetResult();
+        Assert.Equal(PrintSubmissionStatus.NeedsReviewUnknown, replayed.Status);
+        Assert.Equal(1, backend.OsSubmissionCount);
         Assert.Equal("queue-identity", backend.LastQueueIdentity);
         Assert.Equal("job-1", backend.LastJobId);
         Assert.Equal("cancel-retry-nonce", backend.LastRunNonce);

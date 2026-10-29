@@ -293,7 +293,15 @@ public sealed class WindowsPrintCoordinator(
                 else throw;
             }
         }
-        await backend.CancelAsync(requested.OsReceipt!, cancellationToken).ConfigureAwait(false);
+        var accepted = await backend.CancelAsync(requested.OsReceipt!, cancellationToken).ConfigureAwait(false);
+        if (!accepted)
+        {
+            // The exact OS receipt could not be cancelled. Do not leave a pending state
+            // that implies the spooler accepted a command; require a status/review path.
+            return store.TransitionJob(jobId, JobState.NeedsReviewUnknown,
+                "The OS backend did not accept cancellation for the owned queue/job receipt; the job requires review.",
+                atUtc, JobState.CancelRequested);
+        }
         // A successful CancelAsync only means the spooler accepted the command. Cancellation
         // becomes durable only after RefreshStatusAsync observes the terminal Cancelled status.
         return store.GetJob(jobId)!;
