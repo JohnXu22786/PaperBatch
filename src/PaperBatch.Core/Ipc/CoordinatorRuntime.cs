@@ -110,7 +110,10 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
     private readonly PaperBatch.Core.Persistence.SqliteRunStore _runs;
     private readonly PaperBatch.Core.Rendering.RenderArtifactStore? _artifacts;
     private readonly PaperBatch.Core.Printing.WindowsPrintCoordinator? _printing;
-    private readonly SemaphoreSlim _requestGate = new(1, 1);
+    private readonly object _requestStateLock = new();
+    private int _activeRequests;
+    private bool _cleanupInProgress;
+    private TaskCompletionSource? _cleanupFinished;
     private readonly string? _preparationUnavailable;
 
     public ProductionCoordinatorRequestHandler(string? dataRoot = null)
@@ -175,12 +178,14 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
     public async ValueTask<IpcResponseEnvelope> HandleAsync(IpcRequestEnvelope request, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        await _requestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var requestEntered = false;
         try
         {
+            var cleanupFailure = await EnterRequestAsync(cancellationToken).ConfigureAwait(false);
+            requestEntered = true;
             try
             {
-                CleanupExpiredArtifacts();
+                if (cleanupFailure is not null) throw cleanupFailure;
                 return request.Operation switch
                 {
                     "runtime.status" => Success(request, new
@@ -217,7 +222,61 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
                 return Unavailable(request, exception.Message);
             }
         }
-        finally { _requestGate.Release(); }
+        finally
+        {
+            if (requestEntered) ExitRequest();
+        }
+    }
+
+    private async Task<Exception?> EnterRequestAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            Task? pendingCleanup = null;
+            TaskCompletionSource? cleanupCompletion = null;
+            lock (_requestStateLock)
+            {
+                if (_cleanupInProgress)
+                {
+                    pendingCleanup = _cleanupFinished!.Task;
+                }
+                else if (_activeRequests != 0)
+                {
+                    _activeRequests++;
+                    return null;
+                }
+                else
+                {
+                    _cleanupInProgress = true;
+                    _cleanupFinished = cleanupCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                }
+            }
+
+            if (pendingCleanup is not null)
+            {
+                await pendingCleanup.WaitAsync(cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            Exception? failure = null;
+            try { CleanupExpiredArtifacts(); }
+            catch (Exception exception) { failure = exception; }
+            finally
+            {
+                lock (_requestStateLock)
+                {
+                    _activeRequests++;
+                    _cleanupInProgress = false;
+                    cleanupCompletion!.TrySetResult();
+                }
+            }
+            return failure;
+        }
+    }
+
+    private void ExitRequest()
+    {
+        lock (_requestStateLock) _activeRequests--;
     }
 
     private void CleanupExpiredArtifacts()
