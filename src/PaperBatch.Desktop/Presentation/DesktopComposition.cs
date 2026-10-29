@@ -411,6 +411,7 @@ internal sealed class ProductionPresentationSources :
         var inputs = paths.Select(path => new SourceInput(path, IntentionalCopy: IsRepeatedPath(path))).ToArray();
         var prepared = await _intake.PrepareAsync(inputs, cancellationToken: cancellationToken).ConfigureAwait(false);
         var queueItemIdBySnapshot = new Dictionary<string, string>(StringComparer.Ordinal);
+        var importedItems = new List<QueueItemSnapshot>(prepared.Items.Length);
         try
         {
             string[] existingIds;
@@ -457,12 +458,13 @@ internal sealed class ProductionPresentationSources :
                 lock (_queueStateSync)
                 {
                     _queue.Add(item);
+                    importedItems.Add(item);
                     _queueLocations[id] = source.SourcePath;
                     _findings[id] = findings;
                     _queueRevision++;
                 }
             }
-            lock (_queueStateSync) return _queue.Skip(_queue.Count - prepared.Items.Length).ToArray();
+            return importedItems.ToArray();
         }
         finally
         {
