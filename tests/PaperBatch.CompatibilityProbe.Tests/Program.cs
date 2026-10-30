@@ -218,6 +218,7 @@ var tests = new List<(string Name, Action Run)>
     ("expired runs are pruned only when retention allows it", CoreTests.ExpiredRunsArePrunedOnlyWhenRetentionAllowsIt),
     ("store initialization prunes expired runs", CoreTests.StoreInitializationPrunesExpiredRuns),
     ("expired run artifacts are reclaimed without deleting shared live artifacts", CoreTests.ExpiredRunArtifactsAreRemovedOnlyWhenNoRetainedRunReferencesThem),
+    ("corrupt expired artifacts do not block status or delete retained artifacts", CoreTests.CorruptExpiredArtifactDoesNotBlockCoordinatorStatusOrDeleteRetainedArtifacts),
     ("run creation idempotency replays matching requests", CoreTests.RunCreationIdempotencyReplaysMatchingRequests),
     ("submission intent is durable and idempotent", CoreTests.SubmissionIntentIsDurableAndIdempotent),
     ("print capabilities fail closed and map exact settings", PrintingTests.CapabilitiesRejectUnsupportedAndMapExactOptions),
