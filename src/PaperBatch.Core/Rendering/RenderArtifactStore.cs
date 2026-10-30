@@ -161,21 +161,22 @@ public sealed class RenderArtifactStore
             if ((attributes & FileAttributes.ReparsePoint) != 0)
                 throw new IOException("An artifact directory cannot be a reparse point.");
             var entries = Directory.GetFileSystemEntries(path);
-            if (entries.Length != 2 || !entries.Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal)
-                    .SetEquals(["content.pdf", "receipt.json"]))
+            if (entries.Any(entry => Path.GetFileName(entry) is not ("content.pdf" or "receipt.json")))
                 throw new IOException("An artifact directory contains unexpected entries.");
-            foreach (var entry in entries)
-            {
-                if ((File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0)
-                    throw new IOException("An artifact file cannot be a reparse point.");
-            }
-            _ = ReadReceipt(artifactId);
-            using (_ = OpenRead(artifactId)) { }
-            foreach (var entry in entries) File.Delete(entry);
-            Directory.Delete(path);
+            foreach (var entry in entries) EnsureNoReparsePoints(entry);
+            Directory.Delete(path, recursive: true);
             deleted.Add(artifactId);
         }
         return deleted;
+    }
+
+    private static void EnsureNoReparsePoints(string path)
+    {
+        var attributes = File.GetAttributes(path);
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+            throw new IOException("An artifact entry cannot be a reparse point.");
+        if ((attributes & FileAttributes.Directory) == 0) return;
+        foreach (var entry in Directory.GetFileSystemEntries(path)) EnsureNoReparsePoints(entry);
     }
 
     private static bool IsArtifactId(string artifactId) =>

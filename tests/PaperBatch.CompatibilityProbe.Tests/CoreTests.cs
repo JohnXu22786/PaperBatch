@@ -524,6 +524,67 @@ internal static class CoreTests
         using var unresolvedStillReadable = artifacts.OpenRead(unresolvedArtifact.Artifact.ArtifactId);
     }
 
+    internal static void CorruptExpiredArtifactDoesNotBlockCoordinatorStatusOrDeleteRetainedArtifacts()
+    {
+        using var temporary = new TemporaryDirectory();
+        var dataRoot = temporary.Path;
+        var artifactsRoot = Path.Combine(dataRoot, "RenderArtifacts");
+        var artifacts = new PaperBatch.Core.Rendering.RenderArtifactStore(artifactsRoot);
+        var retainedArtifact = artifacts.PersistPdfAsync(new MemoryStream(RendererTests.OnePagePdf()), "test-renderer", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        const string expiredArtifactId = "artifact_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var expiredArtifactDirectory = Path.Combine(artifactsRoot, expiredArtifactId);
+        Directory.CreateDirectory(expiredArtifactDirectory);
+        File.WriteAllText(Path.Combine(expiredArtifactDirectory, "content.pdf"), "corrupt PDF");
+        File.WriteAllText(Path.Combine(expiredArtifactDirectory, "receipt.json"), "not valid JSON");
+        const string incompleteArtifactId = "artifact_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        var incompleteArtifactDirectory = Path.Combine(artifactsRoot, incompleteArtifactId);
+        Directory.CreateDirectory(incompleteArtifactDirectory);
+        File.WriteAllText(Path.Combine(incompleteArtifactDirectory, "content.pdf"), "corrupt PDF with missing receipt");
+        const string directoryArtifactId = "artifact_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        var directoryArtifactDirectory = Path.Combine(artifactsRoot, directoryArtifactId);
+        Directory.CreateDirectory(directoryArtifactDirectory);
+        File.WriteAllText(Path.Combine(directoryArtifactDirectory, "content.pdf"), "corrupt PDF");
+        var receiptDirectory = Path.Combine(directoryArtifactDirectory, "receipt.json");
+        Directory.CreateDirectory(receiptDirectory);
+        File.WriteAllText(Path.Combine(receiptDirectory, "nested-corruption"), "corrupt receipt data");
+
+        var runs = new SqliteRunStore(Path.Combine(dataRoot, "runs.db"));
+        runs.Initialize();
+        var corruptArtifact = new PaperBatch.Core.Rendering.StoredPdfArtifact(
+            new PaperBatch.Core.Rendering.PdfArtifact(expiredArtifactId, new string('b', 64), 10), "test-renderer", "1",
+            new Dictionary<string, string>());
+        runs.CreateRun(CreateRunWithArtifact("expired-corrupt-artifact", corruptArtifact), "expired-corrupt-artifact",
+            new RetentionMetadata(DateTimeOffset.UtcNow.AddDays(-1), RetainWhileUnresolved: false));
+        var incompleteArtifact = new PaperBatch.Core.Rendering.StoredPdfArtifact(
+            new PaperBatch.Core.Rendering.PdfArtifact(incompleteArtifactId, new string('c', 64), 32), "test-renderer", "1",
+            new Dictionary<string, string>());
+        runs.CreateRun(CreateRunWithArtifact("expired-incomplete-artifact", incompleteArtifact), "expired-incomplete-artifact",
+            new RetentionMetadata(DateTimeOffset.UtcNow.AddDays(-1), RetainWhileUnresolved: false));
+        var directoryArtifact = new PaperBatch.Core.Rendering.StoredPdfArtifact(
+            new PaperBatch.Core.Rendering.PdfArtifact(directoryArtifactId, new string('d', 64), 10), "test-renderer", "1",
+            new Dictionary<string, string>());
+        runs.CreateRun(CreateRunWithArtifact("expired-directory-artifact", directoryArtifact), "expired-directory-artifact",
+            new RetentionMetadata(DateTimeOffset.UtcNow.AddDays(-1), RetainWhileUnresolved: false));
+        runs.CreateRun(CreateRunWithArtifact("retained-valid-artifact", retainedArtifact), "retained-valid-artifact",
+            new RetentionMetadata(DateTimeOffset.UtcNow.AddDays(30), RetainWhileUnresolved: true));
+
+        var handler = new ProductionCoordinatorRequestHandler(dataRoot);
+        var request = new IpcRequestEnvelope(1, Guid.NewGuid(), "runtime.status", null, JsonDocument.Parse("{}").RootElement.Clone());
+        var response = handler.HandleAsync(request).AsTask().GetAwaiter().GetResult();
+
+        Assert.True(response.Error is null);
+        Assert.Equal(false, response.Payload!.Value.GetProperty("prepare").GetBoolean());
+        Assert.False(Directory.Exists(expiredArtifactDirectory));
+        Assert.False(Directory.Exists(incompleteArtifactDirectory));
+        Assert.False(Directory.Exists(directoryArtifactDirectory));
+        Assert.True(runs.GetRun("expired-corrupt-artifact") is null);
+        Assert.True(runs.GetRun("expired-incomplete-artifact") is null);
+        Assert.True(runs.GetRun("expired-directory-artifact") is null);
+        Assert.True(runs.GetRun("retained-valid-artifact") is not null);
+        using var retainedContent = artifacts.OpenRead(retainedArtifact.Artifact.ArtifactId);
+    }
+
     internal static void StoreInitializationPrunesExpiredRuns()
     {
         using var temporary = new TemporaryDirectory();
