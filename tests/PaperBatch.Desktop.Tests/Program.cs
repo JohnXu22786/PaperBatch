@@ -34,6 +34,7 @@ var tests = new (string Name, Action Run)[]
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
     ("overlapping imports return only their own rows and keep the view-model queue complete", OverlappingImportsKeepOperationRowsIsolated),
     ("real production queue import reports per-format intake and renderer outcomes", ApplicationImportEvidenceTests.ProductionQueueImportReportsFormatOutcomes),
+    ("pinned LibreOffice version accepts its release build identity", ApplicationImportEvidenceTests.PinnedLibreOfficeVersionAcceptsReleaseBuildIdentity),
     ("production renderer composition requires an explicit LibreOffice pin while keeping PDFium separate", ProductionRendererCompositionRequiresExplicitPins),
     ("intentional duplicate sources have independent queue row identities", IntentionalDuplicateQueueRowsRemainIndependent),
     ("cancelled renderer batch releases every captured snapshot", CancelledRendererBatchReleasesEverySnapshot),

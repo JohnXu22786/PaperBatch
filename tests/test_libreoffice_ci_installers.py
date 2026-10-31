@@ -99,6 +99,8 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         linux = (ROOT / "tools/install_libreoffice_linux.sh").read_text(encoding="utf-8")
         self.assertIn("gpgv --status-fd=1", linux)
         self.assertIn("sudo chmod +t /opt", linux)
+        self.assertIn("sudo apt-get install -y util-linux", linux)
+        self.assertIn("command -v prlimit", linux)
         self.assertIn("engine='/opt/libreoffice26.2/program/soffice.bin'", linux)
         self.assertIn("launcher='/opt/libreoffice26.2/program/soffice'", linux)
         self.assertNotIn("cp -a", linux)
@@ -357,7 +359,7 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertEqual(malformed_status, 1)
         self.assertIn("not a pass", malformed)
 
-    def test_application_import_summary_reports_actual_pinned_version_with_build_suffix(self):
+    def test_application_import_summary_reports_actual_pinned_release_identity_suffix(self):
         context = {
             "PB_SOURCE_COMMIT": "a" * 40, "GITHUB_WORKFLOW": "CI", "GITHUB_RUN_ID": "123",
             "GITHUB_RUN_ATTEMPT": "2", "RUNNER_OS": "Linux", "RUNNER_NAME": "Hosted Agent",
@@ -383,12 +385,15 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
             "workflow": "CI", "runId": "123", "runAttempt": "2", "runnerOs": "Linux", "runnerImage": "ubuntu-24.04",
             "libreOffice": {"version": "LibreOffice 26.2.2.2 Build 2", "engineSha256": "c" * 64},
             "outcomes": outcomes, "preparationAvailable": False,
-            "evidenceLimits": ["PDFium remains separately required", "No Microsoft Office/WPS equivalence", "synthetic inputs", "no physical output"],
+            "evidenceLimits": ["PDFium remains separately required", "No Microsoft Office/WPS equivalence", "synthetic inputs", "no physical output", "Limits: 512 MiB per source and final PDF; Linux RLIMIT_FSIZE is a hard per-file cap; Windows output monitoring is best-effort and may overshoot before the final 512 MiB check; neither OS caps aggregate profile/cache/temp storage. One conversion runs at a time across processes sharing the same per-user PaperBatch data root; timeout or cancellation stops and reaps the owned process tree before operation-directory cleanup."],
         }
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, context, clear=True):
             path = Path(directory) / "report.json"
             path.write_text(json.dumps(report), encoding="utf-8")
             rendered, status = build_application_import_ci_summary.render(path)
+            report["libreOffice"]["version"] = "LibreOffice 26.2.2.2 1f77d10d6938fd34972958f64b2bcfa54f8b1ba5"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            release_hash_version, release_hash_status = build_application_import_ci_summary.render(path)
             report["libreOffice"]["version"] = "LibreOffice 26.2.2.20 Build 2"
             path.write_text(json.dumps(report), encoding="utf-8")
             wrong_version, wrong_version_status = build_application_import_ci_summary.render(path)
@@ -398,9 +403,15 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
             report["libreOffice"]["version"] = "LibreOffice 26.2.2.2 "
             path.write_text(json.dumps(report), encoding="utf-8")
             trailing_space, trailing_space_status = build_application_import_ci_summary.render(path)
+            report["libreOffice"]["version"] = "LibreOffice 26.2.2.2 Build 2"
+            report["evidenceLimits"] = ["PDFium remains separately required", "No Microsoft Office/WPS equivalence"]
+            path.write_text(json.dumps(report), encoding="utf-8")
+            missing_limits, missing_limits_status = build_application_import_ci_summary.render(path)
 
         self.assertEqual(status, 0)
         self.assertIn("LibreOffice 26.2.2.2 Build 2", rendered)
+        self.assertEqual(release_hash_status, 0)
+        self.assertIn("LibreOffice 26.2.2.2 1f77d10d6938fd34972958f64b2bcfa54f8b1ba5", release_hash_version)
         self.assertIn("with the configured pinned LibreOffice renderer", rendered)
         self.assertIn("supported document formats produced persisted artifacts", rendered)
         self.assertEqual(wrong_version_status, 1)
@@ -409,6 +420,8 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertIn("not a pass", unrelated_suffix)
         self.assertEqual(trailing_space_status, 1)
         self.assertIn("not a pass", trailing_space)
+        self.assertEqual(missing_limits_status, 1)
+        self.assertIn("not a pass", missing_limits)
 
     def test_application_import_summary_rejects_malformed_windows_prepared_artifact(self):
         context = {
@@ -440,7 +453,7 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
             "workflow": "CI", "runId": "123", "runAttempt": "2", "runnerOs": "Windows", "runnerImage": "win22",
             "libreOffice": {"version": "LibreOffice 26.2.2.2 Build 2", "engineSha256": "c" * 64},
             "outcomes": outcomes, "preparationAvailable": False, "mixedBatchPreparation": mixed,
-            "evidenceLimits": ["PDFium remains separately required", "No Microsoft Office/WPS equivalence", "synthetic inputs", "no physical output"],
+            "evidenceLimits": ["PDFium remains separately required", "No Microsoft Office/WPS equivalence", "synthetic inputs", "no physical output", "Limits: 512 MiB per source and final PDF; Linux RLIMIT_FSIZE is a hard per-file cap; Windows output monitoring is best-effort and may overshoot before the final 512 MiB check; neither OS caps aggregate profile/cache/temp storage. One conversion runs at a time across processes sharing the same per-user PaperBatch data root; timeout or cancellation stops and reaps the owned process tree before operation-directory cleanup."],
         }
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, context, clear=True):
             path = Path(directory) / "report.json"

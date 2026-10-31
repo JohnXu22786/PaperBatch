@@ -39,7 +39,7 @@ def _matches_pinned_engine_version(observed: Any, pinned: Any) -> bool:
     if observed == pinned:
         return True
     suffix = observed[len(pinned):] if observed.startswith(pinned) else ""
-    return bool(re.fullmatch(r"(?: Build [0-9]+| [0-9]+\(Build:[0-9]+\))", suffix))
+    return bool(re.fullmatch(r"(?: Build [0-9]+| [0-9]+\(Build:[0-9]+\)| [0-9a-f]{7,40})", suffix))
 
 
 def render(path: Path) -> tuple[str, int]:
@@ -143,10 +143,18 @@ def _valid_report(report: Any) -> bool:
     if configured:
         pinned_version = os.environ.get("PAPERBATCH_LO_EXPECTED_VERSION")
         observed_version = engine.get("version") if isinstance(engine, dict) else None
+        resource_limits_reported = isinstance(limits, list) and any(
+            isinstance(item, str)
+            and "Linux RLIMIT_FSIZE is a hard per-file cap" in item
+            and "Windows output monitoring is best-effort and may overshoot" in item
+            and "neither OS caps aggregate profile/cache/temp storage" in item
+            for item in limits
+        )
         if (not isinstance(engine, dict) or not isinstance(pinned_version, str)
                 or not _matches_pinned_engine_version(observed_version, pinned_version)
                 or engine.get("engineSha256") != os.environ.get("PAPERBATCH_LO_ENGINE_SHA256")
-                or not re.fullmatch(r"[0-9a-f]{64}", str(engine.get("engineSha256", "")))):
+                or not re.fullmatch(r"[0-9a-f]{64}", str(engine.get("engineSha256", "")))
+                or not resource_limits_reported):
             return False
     elif engine is not None:
         return False

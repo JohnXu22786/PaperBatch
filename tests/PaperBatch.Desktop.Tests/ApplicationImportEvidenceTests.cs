@@ -162,12 +162,23 @@ internal static class ApplicationImportEvidenceTests
         }
     }
 
-    private static bool HasPinnedLibreOfficeVersion(string? observed, string? pinned) =>
+    internal static bool HasPinnedLibreOfficeVersion(string? observed, string? pinned) =>
         !string.IsNullOrWhiteSpace(observed) && !string.IsNullOrWhiteSpace(pinned) &&
         (string.Equals(observed, pinned, StringComparison.Ordinal) ||
          Regex.IsMatch(observed,
-             @"\A" + Regex.Escape(pinned) + @"(?: Build [0-9]+| [0-9]+\(Build:[0-9]+\))\z",
+             @"\A" + Regex.Escape(pinned) + @"(?: Build [0-9]+| [0-9]+\(Build:[0-9]+\)| [0-9a-f]{7,40})\z",
              RegexOptions.CultureInvariant));
+
+    internal static void PinnedLibreOfficeVersionAcceptsReleaseBuildIdentity()
+    {
+        const string pinned = "LibreOffice 26.2.2.2";
+        Require(HasPinnedLibreOfficeVersion(pinned, pinned), "The exact pinned version was rejected.");
+        Require(HasPinnedLibreOfficeVersion(pinned + " Build 2", pinned), "The Windows MSI build suffix was rejected.");
+        Require(HasPinnedLibreOfficeVersion(pinned + " 1f77d10d6938fd34972958f64b2bcfa54f8b1ba5", pinned),
+            "The Linux release commit identity suffix was rejected.");
+        Require(!HasPinnedLibreOfficeVersion("LibreOffice 26.2.2.20", pinned), "A shared-prefix version was accepted.");
+        Require(!HasPinnedLibreOfficeVersion(pinned + " local build", pinned), "An unrecognized suffix was accepted.");
+    }
 
     private static object PrepareAndFakePrintMixedBatch(
         (string Name, string Extension, string ExpectedOutcome, string Path, string Sha256)[] fixtures,
@@ -359,6 +370,7 @@ internal static class ApplicationImportEvidenceTests
                 "This runs PaperBatch's production queue import path and registered production renderers with synthetic fixtures.",
                 "PDF and PNG pass-through/raster rendering are accepted. Configured LibreOffice conversion records the actual engine version and executable SHA-256; conversion is not Microsoft Office/WPS equivalence or visual-fidelity evidence.",
                 "The private conversion profile disables macros and external-link refresh. PDFium remains separately required for page inspection, composition, and batch preparation.",
+                "Limits: 512 MiB per source and final PDF; Linux RLIMIT_FSIZE is a hard per-file cap; Windows output monitoring is best-effort and may overshoot before the final 512 MiB check; neither OS caps aggregate profile/cache/temp storage. One conversion runs at a time across processes sharing the same per-user PaperBatch data root; timeout or cancellation stops and reaps the owned process tree before operation-directory cleanup.",
                 "Malformed OOXML is rejected before rendering. macOS conversion remains unsupported.",
                 "Windows mixed-batch preparation and submission use an injected fake print backend that creates no OS print job.",
                 "No Office/WPS compatibility, visual fidelity, desktop printing, or physical output is established."

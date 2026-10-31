@@ -34,7 +34,8 @@ sudo apt-get update
 # account cannot replace the root-owned installation or its entries, while
 # preserving LibreOffice's package-defined install location and config paths.
 sudo chmod +t /opt
-sudo apt-get install -y "${debs[@]}"
+sudo apt-get install -y util-linux "${debs[@]}"
+command -v prlimit >/dev/null 2>&1 || { echo 'The Linux file-size limit utility is unavailable.' >&2; exit 1; }
 engine='/opt/libreoffice26.2/program/soffice.bin'
 launcher='/opt/libreoffice26.2/program/soffice'
 [[ -f "$engine" && -x "$engine" && -f "$launcher" ]] || { echo 'The verified LibreOffice installation is missing its program engine or launcher.' >&2; exit 1; }
