@@ -375,6 +375,71 @@ internal static class PrintingTests
         }
     }
 
+    internal static void Win32CapabilityEnumerationFailuresAreRejectedBeforeSubmission()
+    {
+        foreach (var failingCapabilityRead in new[] { 1, 2 })
+        {
+            using var fixture = new Fixture();
+            var backend = new TestOnlySimulatedPrintBackend(Capabilities())
+            {
+                Win32CapabilityFailureOnRead = failingCapabilityRead
+            };
+            var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "unused", fixture.Artifacts);
+
+            var result = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun,
+                $"win32-capability-read-{failingCapabilityRead}", FixedTime).GetAwaiter().GetResult();
+
+            Assert.Equal(PrintSubmissionStatus.Rejected, result.Status);
+            Assert.Contains("Winspool capability enumeration failed", result.Reason!);
+            Assert.Equal(JobState.Ready, result.Job!.State);
+            Assert.Equal(JobState.Ready, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+            Assert.Equal(1, fixture.Store.GetTransitions(fixture.Job.JobId).Length);
+            Assert.Equal(0, backend.SubmissionCount);
+            Assert.Equal(0, backend.OsSubmissionCount);
+        }
+    }
+
+    internal static void Win32CapabilityEnumerationFailureReturnsStructuredIpcResponse()
+    {
+        using var fixture = new Fixture();
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities()) { Win32CapabilityFailureOnRead = 1 };
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "unused", fixture.Artifacts);
+        var handler = new ProductionCoordinatorRequestHandler(fixture.Store, coordinator);
+        var pipeName = "paperbatch-test-" + Guid.NewGuid().ToString("N");
+        var server = new NamedPipeCoordinatorServer(pipeName, handler.HandleAsync);
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+        try
+        {
+            var transport = new NamedPipeLocalCoordinatorTransport(pipeName);
+            using var payload = JsonDocument.Parse(JsonSerializer.Serialize(new { arguments = new[] { fixture.Job.JobId } }));
+            var request = new IpcRequestEnvelope(IpcJson.CurrentProtocolVersion, Guid.NewGuid(),
+                "cli.submit", "win32-capability-ipc", payload.RootElement.Clone());
+            var response = transport.SendAsync(request).AsTask().GetAwaiter().GetResult();
+
+            Assert.True(response.Error is null, "Capability enumeration failure should return a structured submit response.");
+            Assert.Equal("Rejected", response.Payload!.Value.GetProperty("status").GetString());
+            Assert.Equal(JobState.Ready, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+            Assert.Equal(1, fixture.Store.GetTransitions(fixture.Job.JobId).Length);
+            Assert.Equal(0, backend.SubmissionCount);
+            Assert.Equal(0, backend.OsSubmissionCount);
+
+            using var capabilitiesPayload = JsonDocument.Parse("{\"maximumMessageBytes\":262144}");
+            var capabilitiesRequest = new IpcRequestEnvelope(IpcJson.CurrentProtocolVersion, Guid.NewGuid(),
+                "runtime.capabilities", null, capabilitiesPayload.RootElement.Clone());
+            var capabilitiesResponse = transport.SendAsync(capabilitiesRequest).AsTask().GetAwaiter().GetResult();
+            Assert.True(capabilitiesResponse.Error is null, "The named pipe should remain usable after the rejected submit.");
+            Assert.True(capabilitiesResponse.Payload!.Value.GetProperty("protocolVersions").GetArrayLength() > 0);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            try { serverTask.GetAwaiter().GetResult(); }
+            catch (OperationCanceledException) { }
+            server.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+    }
+
     internal static void RemovedQueueDuringSubmitReturnsStructuredIpcRejection()
     {
         using var fixture = new Fixture();
@@ -1315,6 +1380,7 @@ internal static class PrintingTests
         public bool ThrowBeforeSubmit { get; init; }
         public bool ThrowCancellationBeforeSubmit { get; set; }
         public bool ThrowCapabilityLookupBeforeSubmit { get; set; }
+        public int? Win32CapabilityFailureOnRead { get; init; }
         public int? MissingQueueOnCapabilityRead { get; init; }
         public int ThrowCancellationOnSubmissionNumber { get; init; }
         public bool ThrowCapabilityAfterSubmit { get; init; }
@@ -1340,6 +1406,8 @@ internal static class PrintingTests
         public Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(string queueIdentity, CancellationToken cancellationToken = default)
         {
             var capabilityRead = Interlocked.Increment(ref _capabilityReads);
+            if (capabilityRead == Win32CapabilityFailureOnRead)
+                return Task.FromException<PrinterCapabilitySnapshot>(new Win32Exception("Winspool capability enumeration failed."));
             if (capabilityRead == MissingQueueOnCapabilityRead)
                 return Task.FromException<PrinterCapabilitySnapshot>(new KeyNotFoundException("The selected local printer queue is no longer present."));
             return Task.FromResult(capabilityRead >= 2 ? CapabilitiesOnSecondRead ?? capabilities : capabilities);

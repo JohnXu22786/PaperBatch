@@ -2,6 +2,7 @@ using PaperBatch.Core.Domain;
 using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Serialization;
 using PaperBatch.Core.Rendering;
+using System.ComponentModel;
 
 namespace PaperBatch.Core.Printing;
 
@@ -115,6 +116,10 @@ public sealed class WindowsPrintCoordinator(
         {
             return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job, exception.Message);
         }
+        catch (Win32Exception exception)
+        {
+            return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job, exception.Message);
+        }
 
         PrinterCapabilitySnapshot current;
         WindowsPrintJobOptions options;
@@ -131,6 +136,10 @@ public sealed class WindowsPrintCoordinator(
             return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job, exception.Message);
         }
         catch (KeyNotFoundException exception)
+        {
+            return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job, exception.Message);
+        }
+        catch (Win32Exception exception)
         {
             return new PrintSubmissionResult(PrintSubmissionStatus.Rejected, job, exception.Message);
         }
