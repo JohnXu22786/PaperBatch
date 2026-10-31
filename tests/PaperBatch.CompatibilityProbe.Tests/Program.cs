@@ -234,6 +234,7 @@ var tests = new List<(string Name, Action Run)>
     ("accepted cancellation is observed only after a cancelled status", PrintingTests.AcceptedCancellationIsObservedOnlyAfterCancelledStatus),
     ("unknown print status after a cancel request does not confirm cancellation", PrintingTests.UnknownStatusDoesNotConfirmCancellationAfterRequest),
     ("unknown queue status requires review and blocks resubmission", PrintingTests.UnknownQueueStatusRequiresReviewAndBlocksResubmission),
+    ("offline queue status requires review and blocks resubmission", PrintingTests.OfflineQueueStatusRequiresReviewAndBlocksResubmission),
     ("concurrent print jobs keep separate submission nonces", PrintingTests.ConcurrentJobsKeepDistinctReceipts),
     ("print cancellation race preserves the winning OS status", PrintingTests.CancellationRacePreservesOsStatus),
     ("delayed processing status does not overwrite cancellation", PrintingTests.DelayedProcessingStatusDoesNotOverwriteCancellation),

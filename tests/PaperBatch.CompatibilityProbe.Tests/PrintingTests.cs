@@ -460,6 +460,31 @@ internal static class PrintingTests
         Assert.Equal(1, backend.OsSubmissionCount);
     }
 
+    internal static void OfflineQueueStatusRequiresReviewAndBlocksResubmission()
+    {
+        const uint offline = 0x00000020u;
+        const uint printing = 0x00000010u;
+        Assert.Equal(PrintBackendJobStatus.Unknown, WindowsGdiNativeAdapter.MapWinspoolJobStatus(offline));
+        var offlineWhilePrinting = WindowsGdiNativeAdapter.MapWinspoolJobStatus(offline | printing);
+        Assert.Equal(PrintBackendJobStatus.Unknown, offlineWhilePrinting);
+
+        using var fixture = new Fixture();
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "run-nonce-1", fixture.Artifacts);
+        coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "offline-submit", FixedTime).GetAwaiter().GetResult();
+
+        backend.LastStatus = offlineWhilePrinting;
+        var refreshed = coordinator.RefreshStatusAsync(fixture.Job.JobId, FixedTime.AddMinutes(1)).GetAwaiter().GetResult();
+        Assert.Equal(JobState.NeedsReviewUnknown, refreshed.State);
+        Assert.Equal(JobState.NeedsReviewUnknown, fixture.Store.GetJob(fixture.Job.JobId)!.State);
+
+        var replayed = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun, "offline-submit", FixedTime.AddMinutes(2))
+            .GetAwaiter().GetResult();
+        Assert.Equal(PrintSubmissionStatus.NeedsReviewUnknown, replayed.Status);
+        Assert.Equal(1, backend.SubmissionCount);
+        Assert.Equal(1, backend.OsSubmissionCount);
+    }
+
     internal static void SubmissionRejectsLegacyRunWithoutFinalArtifact()
     {
         using var fixture = new Fixture();
