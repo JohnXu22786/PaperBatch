@@ -147,20 +147,16 @@ jobs:
         id: build-desktop
         run: dotnet build src/PaperBatch.Desktop/PaperBatch.Desktop.csproj --no-restore -p:NuGetAudit=false
 
-      - name: Run focused headless presentation tests
-        id: headless-desktop-tests
-        env:
-          PAPERBATCH_APPLICATION_IMPORT_REPORT: ${{ runner.temp }}/paperbatch-application-import-report.json
-        run: dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
+      - name: Install pinned LibreOffice on hosted Linux
+        id: install-libreoffice-linux
+        if: runner.os == 'Linux'
+        run: bash tools/install_libreoffice_linux.sh
 
-      - name: Upload bounded PaperBatch application import report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: paperbatch-application-import-${{ runner.os }}
-          path: ${{ runner.temp }}/paperbatch-application-import-report.json
-          if-no-files-found: warn
-          retention-days: 14
+      - name: Install pinned LibreOffice on hosted Windows
+        id: install-libreoffice-windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/install_libreoffice_windows.ps1
 
       - name: Download and verify temporary PDFium fixture runtime
         if: runner.os == 'Windows'
@@ -179,6 +175,33 @@ jobs:
           Add-Content $env:GITHUB_ENV "PAPERBATCH_PDFIUM_TEST_PATH=$($dll.FullName)"
           Add-Content $env:GITHUB_ENV 'PAPERBATCH_PDFIUM_TEST_SHA256=a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f'
           Add-Content $env:GITHUB_ENV 'PAPERBATCH_PDFIUM_TEST_VERSION=chromium/8111'
+          Add-Content $env:GITHUB_ENV "PAPERBATCH_PDFIUM_RUNTIME_PATH=$($dll.FullName)"
+          Add-Content $env:GITHUB_ENV 'PAPERBATCH_PDFIUM_RUNTIME_SHA256=a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f'
+
+      - name: Run focused headless presentation tests
+        id: headless-desktop-tests
+        env:
+          PAPERBATCH_APPLICATION_IMPORT_REPORT: ${{ runner.temp }}/paperbatch-application-import-report.json
+          PAPERBATCH_LO_DIAGNOSTICS: '1'
+        run: python tools/capture_bounded_command_output.py --output "${{ runner.temp }}/paperbatch-desktop-test-output.txt" -- dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
+
+      - name: Upload bounded focused desktop test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paperbatch-desktop-test-output-${{ runner.os }}
+          path: ${{ runner.temp }}/paperbatch-desktop-test-output.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload bounded PaperBatch application import report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paperbatch-application-import-${{ runner.os }}
+          path: ${{ runner.temp }}/paperbatch-application-import-report.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Record .NET SDK version for print report
         if: runner.os == 'Windows'
@@ -209,6 +232,8 @@ jobs:
       - name: Publish bounded exact-run PaperBatch import summary
         id: application-import-summary
         if: always()
+        env:
+          PAPERBATCH_DESKTOP_TEST_OUTPUT: ${{ runner.temp }}/paperbatch-desktop-test-output.txt
         shell: bash
         run: python tools/build_application_import_ci_summary.py "$RUNNER_TEMP/paperbatch-application-import-report.json"
 
@@ -472,7 +497,7 @@ jobs:
           PB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
           PB_JOB_RESULT: ${{ job.status }}
           PB_JOB_NAME: ${{ matrix.os }} / .NET 10, Avalonia, and Python
-          PB_STEP_OUTCOMES: '{"restore":"${{ steps.restore.outcome }}","build_core":"${{ steps.build-core.outcome }}","build_probe":"${{ steps.build-probe.outcome }}","build_desktop":"${{ steps.build-desktop.outcome }}","headless_tests":"${{ steps.headless-desktop-tests.outcome }}","application_import_summary":"${{ steps.application-import-summary.outcome }}","managed_tests":"${{ steps.managed-test-runner.outcome }}","python_compile":"${{ steps.compile-python.outcome }}","python_tests_linux":"${{ steps.python-tests-linux.outcome }}","python_tests_macos":"${{ steps.python-tests-macos.outcome }}","python_tests_windows":"${{ steps.python-tests-windows.outcome }}","windows_runner_capture":"${{ steps.windows-runner-capture.outcome }}"}'
+          PB_STEP_OUTCOMES: '{"restore":"${{ steps.restore.outcome }}","build_core":"${{ steps.build-core.outcome }}","build_probe":"${{ steps.build-probe.outcome }}","build_desktop":"${{ steps.build-desktop.outcome }}","install_libreoffice_linux":"${{ steps.install-libreoffice-linux.outcome }}","install_libreoffice_windows":"${{ steps.install-libreoffice-windows.outcome }}","headless_tests":"${{ steps.headless-desktop-tests.outcome }}","application_import_summary":"${{ steps.application-import-summary.outcome }}","managed_tests":"${{ steps.managed-test-runner.outcome }}","python_compile":"${{ steps.compile-python.outcome }}","python_tests_linux":"${{ steps.python-tests-linux.outcome }}","python_tests_macos":"${{ steps.python-tests-macos.outcome }}","python_tests_windows":"${{ steps.python-tests-windows.outcome }}","windows_runner_capture":"${{ steps.windows-runner-capture.outcome }}"}'
         run: python tools/build_ci_job_summary.py --title "Managed tests and runner evidence" --report windows-print-runner-evidence.json
 
   windows-pdfium-community-proof:

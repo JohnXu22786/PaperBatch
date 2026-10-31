@@ -1,8 +1,11 @@
 using PaperBatch.Core.Intake;
 using PaperBatch.Core.Rendering;
+using PaperBatch.Core.Ipc;
+using PaperBatch.Core.Properties;
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Runtime.Versioning;
 using System.Text;
 using System.Diagnostics;
@@ -10,6 +13,359 @@ using System.Security.Cryptography;
 
 internal static class RendererTests
 {
+    public static void LibreOfficeUsesThePackagedCommandLineLauncher()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-launcher-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var programDirectory = Path.Combine(root, "program");
+            Directory.CreateDirectory(programDirectory);
+            var enginePath = Path.Combine(programDirectory, "soffice.bin");
+            var mismatchedEnginePath = Path.Combine(programDirectory, "other-engine.bin");
+            var launcherPath = Path.Combine(programDirectory, OperatingSystem.IsWindows() ? "soffice.com" : "soffice");
+            File.WriteAllText(enginePath, "pinned-engine-placeholder");
+            File.WriteAllText(mismatchedEnginePath, "different-engine-placeholder");
+            File.WriteAllText(launcherPath, "packaged-launcher-placeholder");
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+            var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+            var adapter = new LibreOfficeRendererAdapter(cache, artifacts, null, enginePath, new string('a', 64));
+            var startInfo = adapter.CreateBaseStartInfo(new Uri(Path.Combine(root, "profile")));
+
+            Assert.Equal(launcherPath, startInfo.FileName);
+            Assert.Equal(programDirectory, startInfo.WorkingDirectory);
+            Assert.True(startInfo.ArgumentList.Contains("--headless"));
+            Assert.Throws<ArgumentException>(() => new LibreOfficeRendererAdapter(cache, artifacts, null,
+                mismatchedEnginePath, new string('a', 64)));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void LibreOfficeFileSizeLimitWrapperPreservesSanitizedEnvironment()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-prlimit-env-{Guid.NewGuid():N}");
+        var programDirectory = Path.Combine(root, "program");
+        Directory.CreateDirectory(programDirectory);
+        var engine = Path.Combine(programDirectory, "soffice.bin");
+        var launcher = Path.Combine(programDirectory, "soffice");
+        File.WriteAllText(engine, "pinned-engine-placeholder");
+        File.WriteAllText(launcher, "packaged-launcher-placeholder");
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+        var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+        var adapter = new LibreOfficeRendererAdapter(cache, artifacts, null, engine, new string('a', 64));
+        var priorPreload = Environment.GetEnvironmentVariable("LD_PRELOAD");
+        try
+        {
+            Environment.SetEnvironmentVariable("LD_PRELOAD", "/tmp/untrusted-preload.so");
+            var sanitizedEngineStart = adapter.CreateBaseStartInfo(new Uri(Path.Combine(root, "profile")));
+            Assert.False(sanitizedEngineStart.Environment.ContainsKey("LD_PRELOAD"));
+            var limitedStart = LibreOfficeRendererAdapter.CreateFileSizeLimitedStartInfo(sanitizedEngineStart, 4096);
+            Assert.False(limitedStart.Environment.ContainsKey("LD_PRELOAD"),
+                "The prlimit wrapper reintroduced an LD_PRELOAD removed from the LibreOffice environment.");
+            Assert.Equal(programDirectory, limitedStart.Environment["LD_LIBRARY_PATH"]!);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("LD_PRELOAD", priorPreload);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void LibreOfficeProcessStopsWhenOutputLimitExceeded()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-output-limit-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var outputPath = Path.Combine(root, "unbounded.pdf");
+        var dotnet = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
+        if (string.IsNullOrWhiteSpace(dotnet)) dotnet = OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
+        var startInfo = new ProcessStartInfo(dotnet);
+        startInfo.RedirectStandardOutput = true;
+        startInfo.RedirectStandardError = true;
+        startInfo.ArgumentList.Add(typeof(RendererTests).Assembly.Location);
+        startInfo.ArgumentList.Add("--renderer-output-limit-child");
+        startInfo.ArgumentList.Add(outputPath);
+        const long maximumBytes = 64 * 1024;
+        try
+        {
+            var result = LibreOfficeRendererAdapter.RunOwnedProcessAsync(startInfo, TimeSpan.FromSeconds(5),
+                CancellationToken.None, outputPath, maximumBytes).GetAwaiter().GetResult();
+            Assert.Equal(LibreOfficeRendererAdapter.ConversionProcessStatus.OutputLimitExceeded, result.Status);
+            Assert.True(File.Exists(outputPath));
+            var stoppedLength = new FileInfo(outputPath).Length;
+            Thread.Sleep(100);
+            Assert.Equal(stoppedLength, new FileInfo(outputPath).Length);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [SupportedOSPlatform("linux")]
+    public static void LibreOfficeFileSizeLimitIsEnforcedByTheKernel()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-file-size-limit-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var outputPath = Path.Combine(root, "limited.pdf");
+        const string writerExecutable = "/usr/bin/dd";
+        var startInfo = new ProcessStartInfo(writerExecutable)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add("if=/dev/zero");
+        startInfo.ArgumentList.Add("of=" + outputPath);
+        startInfo.ArgumentList.Add("bs=4096");
+        startInfo.ArgumentList.Add("count=64");
+        startInfo.ArgumentList.Add("status=none");
+        const long maximumBytes = 64 * 1024;
+        try
+        {
+            Assert.True(File.Exists(writerExecutable), "The Linux file-size limit regression needs the coreutils dd writer.");
+            var limitedStartInfo = LibreOfficeRendererAdapter.CreateFileSizeLimitedStartInfo(startInfo, maximumBytes);
+            var result = LibreOfficeRendererAdapter.RunOwnedProcessAsync(limitedStartInfo, TimeSpan.FromSeconds(5),
+                CancellationToken.None).GetAwaiter().GetResult();
+            Assert.Equal(LibreOfficeRendererAdapter.ConversionProcessStatus.Exited, result.Status);
+            Assert.True(result.ExitCode != 0,
+                $"The child writer should fail when the kernel file-size limit is reached (exit={result.ExitCode}, output={result.Output}).");
+            Assert.True(File.Exists(outputPath), $"The limited child did not create its output file (output={result.Output}).");
+            Assert.True(new FileInfo(outputPath).Length <= maximumBytes,
+                $"The kernel file-size limit allowed the child output file to grow past its configured cap (length={new FileInfo(outputPath).Length}).");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void LibreOfficeConversionSlotSerializesAndCancelsWaiters()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-slot-{Guid.NewGuid():N}");
+        var controlRoot = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-slot-control-{Guid.NewGuid():N}");
+        var install = Path.Combine(root, "install");
+        var program = Path.Combine(install, "program");
+        var engine = Path.Combine(program, "soffice.bin");
+        var launcher = Path.Combine(program, "soffice");
+        var splash = Path.Combine(program, "oosplash");
+        var sourcePath = Path.Combine(root, "source.rtf");
+        var pdfPath = Path.Combine(root, "valid.pdf");
+        var markerPath = Path.Combine(controlRoot, "started.txt");
+        var releasePath = Path.Combine(controlRoot, "release.txt");
+        Task<RenderResult>? firstRender = null;
+        try
+        {
+            Directory.CreateDirectory(program);
+            Directory.CreateDirectory(controlRoot);
+            File.SetUnixFileMode(controlRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.WriteAllText(sourcePath, "{\\rtf1\\ansi synthetic concurrency fixture}");
+            File.WriteAllBytes(pdfPath, OnePagePdf());
+            var engineScript = "#!/bin/sh\n" +
+                "for arg in \"$@\"; do if [ \"$arg\" = \"--version\" ]; then echo 'LibreOffice 26.2.2.2'; exit 0; fi; done\n" +
+                "outdir='' previous=''\n" +
+                "for arg in \"$@\"; do if [ \"$previous\" = '--outdir' ]; then outdir=\"$arg\"; fi; previous=\"$arg\"; done\n" +
+                $"printf '%s\\n' \"$$\" >> {QuoteForShell(markerPath)}\n" +
+                $"while [ ! -f {QuoteForShell(releasePath)} ]; do sleep 0.01; done\n" +
+                $"cat {QuoteForShell(pdfPath)} > \"$outdir/source.pdf\"\n";
+            File.WriteAllText(engine, "pinned engine identity fixture\n");
+            File.WriteAllText(launcher, engineScript);
+            File.WriteAllText(splash, "fixture oosplash identity\n");
+            File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(launcher, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(splash, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(program, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(install, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            var snapshots = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+            var snapshot = snapshots.CaptureAsync(sourcePath).GetAwaiter().GetResult();
+            var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(engine))).ToLowerInvariant();
+            var adapter = new LibreOfficeRendererAdapter(snapshots, artifacts, null, engine, digest);
+            var request = new RenderRequest(snapshot.SnapshotId, SourceFormat.Rtf, RendererExecutionContext.BackgroundWorker);
+
+            firstRender = adapter.RenderAsync(request, CancellationToken.None);
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            while (!File.Exists(markerPath) && DateTime.UtcNow < deadline) Thread.Sleep(10);
+            if (!File.Exists(markerPath))
+            {
+                var failedRender = firstRender.GetAwaiter().GetResult();
+                Assert.True(false, $"The first conversion did not reach the fake engine (status={failedRender.Status}, message={failedRender.Message}).");
+            }
+
+            using var waitingCancellation = new CancellationTokenSource();
+            var secondRender = adapter.RenderAsync(request, waitingCancellation.Token);
+            Thread.Sleep(100);
+            waitingCancellation.Cancel();
+            Assert.Equal(RenderStatus.Cancelled, secondRender.GetAwaiter().GetResult().Status);
+            Assert.Equal(1, File.ReadAllLines(markerPath).Length);
+
+            if (Directory.Exists(controlRoot)) File.WriteAllText(releasePath, "continue");
+            Assert.Equal(RenderStatus.Succeeded, firstRender.GetAwaiter().GetResult().Status);
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(controlRoot)) File.WriteAllText(releasePath, "continue");
+                if (firstRender is not null)
+                {
+                    try { firstRender.GetAwaiter().GetResult(); }
+                    catch (Exception) { }
+                }
+            }
+            finally
+            {
+                try
+                {
+                    foreach (var path in new[] { engine, launcher, program, install, root })
+                        if (File.Exists(path) || Directory.Exists(path))
+                            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                }
+                finally
+                {
+                    try
+                    {
+                        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+                    }
+                    finally
+                    {
+                        if (Directory.Exists(controlRoot)) Directory.Delete(controlRoot, recursive: true);
+                    }
+                }
+            }
+        }
+    }
+
+    public static void LibreOfficeInProcessSlotWaitIsBounded()
+    {
+        using var heldSlot = LibreOfficeRendererAdapter.AcquireInProcessConversionSlotAsync(
+            TimeSpan.FromSeconds(1), CancellationToken.None).GetAwaiter().GetResult();
+        Assert.True(heldSlot is not null, "The first in-process conversion slot was not acquired.");
+        var waitingSlot = LibreOfficeRendererAdapter.AcquireInProcessConversionSlotAsync(
+            TimeSpan.FromMilliseconds(100), CancellationToken.None).GetAwaiter().GetResult();
+        Assert.True(waitingSlot is null, "A queued in-process conversion did not stop at its acquisition timeout.");
+        heldSlot!.Dispose();
+        using var releasedSlot = LibreOfficeRendererAdapter.AcquireInProcessConversionSlotAsync(
+            TimeSpan.FromSeconds(1), CancellationToken.None).GetAwaiter().GetResult();
+        Assert.True(releasedSlot is not null, "The slot was not released for the next conversion.");
+    }
+
+    public static void LibreOfficeConversionSlotSerializesAcrossProcesses()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-cross-process-slot-{Guid.NewGuid():N}");
+        var appData = Path.Combine(root, "app-data");
+        var acquiredPath = Path.Combine(root, "child-acquired");
+        var releasePath = Path.Combine(root, "release-child");
+        Directory.CreateDirectory(root);
+        var previousAppData = Environment.GetEnvironmentVariable(AppDataPaths.LocalApplicationDataOverrideVariable);
+        Process? child = null;
+        FileStream? localLease = null;
+        try
+        {
+            Environment.SetEnvironmentVariable(AppDataPaths.LocalApplicationDataOverrideVariable, appData);
+            var dotnet = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
+            if (string.IsNullOrWhiteSpace(dotnet)) dotnet = OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
+            var startInfo = new ProcessStartInfo(dotnet) { RedirectStandardOutput = true, RedirectStandardError = true };
+            startInfo.ArgumentList.Add(typeof(RendererTests).Assembly.Location);
+            startInfo.ArgumentList.Add("--libreoffice-conversion-lock-child");
+            startInfo.ArgumentList.Add(appData);
+            startInfo.ArgumentList.Add(acquiredPath);
+            startInfo.ArgumentList.Add(releasePath);
+            child = Process.Start(startInfo);
+            if (child is null) throw new InvalidOperationException("The cross-process conversion lock child could not start.");
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            while (!File.Exists(acquiredPath) && DateTime.UtcNow < deadline) Thread.Sleep(10);
+            Assert.True(File.Exists(acquiredPath), "The child did not acquire the cross-process conversion lock.");
+
+            using var waitingCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var waitingLease = LibreOfficeRendererAdapter.AcquireCrossProcessConversionSlotAsync(waitingCancellation.Token);
+            Thread.Sleep(150);
+            Assert.False(waitingLease.IsCompleted, "A second process acquired the conversion lock while the child still held it.");
+            File.WriteAllText(releasePath, "release");
+            Assert.True(child.WaitForExit(5000), "The child did not release its conversion lock.");
+            localLease = waitingLease.GetAwaiter().GetResult();
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(root)) File.WriteAllText(releasePath, "release");
+                if (child is not null && !child.HasExited)
+                {
+                    child.Kill(entireProcessTree: true);
+                    child.WaitForExit();
+                }
+            }
+            finally
+            {
+                localLease?.Dispose();
+                child?.Dispose();
+                Environment.SetEnvironmentVariable(AppDataPaths.LocalApplicationDataOverrideVariable, previousAppData);
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    public static void LibreOfficeConversionLockWaitIsBounded()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-lock-timeout-{Guid.NewGuid():N}");
+        var appData = Path.Combine(root, "app-data");
+        var previousAppData = Environment.GetEnvironmentVariable(AppDataPaths.LocalApplicationDataOverrideVariable);
+        FileStream? heldLock = null;
+        try
+        {
+            Environment.SetEnvironmentVariable(AppDataPaths.LocalApplicationDataOverrideVariable, appData);
+            var lockDirectory = Path.Combine(appData, "PaperBatch", "LibreOfficeConversionLocks");
+            Directory.CreateDirectory(lockDirectory);
+            var lockPath = Path.Combine(lockDirectory, "conversion.lock");
+            heldLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            var wait = Stopwatch.StartNew();
+            Assert.Throws<TimeoutException>(() => LibreOfficeRendererAdapter.AcquireCrossProcessConversionSlotAsync(
+                CancellationToken.None, TimeSpan.FromMilliseconds(100)).GetAwaiter().GetResult());
+            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(2), "Lock contention exceeded the configured acquisition timeout.");
+        }
+        finally
+        {
+            heldLock?.Dispose();
+            Environment.SetEnvironmentVariable(AppDataPaths.LocalApplicationDataOverrideVariable, previousAppData);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static int RunLibreOfficeConversionLockChild(string appData, string acquiredPath, string releasePath)
+    {
+        Environment.SetEnvironmentVariable(AppDataPaths.LocalApplicationDataOverrideVariable, appData);
+        using var lease = LibreOfficeRendererAdapter.AcquireCrossProcessConversionSlotAsync(CancellationToken.None)
+            .GetAwaiter().GetResult();
+        File.WriteAllText(acquiredPath, "acquired");
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!File.Exists(releasePath) && DateTime.UtcNow < deadline) Thread.Sleep(10);
+        return File.Exists(releasePath) ? 0 : 1;
+    }
+
+    private static string QuoteForShell(string value) => "'" + value.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
+
+    [SupportedOSPlatform("windows")]
+    public static void WindowsRuntimeAclWriteMaskIgnoresReadOnlyRights()
+    {
+        Assert.False(LibreOfficeRendererAdapter.GrantsWindowsWriteAccess(
+            FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize));
+        Assert.True(LibreOfficeRendererAdapter.GrantsWindowsWriteAccess(FileSystemRights.WriteData));
+        Assert.True(LibreOfficeRendererAdapter.GrantsWindowsWriteAccess(FileSystemRights.Modify));
+        Assert.True(LibreOfficeRendererAdapter.GrantsWindowsWriteAccess(FileSystemRights.Delete));
+        Assert.True(LibreOfficeRendererAdapter.IsTrustedWindowsWriter("S-1-5-18"));
+        Assert.True(LibreOfficeRendererAdapter.IsTrustedWindowsWriter("S-1-5-32-544"));
+        Assert.False(LibreOfficeRendererAdapter.IsTrustedWindowsWriter("S-1-5-21-1-2-3-1001"));
+        var currentUser = WindowsIdentity.GetCurrent().User?.Value;
+        Assert.True(!string.IsNullOrWhiteSpace(currentUser));
+        Assert.False(LibreOfficeRendererAdapter.IsTrustedWindowsWriter(currentUser!));
+    }
+
     public static void PinnedLibreOfficeVersionRequiresTokenBoundary()
     {
         const string pinnedVersion = "LibreOffice 26.2.2.2";
@@ -583,6 +939,35 @@ internal static class RendererTests
         return Encoding.ASCII.GetBytes(builder.ToString());
     }
 
+    public static void CoordinatorProductionRendererRequiresExplicitPin()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-coordinator-renderers-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+            var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+            var unconfigured = ProductionCoordinatorRequestHandler.CreateProductionRendererAdapters(
+                cache, artifacts, null, null, null, null);
+            Assert.Equal(2, unconfigured.Count);
+            Assert.False(unconfigured.Any(adapter => adapter is LibreOfficeRendererAdapter));
+
+            var malformed = ProductionCoordinatorRequestHandler.CreateProductionRendererAdapters(
+                cache, artifacts, null, null, Path.Combine(root, "program", "soffice.bin"), new string('z', 64));
+            Assert.Equal(2, malformed.Count);
+
+            var pinned = ProductionCoordinatorRequestHandler.CreateProductionRendererAdapters(
+                cache, artifacts, null, null, Path.Combine(root, "program", "soffice.bin"), new string('a', 64));
+            var supportedPlatform = OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
+            Assert.Equal(supportedPlatform ? 3 : 2, pinned.Count);
+            Assert.Equal(supportedPlatform, pinned.Any(adapter => adapter is LibreOfficeRendererAdapter));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     public static void LibreOfficeCapabilityRejectsUserWritableRuntimeTree()
     {
         if (!OperatingSystem.IsLinux()) return;
@@ -723,9 +1108,14 @@ internal static class RendererTests
     private static void CreateFixtureLauncher(string program)
     {
         var launcher = Path.Combine(program, "soffice");
+        var oosplash = Path.Combine(program, "oosplash");
         File.WriteAllText(launcher, "#!/bin/sh\nexit 0\n");
+        File.WriteAllText(oosplash, "fixture oosplash identity\n");
         if (OperatingSystem.IsLinux())
+        {
             File.SetUnixFileMode(launcher, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(oosplash, UnixFileMode.UserRead);
+        }
     }
 
     private sealed class UnusedPdfInspector : IPdfArtifactInspector

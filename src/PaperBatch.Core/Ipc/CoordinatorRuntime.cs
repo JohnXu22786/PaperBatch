@@ -128,14 +128,14 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
         });
         var artifacts = new PaperBatch.Core.Rendering.RenderArtifactStore(Path.Combine(root, "RenderArtifacts"));
         _artifacts = artifacts;
-        var renderer = new PaperBatch.Core.Rendering.RendererCoordinator([
-            new PaperBatch.Core.Rendering.PdfPassThroughRendererAdapter(new PaperBatch.Core.Rendering.PdfPassThroughArtifactService(cache, artifacts)),
-            new PaperBatch.Core.Rendering.BuiltInImageRendererAdapter(cache, artifacts)
-        ]);
         _runs = new PaperBatch.Core.Persistence.SqliteRunStore(Path.Combine(root, "runs.db"));
         _runs.Initialize();
         var pdfiumPath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH");
         var pdfiumHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_SHA256");
+        var libreOfficePath = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_PATH");
+        var libreOfficeHash = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_SHA256");
+        var renderer = new PaperBatch.Core.Rendering.RendererCoordinator(CreateProductionRendererAdapters(
+            cache, artifacts, pdfiumPath, pdfiumHash, libreOfficePath, libreOfficeHash));
         if (!string.IsNullOrWhiteSpace(pdfiumPath) && !string.IsNullOrWhiteSpace(pdfiumHash))
         {
             if (!(OperatingSystem.IsWindows() || OperatingSystem.IsLinux()))
@@ -165,6 +165,38 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
             }
         }
         else _preparationUnavailable = "Preparation requires the explicitly configured, hash-pinned PDFium runtime.";
+    }
+
+    internal static IReadOnlyList<PaperBatch.Core.Rendering.IRendererAdapter> CreateProductionRendererAdapters(
+        PaperBatch.Core.Intake.SourceSnapshotCache cache,
+        PaperBatch.Core.Rendering.RenderArtifactStore artifacts,
+        string? pdfiumPath,
+        string? pdfiumHash,
+        string? libreOfficePath,
+        string? libreOfficeHash)
+    {
+        var renderers = new List<PaperBatch.Core.Rendering.IRendererAdapter>
+        {
+            new PaperBatch.Core.Rendering.PdfPassThroughRendererAdapter(new PaperBatch.Core.Rendering.PdfPassThroughArtifactService(cache, artifacts)),
+            new PaperBatch.Core.Rendering.BuiltInImageRendererAdapter(cache, artifacts)
+        };
+        if ((OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) &&
+            !string.IsNullOrWhiteSpace(libreOfficePath) && !string.IsNullOrWhiteSpace(libreOfficeHash))
+        {
+            PaperBatch.Core.Rendering.IPdfArtifactInspector? pdfInspector = null;
+            if (!string.IsNullOrWhiteSpace(pdfiumPath) && !string.IsNullOrWhiteSpace(pdfiumHash))
+            {
+                try { pdfInspector = new PaperBatch.Core.Rendering.PdfiumArtifactInspector(pdfiumPath, pdfiumHash); }
+                catch (ArgumentException) { /* Preparation stays disabled by the independent PDFium gate. */ }
+            }
+            try
+            {
+                renderers.Add(new PaperBatch.Core.Rendering.LibreOfficeRendererAdapter(cache, artifacts,
+                    pdfInspector, libreOfficePath, libreOfficeHash));
+            }
+            catch (ArgumentException) { /* A malformed LibreOffice pin never enables conversion. */ }
+        }
+        return renderers;
     }
 
     internal ProductionCoordinatorRequestHandler(

@@ -8,6 +8,21 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.Win32.SafeHandles;
 using PaperBatch.CompatibilityProbe;
 
+if (args.Length == 2 && args[0] == "--renderer-output-limit-child")
+{
+    using var output = new FileStream(args[1], FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
+    var buffer = new byte[4096];
+    while (true)
+    {
+        output.Write(buffer);
+        output.Flush();
+        Thread.Sleep(2);
+    }
+}
+
+if (args.Length == 4 && args[0] == "--libreoffice-conversion-lock-child")
+    return RendererTests.RunLibreOfficeConversionLockChild(args[1], args[2], args[3]);
+
 if (CoordinatorProcessLauncher.IsHostMode(args))
 {
     using var shutdown = new CancellationTokenSource();
@@ -55,6 +70,13 @@ var tests = new List<(string Name, Action Run)>
     ("artifact store persists stable PDF bytes and receipt", RendererTests.ArtifactStorePersistsStablePdfAndReceipt),
     ("artifact store rejects changed PDF bytes on readback", RendererTests.ArtifactStoreRejectsChangedPdfOnReadback),
     ("artifact store rejects malformed receipts as invalid data", RendererTests.ArtifactStoreRejectsMalformedReceiptAsInvalidData),
+    ("LibreOffice process stops when output size limit is exceeded", RendererTests.LibreOfficeProcessStopsWhenOutputLimitExceeded),
+    ("LibreOffice launches through its packaged command-line entry point", RendererTests.LibreOfficeUsesThePackagedCommandLineLauncher),
+    ("LibreOffice prlimit wrapper preserves the sanitized environment", RendererTests.LibreOfficeFileSizeLimitWrapperPreservesSanitizedEnvironment),
+    ("LibreOffice in-process conversion slot acquisition is bounded", RendererTests.LibreOfficeInProcessSlotWaitIsBounded),
+    ("LibreOffice conversion slot serializes work and cancels waiters", RendererTests.LibreOfficeConversionSlotSerializesAndCancelsWaiters),
+    ("LibreOffice conversion slot serializes across processes", RendererTests.LibreOfficeConversionSlotSerializesAcrossProcesses),
+    ("LibreOffice conversion lock acquisition is bounded", RendererTests.LibreOfficeConversionLockWaitIsBounded),
     ("artifact store protects its Windows directory ACL", RendererTests.ArtifactStoreProtectsItsWindowsDirectoryAcl),
     ("LibreOffice private profile protects its Windows directory ACL", RendererTests.LibreOfficeProfileProtectsItsWindowsDirectoryAcl),
     ("artifact store rejects non-PDF input", RendererTests.ArtifactStoreRejectsNonPdfInput),
@@ -65,6 +87,7 @@ var tests = new List<(string Name, Action Run)>
     ("built-in PNG renderer rejects a corrupt compressed raster", RendererTests.BuiltInPngRendererRejectsCorruptCompressedRaster),
     ("built-in PNG renderer rejects alpha rather than dropping it", RendererTests.BuiltInPngRendererRejectsAlphaRatherThanDroppingIt),
     ("LibreOffice capability rejects user-writable runtime trees", RendererTests.LibreOfficeCapabilityRejectsUserWritableRuntimeTree),
+    ("coordinator production renderer requires an explicit LibreOffice engine pin", RendererTests.CoordinatorProductionRendererRequiresExplicitPin),
     ("LibreOffice capability accepts protected trees and rejects group-writable libraries", RendererTests.LibreOfficeCapabilityAcceptsProtectedTreeAndRejectsGroupWritableLibrary),
     ("LibreOffice capability rejects a writable ancestor of a protected runtime", RendererTests.LibreOfficeCapabilityRejectsWritableAncestorOfProtectedRuntime),
     ("LibreOffice capability rejects dependency symlink escapes", RendererTests.LibreOfficeCapabilityRejectsDependencySymlinkEscape),
@@ -330,11 +353,17 @@ var tests = new List<(string Name, Action Run)>
     ("source intake prepares valid snapshots while retaining per-item errors", SourceIntakeTests.IntakePreparesSnapshotsAndKeepsPerItemErrors)
 };
 
+if (OperatingSystem.IsWindows())
+    tests.Add(("LibreOffice runtime ACL write mask ignores read-only rights", RendererTests.WindowsRuntimeAclWriteMaskIgnoresReadOnlyRights));
+
 if (OperatingSystem.IsWindows() && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_TEST_PATH")))
     tests.Add(("PDFium vector composition preserves transformed N-up placement", PdfCompositionTests.NativeCompositionRendersTwoUpFixture));
 
 if (OperatingSystem.IsLinux())
+{
+    tests.Add(("LibreOffice file-size limit is enforced by the kernel", RendererTests.LibreOfficeFileSizeLimitIsEnforcedByTheKernel));
     tests.Add(("LibreOffice version timeout stops its owned process", RendererTests.LibreOfficeVersionQueryStopsOnTimeout));
+}
 Console.WriteLine("SKIP native LibreOffice integration (not part of the pre-U10 print-path evidence lane)");
 
 var failures = 0;

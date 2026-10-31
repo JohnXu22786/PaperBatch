@@ -12,18 +12,38 @@ from typing import Any
 
 MAX_REPORT_BYTES = 16 * 1024
 MAX_SUMMARY_BYTES = 4_000
-EXPECTED = {
+MAX_TEST_OUTPUT_BYTES = 32 * 1024
+MAX_RUNTIME_DIAGNOSTIC_CHARS = 1_200
+RUNTIME_DIAGNOSTIC_PREFIXES = (
+    "LibreOffice runtime capability check rejected:",
+    "LibreOffice version query failed:",
+    "LibreOffice export failed:",
+)
+EXPECTED_BASE = {
     "synthetic_two_page.pdf": ("pdf", "accepted"),
     "synthetic_one_pixel.png": ("png", "accepted"),
-    "synthetic_sections_table.docx": ("docx", "unsupported"),
-    "synthetic_mixed_page_sizes.xlsx": ("xlsx", "unsupported"),
-    "synthetic_two_slides.pptx": ("pptx", "unsupported"),
+    "synthetic_sections_table.docx": ("docx", "document"),
+    "synthetic_mixed_page_sizes.xlsx": ("xlsx", "document"),
+    "synthetic_two_slides.pptx": ("pptx", "document"),
+    "synthetic_text.rtf": ("rtf", "document"),
+    "synthetic_text.odt": ("odt", "document"),
+    "synthetic_table.ods": ("ods", "document"),
+    "synthetic_slide.odp": ("odp", "document"),
     "synthetic_truncated_package.docx": ("docx", "rejected"),
 }
 
 
+def _matches_pinned_engine_version(observed: Any, pinned: Any) -> bool:
+    if not isinstance(observed, str) or not isinstance(pinned, str):
+        return False
+    if observed == pinned:
+        return True
+    suffix = observed[len(pinned):] if observed.startswith(pinned) else ""
+    return bool(re.fullmatch(r"(?: Build [0-9]+| [0-9]+\(Build:[0-9]+\)| [0-9a-f]{7,40})", suffix))
+
+
 def render(path: Path) -> tuple[str, int]:
-    lines = ["## PaperBatch production document import", ""]
+    lines = ["## PaperBatch production document conversion and import", ""]
     lines.append(
         f"Exact run: commit `{os.environ.get('PB_SOURCE_COMMIT', 'unknown')}`; workflow `{os.environ.get('GITHUB_WORKFLOW', 'unknown')}`; "
         f"run `{os.environ.get('GITHUB_RUN_ID', 'unknown')}` attempt `{os.environ.get('GITHUB_RUN_ATTEMPT', 'unknown')}`."
@@ -45,7 +65,7 @@ def render(path: Path) -> tuple[str, int]:
     lines.extend(["", "| Fixture | Format | Application outcome | Queue status | Renderer |", "|---|---|---|---|---|"])
     outcomes: Any = report.get("outcomes", []) if isinstance(report, dict) else []
     if isinstance(outcomes, list):
-        for item in outcomes[:len(EXPECTED)]:
+        for item in outcomes[:len(EXPECTED_BASE)]:
             if isinstance(item, dict):
                 lines.append(
                     f"| `{item.get('fixture', 'unknown')}` | {item.get('format', 'unknown')} | {item.get('applicationOutcome', 'unknown')} "
@@ -53,16 +73,31 @@ def render(path: Path) -> tuple[str, int]:
                 )
     if not valid:
         lines.insert(4, "Application import report identity, outcomes, or evidence limits failed validation; this run is not a pass.")
-    lines.extend([
-        "",
-        "This exercises PaperBatch's production queue-import path. PDF and PNG are accepted and produce persisted artifacts; DOCX/XLSX/PPTX pass intake checks but remain unsupported by the production renderer; malformed OOXML is rejected before rendering.",
-        "LibreOffice is not invoked by this test. Standalone LibreOffice conversion does not establish PaperBatch import support. No Microsoft Office/WPS compatibility, visual fidelity, printer, or physical-output claim is made.",
-    ])
+    failure = report.get("failure") if isinstance(report, dict) else None
+    if isinstance(failure, str) and failure:
+        bounded_failure = " ".join(failure.split())[:500].replace("|", "\\|").replace("`", "'")
+        lines.insert(5, f"Import test stopped: `{bounded_failure}`")
+    engine = report.get("libreOffice") if isinstance(report, dict) else None
+    if isinstance(engine, dict):
+        lines.append(f"LibreOffice: `{engine.get('version', 'unknown')}`; engine SHA-256 `{engine.get('engineSha256', 'unknown')}`.")
+        lines.append("This run exercised PaperBatch's production queue-import path with the configured pinned LibreOffice renderer. PDF/PNG and supported document formats produced persisted artifacts; malformed OOXML was rejected before rendering.")
+    else:
+        lines.append("This run exercised PaperBatch's production queue-import path without a configured LibreOffice renderer. PDF/PNG inputs produced persisted artifacts; document formats remained unsupported.")
+    lines.append("LibreOffice conversion is not Microsoft Office/WPS equivalence or visual-fidelity evidence. PDFium remains separately required for page inspection, composition, and batch preparation. No printer or physical-output claim is made.")
+    mixed = report.get("mixedBatchPreparation") if isinstance(report, dict) else None
+    if isinstance(mixed, dict):
+        lines.append(
+            f"Windows mixed batch: {mixed.get('sourceCount', 0)} ordered sources; {mixed.get('segmentCount', 0)} segment(s), "
+            f"{mixed.get('jobCount', 0)} job(s); fake backend submissions {mixed.get('fakeBackendSubmissions', 0)}; "
+            f"replay submissions {mixed.get('replaySubmissions', 0)}. Physical output was not produced."
+        )
     return _bound("\n".join(lines) + "\n"), 0 if valid else 1
 
 
 def _valid_report(report: Any) -> bool:
     if not isinstance(report, dict) or report.get("schemaVersion") != 1 or report.get("evidenceType") != "paperbatch-production-queue-import":
+        return False
+    if report.get("failure") is not None:
         return False
     if report.get("sourceCommit") != os.environ.get("PB_SOURCE_COMMIT"):
         return False
@@ -70,17 +105,23 @@ def _valid_report(report: Any) -> bool:
                             ("runAttempt", "GITHUB_RUN_ATTEMPT"), ("runnerOs", "RUNNER_OS")):
         if report.get(field) != os.environ.get(env_name):
             return False
+    configured = os.environ.get("RUNNER_OS") in ("Linux", "Windows")
+    preparation_available = report.get("preparationAvailable")
+    if not isinstance(preparation_available, bool):
+        return False
+    expected = {name: (format_name, ("converted" if configured else "unsupported") if result == "document" else result)
+                for name, (format_name, result) in EXPECTED_BASE.items()}
     outcomes = report.get("outcomes")
-    if not isinstance(outcomes, list) or len(outcomes) != len(EXPECTED):
+    if not isinstance(outcomes, list) or len(outcomes) != len(expected):
         return False
     found: dict[str, dict[str, Any]] = {}
     for item in outcomes:
         if not isinstance(item, dict) or not isinstance(item.get("fixture"), str) or item["fixture"] in found:
             return False
         found[item["fixture"]] = item
-    if set(found) != set(EXPECTED):
+    if set(found) != set(expected):
         return False
-    for fixture, (format_name, outcome) in EXPECTED.items():
+    for fixture, (format_name, outcome) in expected.items():
         item = found[fixture]
         if item.get("format") != format_name or item.get("applicationOutcome") != outcome:
             return False
@@ -90,16 +131,55 @@ def _valid_report(report: Any) -> bool:
         queue_status = item.get("queueStatus")
         if not isinstance(queue_status, str):
             return False
-        if outcome == "accepted" and (not queue_status.startswith("Ready to prepare · ") or renderer != "Succeeded"):
+        expected_status_prefix = "Ready to prepare · " if preparation_available else "Artifact available · "
+        if outcome in ("accepted", "converted") and (not queue_status.startswith(expected_status_prefix) or renderer != "Succeeded"):
             return False
         if outcome == "unsupported" and (queue_status != "Unsupported format" or renderer != "Unsupported"):
             return False
         if outcome == "rejected" and (queue_status != "Needs attention" or item.get("intakeDiagnostic") != "MalformedContainer" or renderer is not None):
             return False
     limits = report.get("evidenceLimits")
+    engine = report.get("libreOffice")
+    if configured:
+        pinned_version = os.environ.get("PAPERBATCH_LO_EXPECTED_VERSION")
+        observed_version = engine.get("version") if isinstance(engine, dict) else None
+        resource_limits_reported = isinstance(limits, list) and any(
+            isinstance(item, str)
+            and "Linux RLIMIT_FSIZE is a hard per-file cap" in item
+            and "Windows output monitoring is best-effort and may overshoot" in item
+            and "neither OS caps aggregate profile/cache/temp storage" in item
+            for item in limits
+        )
+        if (not isinstance(engine, dict) or not isinstance(pinned_version, str)
+                or not _matches_pinned_engine_version(observed_version, pinned_version)
+                or engine.get("engineSha256") != os.environ.get("PAPERBATCH_LO_ENGINE_SHA256")
+                or not re.fullmatch(r"[0-9a-f]{64}", str(engine.get("engineSha256", "")))
+                or not resource_limits_reported):
+            return False
+    elif engine is not None:
+        return False
+    mixed = report.get("mixedBatchPreparation")
+    if os.environ.get("RUNNER_OS") == "Windows":
+        if not isinstance(mixed, dict):
+            return False
+        prepared_artifact = mixed.get("preparedArtifact")
+        source_order = mixed.get("sourceOrder")
+        expected_source_order = [item["sha256"] for item in report["outcomes"]
+                                 if item["applicationOutcome"] in ("accepted", "converted")]
+        if (mixed.get("sourceCount") != 9 or mixed.get("segmentCount") != 1
+                or mixed.get("jobCount") != 1 or mixed.get("fakeBackendSubmissions") != 1
+                or mixed.get("replaySubmissions") != 0
+                or not isinstance(source_order, list) or source_order != expected_source_order
+                or not isinstance(prepared_artifact, dict)
+                or not re.fullmatch(r"[0-9a-f]{64}", str(prepared_artifact.get("sha256", "")))
+                or type(prepared_artifact.get("lengthBytes")) is not int or prepared_artifact["lengthBytes"] <= 0
+                or type(prepared_artifact.get("pageCount")) is not int or prepared_artifact["pageCount"] <= 0):
+            return False
+    elif mixed is not None:
+        return False
     return (isinstance(limits, list) and len(limits) >= 4
-            and any("standalone LibreOffice conversion does not establish PaperBatch import support" in str(item) for item in limits)
-            and any("No Office/WPS compatibility" in str(item) for item in limits))
+            and any("PDFium remains separately required" in str(item) for item in limits)
+            and any("Microsoft Office/WPS equivalence" in str(item) for item in limits))
 
 
 def _finish(lines: list[str], message: str, status: int) -> tuple[str, int]:
@@ -115,6 +195,34 @@ def _bound(text: str) -> str:
     return encoded[:MAX_SUMMARY_BYTES - len(marker.encode("utf-8"))].decode("utf-8", "ignore") + marker
 
 
+def _escape_workflow_command_data(text: str) -> str:
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _read_runtime_diagnostics(path_value: str | None) -> str:
+    if not path_value:
+        return ""
+    path = Path(path_value)
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(MAX_TEST_OUTPUT_BYTES + 1)
+    except OSError:
+        return ""
+    if len(data) > MAX_TEST_OUTPUT_BYTES:
+        return ""
+    lines = data.decode("utf-8", "replace").splitlines()
+    selected: list[str] = []
+    for line in lines:
+        if not line.startswith(RUNTIME_DIAGNOSTIC_PREFIXES):
+            continue
+        compact = " ".join(line.split())
+        if compact not in selected:
+            selected.append(compact[:400])
+        if len(selected) >= 3:
+            break
+    return " | ".join(selected)[:MAX_RUNTIME_DIAGNOSTIC_CHARS]
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("usage: build_application_import_ci_summary.py REPORT")
@@ -125,6 +233,15 @@ def main() -> int:
             stream.write(summary)
     else:
         sys.stdout.write(summary)
+    if status:
+        detail = next((line[len("Import test stopped: `"):-1]
+                       for line in summary.splitlines()
+                       if line.startswith("Import test stopped: `") and line.endswith("`")),
+                      "Application import evidence validation failed; see the bounded report summary.")
+        runtime_diagnostics = _read_runtime_diagnostics(os.environ.get("PAPERBATCH_DESKTOP_TEST_OUTPUT"))
+        if runtime_diagnostics:
+            detail += f" LibreOffice diagnostic: {runtime_diagnostics}"
+        print(f"::error::{_escape_workflow_command_data(detail)}", file=sys.stderr)
     return status
 
 

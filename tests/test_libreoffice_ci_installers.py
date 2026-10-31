@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import os
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -14,19 +17,64 @@ sys.path.insert(0, str(ROOT / "tools"))
 import build_libreoffice_ci_summary
 import build_application_import_ci_summary
 import resolve_macos_libreoffice_engine
+import capture_bounded_command_output
 
 
 class LibreOfficeCiInstallerTests(unittest.TestCase):
+    def test_import_summary_emits_escaped_bounded_failure_annotation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            summary = Path(directory) / "summary.md"
+            test_output = Path(directory) / "test-output.txt"
+            report.write_text(json.dumps({"failure": "import failed\n::warning::spoof%detail"}), encoding="utf-8")
+            test_output.write_text(
+                "noise line\nLibreOffice runtime capability check rejected: UnauthorizedAccessException: unsafe runtime ancestor\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with mock.patch.dict(os.environ, {
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "PAPERBATCH_DESKTOP_TEST_OUTPUT": str(test_output),
+                }), \
+                    mock.patch.object(sys, "argv", ["build_application_import_ci_summary.py", str(report)]), \
+                    redirect_stderr(output):
+                self.assertEqual(build_application_import_ci_summary.main(), 1)
+            self.assertIn(
+                "::error::import failed ::warning::spoof%25detail LibreOffice diagnostic: "
+                "LibreOffice runtime capability check rejected: UnauthorizedAccessException: unsafe runtime ancestor",
+                output.getvalue(),
+            )
+            self.assertIn("Import test stopped:", summary.read_text(encoding="utf-8"))
+
+    def test_bounded_command_output_keeps_tail_and_preserves_exit_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "bounded-output.txt"
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "tools/capture_bounded_command_output.py"),
+                 "--output", str(output_path), "--max-bytes", "32", "--",
+                 sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x' * 100 + b'\\r\\nfailure marker\\r\\n'); sys.exit(7)"],
+                capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 7)
+            self.assertIn(b"failure marker", result.stdout)
+            bounded = output_path.read_bytes()
+            self.assertLessEqual(len(bounded), 32)
+            self.assertEqual(bounded.splitlines()[-1], b"failure marker")
+
     def test_general_matrix_keeps_import_evidence_and_print_contract_is_windows_only(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         windows = (ROOT / "tools/install_libreoffice_windows.ps1").read_text(encoding="utf-8")
         macos = (ROOT / "tools/install_libreoffice_macos.sh").read_text(encoding="utf-8")
 
         self.assertIn("os: [ubuntu-latest, windows-latest, macos-latest]", workflow)
-        self.assertNotIn("LibreOffice", workflow)
+        self.assertIn("Install pinned LibreOffice on hosted Linux", workflow)
+        self.assertIn("Install pinned LibreOffice on hosted Windows", workflow)
+        self.assertIn("${RUNNER_ENVIRONMENT:-}\" == 'github-hosted'", (ROOT / "tools/install_libreoffice_linux.sh").read_text(encoding="utf-8"))
+        self.assertIn("$env:RUNNER_ENVIRONMENT -ne 'github-hosted'", windows)
         self.assertNotIn("run_libreoffice_corpus.py", workflow)
         self.assertNotIn("synthetic-ooxml-libreoffice-report", workflow)
         self.assertIn("build_application_import_ci_summary.py", workflow)
+        self.assertIn("install_libreoffice_linux.sh", workflow)
         self.assertIn("PB_JOB_NAME: Windows batch print contract", workflow)
         self.assertIn("${{ runner.os == 'Windows' && format('{0}/windows-batch-print-contract.json', runner.temp) || '' }}", workflow)
         self.assertIn("name: windows-batch-print-contract", workflow)
@@ -35,6 +83,8 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertIn("new ProductionPresentationSources", app_import_test)
         self.assertIn("presentation.ImportAsync", app_import_test)
         self.assertIn("name: paperbatch-application-import-${{ runner.os }}", workflow)
+        self.assertIn("Upload bounded focused desktop test output", workflow)
+        self.assertIn("name: paperbatch-desktop-test-output-${{ runner.os }}", workflow)
         self.assertNotIn("releases/latest", windows)
         self.assertIn("downloadarchive.documentfoundation.org/libreoffice/old/$version/win/x86_64", windows)
         self.assertIn("downloadarchive.documentfoundation.org/libreoffice/old/${version}/mac/${architecture}", macos)
@@ -42,7 +92,18 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertNotIn("Contents/MacOS/soffice.bin", macos)
         self.assertLess(macos.index("codesign --verify --deep --strict"), macos.index("resolve_macos_libreoffice_engine.py"))
         self.assertIn("26.2.2.2", windows)
+        self.assertIn("$engine = Join-Path $installRoot 'program\\soffice.bin'", windows)
+        self.assertIn("$launcher = Join-Path $installRoot 'program\\soffice.com'", windows)
+        self.assertIn("$engineHash = (Get-FileHash -LiteralPath $engine -Algorithm SHA256).Hash.ToLowerInvariant()", windows)
         self.assertIn("26.2.2.2", macos)
+        linux = (ROOT / "tools/install_libreoffice_linux.sh").read_text(encoding="utf-8")
+        self.assertIn("gpgv --status-fd=1", linux)
+        self.assertIn("sudo chmod +t /opt", linux)
+        self.assertIn("sudo apt-get install -y util-linux", linux)
+        self.assertIn("command -v prlimit", linux)
+        self.assertIn("engine='/opt/libreoffice26.2/program/soffice.bin'", linux)
+        self.assertIn("launcher='/opt/libreoffice26.2/program/soffice'", linux)
+        self.assertNotIn("cp -a", linux)
 
     def test_windows_installer_version_check_requires_a_token_boundary(self):
         windows = (ROOT / "tools/install_libreoffice_windows.ps1").read_text(encoding="utf-8")
@@ -54,7 +115,8 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         cleanup = workflow.index("Remove temporary PDFium test runtime")
         self.assertIn("if: always() && runner.os == 'Windows'", workflow[cleanup:cleanup + 150])
-        self.assertNotIn("LibreOffice", workflow)
+        self.assertIn("Install pinned LibreOffice on hosted Linux", workflow)
+        self.assertIn("Install pinned LibreOffice on hosted Windows", workflow)
         self.assertNotIn("paperbatch-lo-corpus-report", workflow)
 
     def test_vendor_signature_checks_remain_in_the_standalone_installer_scripts(self):
@@ -243,11 +305,15 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
             "ImageOS": "macos-15", "ImageVersion": "20261020.1",
         }
         expectations = {
-            "synthetic_two_page.pdf": ("pdf", "accepted", "Ready to prepare · Pdf", "Succeeded", None),
-            "synthetic_one_pixel.png": ("png", "accepted", "Ready to prepare · Png", "Succeeded", None),
+            "synthetic_two_page.pdf": ("pdf", "accepted", "Artifact available · Pdf", "Succeeded", None),
+            "synthetic_one_pixel.png": ("png", "accepted", "Artifact available · Png", "Succeeded", None),
             "synthetic_sections_table.docx": ("docx", "unsupported", "Unsupported format", "Unsupported", None),
             "synthetic_mixed_page_sizes.xlsx": ("xlsx", "unsupported", "Unsupported format", "Unsupported", None),
             "synthetic_two_slides.pptx": ("pptx", "unsupported", "Unsupported format", "Unsupported", None),
+            "synthetic_text.rtf": ("rtf", "unsupported", "Unsupported format", "Unsupported", None),
+            "synthetic_text.odt": ("odt", "unsupported", "Unsupported format", "Unsupported", None),
+            "synthetic_table.ods": ("ods", "unsupported", "Unsupported format", "Unsupported", None),
+            "synthetic_slide.odp": ("odp", "unsupported", "Unsupported format", "Unsupported", None),
             "synthetic_truncated_package.docx": ("docx", "rejected", "Needs attention", None, "MalformedContainer"),
         }
         outcomes = [
@@ -258,10 +324,10 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         report = {
             "schemaVersion": 1, "evidenceType": "paperbatch-production-queue-import", "sourceCommit": "a" * 40,
             "workflow": "CI", "runId": "123", "runAttempt": "2", "runnerOs": "macOS", "runnerImage": "macos-15",
-            "outcomes": outcomes,
+            "outcomes": outcomes, "preparationAvailable": False,
             "evidenceLimits": [
-                "production queue import", "standalone LibreOffice conversion does not establish PaperBatch import support",
-                "No Office/WPS compatibility claim", "synthetic inputs only",
+                "production queue import", "PDFium remains separately required for page inspection, composition, and batch preparation",
+                "No Microsoft Office/WPS equivalence or visual-fidelity evidence", "synthetic inputs only",
             ],
         }
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, context, clear=True):
@@ -270,8 +336,10 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
             rendered, status = build_application_import_ci_summary.render(path)
             self.assertEqual(status, 0)
             self.assertIn("production queue-import path", rendered)
+            self.assertIn("without a configured LibreOffice renderer", rendered)
+            self.assertIn("document formats remained unsupported", rendered)
             self.assertIn("synthetic_sections_table.docx", rendered)
-            self.assertIn("Standalone LibreOffice conversion does not establish PaperBatch import support", rendered)
+            self.assertIn("not Microsoft Office/WPS equivalence", rendered)
             report["runId"] = "999"
             path.write_text(json.dumps(report), encoding="utf-8")
             mismatched, mismatched_status = build_application_import_ci_summary.render(path)
@@ -290,6 +358,146 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertIn("not a pass", mismatched)
         self.assertEqual(malformed_status, 1)
         self.assertIn("not a pass", malformed)
+
+    def test_application_import_summary_reports_actual_pinned_release_identity_suffix(self):
+        context = {
+            "PB_SOURCE_COMMIT": "a" * 40, "GITHUB_WORKFLOW": "CI", "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "2", "RUNNER_OS": "Linux", "RUNNER_NAME": "Hosted Agent",
+            "ImageOS": "ubuntu-24.04", "ImageVersion": "20261020.1",
+            "PAPERBATCH_LO_EXPECTED_VERSION": "LibreOffice 26.2.2.2", "PAPERBATCH_LO_ENGINE_SHA256": "c" * 64,
+        }
+        outcomes = [
+            {"fixture": "synthetic_two_page.pdf", "format": "pdf", "applicationOutcome": "accepted",
+             "queueStatus": "Artifact available · Pdf", "rendererStatus": "Succeeded", "sha256": "1" * 64},
+            {"fixture": "synthetic_one_pixel.png", "format": "png", "applicationOutcome": "accepted",
+             "queueStatus": "Artifact available · Png", "rendererStatus": "Succeeded", "sha256": "2" * 64},
+        ]
+        for fixture, fmt in (("synthetic_sections_table.docx", "docx"), ("synthetic_mixed_page_sizes.xlsx", "xlsx"),
+                             ("synthetic_two_slides.pptx", "pptx"), ("synthetic_text.rtf", "rtf"),
+                             ("synthetic_text.odt", "odt"), ("synthetic_table.ods", "ods"),
+                             ("synthetic_slide.odp", "odp")):
+            outcomes.append({"fixture": fixture, "format": fmt, "applicationOutcome": "converted",
+                             "queueStatus": "Artifact available · LibreOffice", "rendererStatus": "Succeeded", "sha256": "b" * 64})
+        outcomes.append({"fixture": "synthetic_truncated_package.docx", "format": "docx", "applicationOutcome": "rejected",
+                         "queueStatus": "Needs attention", "rendererStatus": None, "intakeDiagnostic": "MalformedContainer", "sha256": "b" * 64})
+        report = {
+            "schemaVersion": 1, "evidenceType": "paperbatch-production-queue-import", "sourceCommit": "a" * 40,
+            "workflow": "CI", "runId": "123", "runAttempt": "2", "runnerOs": "Linux", "runnerImage": "ubuntu-24.04",
+            "libreOffice": {"version": "LibreOffice 26.2.2.2 Build 2", "engineSha256": "c" * 64},
+            "outcomes": outcomes, "preparationAvailable": False,
+            "evidenceLimits": ["PDFium remains separately required", "No Microsoft Office/WPS equivalence", "synthetic inputs", "no physical output", "Limits: 512 MiB per source and final PDF; Linux RLIMIT_FSIZE is a hard per-file cap; Windows output monitoring is best-effort and may overshoot before the final 512 MiB check; neither OS caps aggregate profile/cache/temp storage. One conversion runs at a time across processes sharing the same per-user PaperBatch data root; timeout or cancellation stops and reaps the owned process tree before operation-directory cleanup."],
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, context, clear=True):
+            path = Path(directory) / "report.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            rendered, status = build_application_import_ci_summary.render(path)
+            report["libreOffice"]["version"] = "LibreOffice 26.2.2.2 1f77d10d6938fd34972958f64b2bcfa54f8b1ba5"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            release_hash_version, release_hash_status = build_application_import_ci_summary.render(path)
+            report["libreOffice"]["version"] = "LibreOffice 26.2.2.20 Build 2"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            wrong_version, wrong_version_status = build_application_import_ci_summary.render(path)
+            report["libreOffice"]["version"] = "LibreOffice 26.2.2.2 unrelated"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            unrelated_suffix, unrelated_suffix_status = build_application_import_ci_summary.render(path)
+            report["libreOffice"]["version"] = "LibreOffice 26.2.2.2 "
+            path.write_text(json.dumps(report), encoding="utf-8")
+            trailing_space, trailing_space_status = build_application_import_ci_summary.render(path)
+            report["libreOffice"]["version"] = "LibreOffice 26.2.2.2 Build 2"
+            report["evidenceLimits"] = ["PDFium remains separately required", "No Microsoft Office/WPS equivalence"]
+            path.write_text(json.dumps(report), encoding="utf-8")
+            missing_limits, missing_limits_status = build_application_import_ci_summary.render(path)
+
+        self.assertEqual(status, 0)
+        self.assertIn("LibreOffice 26.2.2.2 Build 2", rendered)
+        self.assertEqual(release_hash_status, 0)
+        self.assertIn("LibreOffice 26.2.2.2 1f77d10d6938fd34972958f64b2bcfa54f8b1ba5", release_hash_version)
+        self.assertIn("with the configured pinned LibreOffice renderer", rendered)
+        self.assertIn("supported document formats produced persisted artifacts", rendered)
+        self.assertEqual(wrong_version_status, 1)
+        self.assertIn("not a pass", wrong_version)
+        self.assertEqual(unrelated_suffix_status, 1)
+        self.assertIn("not a pass", unrelated_suffix)
+        self.assertEqual(trailing_space_status, 1)
+        self.assertIn("not a pass", trailing_space)
+        self.assertEqual(missing_limits_status, 1)
+        self.assertIn("not a pass", missing_limits)
+
+    def test_application_import_summary_rejects_malformed_windows_prepared_artifact(self):
+        context = {
+            "PB_SOURCE_COMMIT": "a" * 40, "GITHUB_WORKFLOW": "CI", "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "2", "RUNNER_OS": "Windows", "RUNNER_NAME": "Hosted Agent",
+            "ImageOS": "win22", "ImageVersion": "20261020.1",
+            "PAPERBATCH_LO_EXPECTED_VERSION": "LibreOffice 26.2.2.2", "PAPERBATCH_LO_ENGINE_SHA256": "c" * 64,
+        }
+        outcomes = [
+            {"fixture": "synthetic_two_page.pdf", "format": "pdf", "applicationOutcome": "accepted",
+             "queueStatus": "Artifact available · Pdf", "rendererStatus": "Succeeded", "sha256": "b" * 64},
+            {"fixture": "synthetic_one_pixel.png", "format": "png", "applicationOutcome": "accepted",
+             "queueStatus": "Artifact available · Png", "rendererStatus": "Succeeded", "sha256": "b" * 64},
+        ]
+        for fixture, fmt in (("synthetic_sections_table.docx", "docx"), ("synthetic_mixed_page_sizes.xlsx", "xlsx"),
+                             ("synthetic_two_slides.pptx", "pptx"), ("synthetic_text.rtf", "rtf"),
+                             ("synthetic_text.odt", "odt"), ("synthetic_table.ods", "ods"),
+                             ("synthetic_slide.odp", "odp")):
+            outcomes.append({"fixture": fixture, "format": fmt, "applicationOutcome": "converted",
+                             "queueStatus": "Artifact available · LibreOffice", "rendererStatus": "Succeeded", "sha256": f"{len(outcomes) + 1:x}" * 64})
+        outcomes.append({"fixture": "synthetic_truncated_package.docx", "format": "docx", "applicationOutcome": "rejected",
+                         "queueStatus": "Needs attention", "rendererStatus": None, "intakeDiagnostic": "MalformedContainer", "sha256": "a" * 64})
+        mixed = {"sourceCount": 9, "segmentCount": 1, "jobCount": 1, "fakeBackendSubmissions": 1,
+                 "replaySubmissions": 0,
+                 "sourceOrder": [item["sha256"] for item in outcomes if item["applicationOutcome"] in ("accepted", "converted")],
+                 "preparedArtifact": {"sha256": "d" * 64, "lengthBytes": 12345, "pageCount": 9}}
+        report = {
+            "schemaVersion": 1, "evidenceType": "paperbatch-production-queue-import", "sourceCommit": "a" * 40,
+            "workflow": "CI", "runId": "123", "runAttempt": "2", "runnerOs": "Windows", "runnerImage": "win22",
+            "libreOffice": {"version": "LibreOffice 26.2.2.2 Build 2", "engineSha256": "c" * 64},
+            "outcomes": outcomes, "preparationAvailable": False, "mixedBatchPreparation": mixed,
+            "evidenceLimits": ["PDFium remains separately required", "No Microsoft Office/WPS equivalence", "synthetic inputs", "no physical output", "Limits: 512 MiB per source and final PDF; Linux RLIMIT_FSIZE is a hard per-file cap; Windows output monitoring is best-effort and may overshoot before the final 512 MiB check; neither OS caps aggregate profile/cache/temp storage. One conversion runs at a time across processes sharing the same per-user PaperBatch data root; timeout or cancellation stops and reaps the owned process tree before operation-directory cleanup."],
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, context, clear=True):
+            path = Path(directory) / "report.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            valid, valid_status = build_application_import_ci_summary.render(path)
+            report["outcomes"] = outcomes[:3]
+            report["failure"] = "docx did not become ready; renderer detail was `PDF artifact abc persisted | page count unavailable`."
+            path.write_text(json.dumps(report), encoding="utf-8")
+            partial, partial_status = build_application_import_ci_summary.render(path)
+            report["outcomes"] = outcomes
+            report.pop("failure")
+            report["mixedBatchPreparation"]["preparedArtifact"] = None
+            path.write_text(json.dumps(report), encoding="utf-8")
+            null_artifact, null_status = build_application_import_ci_summary.render(path)
+            report["mixedBatchPreparation"]["preparedArtifact"] = []
+            path.write_text(json.dumps(report), encoding="utf-8")
+            list_artifact, list_status = build_application_import_ci_summary.render(path)
+            report["mixedBatchPreparation"]["preparedArtifact"] = {"sha256": "d" * 64, "lengthBytes": 12345, "pageCount": 9}
+            report["mixedBatchPreparation"]["sourceOrder"] = list(reversed(mixed["sourceOrder"]))
+            path.write_text(json.dumps(report), encoding="utf-8")
+            wrong_order, wrong_order_status = build_application_import_ci_summary.render(path)
+            report["mixedBatchPreparation"]["sourceOrder"] = mixed["sourceOrder"]
+            report["mixedBatchPreparation"]["preparedArtifact"]["lengthBytes"] = 0
+            path.write_text(json.dumps(report), encoding="utf-8")
+            invalid_length, invalid_length_status = build_application_import_ci_summary.render(path)
+            report["mixedBatchPreparation"]["preparedArtifact"]["lengthBytes"] = 12345
+            report["mixedBatchPreparation"]["preparedArtifact"]["pageCount"] = 0
+            path.write_text(json.dumps(report), encoding="utf-8")
+            invalid_page_count, invalid_page_count_status = build_application_import_ci_summary.render(path)
+
+        self.assertEqual(valid_status, 0)
+        self.assertEqual(partial_status, 1)
+        self.assertIn("Import test stopped:", partial)
+        self.assertIn("PDF artifact abc persisted \\| page count unavailable", partial)
+        self.assertEqual(null_status, 1)
+        self.assertIn("not a pass", null_artifact)
+        self.assertEqual(list_status, 1)
+        self.assertIn("not a pass", list_artifact)
+        self.assertEqual(wrong_order_status, 1)
+        self.assertIn("not a pass", wrong_order)
+        self.assertEqual(invalid_length_status, 1)
+        self.assertIn("not a pass", invalid_length)
+        self.assertEqual(invalid_page_count_status, 1)
+        self.assertIn("not a pass", invalid_page_count)
 
 
 if __name__ == "__main__":

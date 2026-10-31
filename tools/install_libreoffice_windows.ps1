@@ -1,4 +1,7 @@
 $ErrorActionPreference = 'Stop'
+if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
+  throw 'LibreOffice installation is restricted to hosted Windows CI.'
+}
 $version = '26.2.2.2'
 $fingerprint = 'C2839ECAD9408FBE9531C3E9F434A1EFAFEEAEA3'
 $base = "https://downloadarchive.documentfoundation.org/libreoffice/old/$version/win/x86_64"
@@ -53,12 +56,15 @@ if ($pinnedSignature.Count -eq 0) {
   throw "LibreOffice MSI signature identity mismatch; expected $fingerprint, observed $observedText (gpgv exit code 0)."
 }
 
-$installRoot = Join-Path $env:RUNNER_TEMP "paperbatch-libreoffice-$version"
+$installRoot = Join-Path $env:ProgramFiles "PaperBatchLibreOffice-$version"
 $installOutput = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/i `"$package`" /qn /norestart INSTALLLOCATION=`"$installRoot`"" -Wait -PassThru
 if ($installOutput.ExitCode -notin @(0, 3010)) { throw "Verified LibreOffice MSI installation failed with exit code $($installOutput.ExitCode)." }
-$engine = Join-Path $installRoot 'program\soffice.com'
-if (-not (Test-Path -LiteralPath $engine -PathType Leaf)) { throw 'The verified LibreOffice installation did not contain program\soffice.com.' }
-$versionOutput = (& $engine --version | Out-String).Trim()
+$engine = Join-Path $installRoot 'program\soffice.bin'
+$launcher = Join-Path $installRoot 'program\soffice.com'
+if (-not (Test-Path -LiteralPath $engine -PathType Leaf) -or -not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+  throw 'The verified LibreOffice installation did not contain program\soffice.bin and program\soffice.com.'
+}
+$versionOutput = (& $launcher --version | Out-String).Trim()
 $versionPattern = '^LibreOffice\s+' + [regex]::Escape($version) + '(?=\s|$)'
 if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch $versionPattern) { throw 'Installed LibreOffice version did not match the pinned version.' }
 $engineHash = (Get-FileHash -LiteralPath $engine -Algorithm SHA256).Hash.ToLowerInvariant()

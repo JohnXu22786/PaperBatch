@@ -62,7 +62,7 @@ jobs:
 
   macos-synthetic-smoke:
     name: macOS synthetic IPP smoke
-    runs-on: macos-14
+    runs-on: macos-latest
     outputs:
       report: ${{ steps.run.outputs.report }}
     steps:

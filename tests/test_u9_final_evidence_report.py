@@ -150,6 +150,10 @@ class FinalEvidenceReportTests(unittest.TestCase):
         self.assertIn("Publish bounded exact-run lane summary", simulation)
         self.assertIn("Publish bounded exact-run aggregate summary", simulation)
         self.assertIn("if: always()", simulation)
+        self.assertIn(
+            "  macos-synthetic-smoke:\n    name: macOS synthetic IPP smoke\n    runs-on: macos-latest",
+            simulation,
+        )
 
 
 if __name__ == "__main__":

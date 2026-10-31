@@ -2,6 +2,12 @@ using System.Security.Cryptography;
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using PaperBatch.Core.Domain;
+using PaperBatch.Core.Layout;
+using PaperBatch.Core.Persistence;
+using PaperBatch.Core.Preparation;
+using PaperBatch.Core.Printing;
 using PaperBatch.Core.Intake;
 using PaperBatch.Core.Rendering;
 using PaperBatch.Desktop.Presentation;
@@ -12,46 +18,89 @@ internal static class ApplicationImportEvidenceTests
     {
         var root = Path.Combine(Path.GetTempPath(), "paperbatch-app-import-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
+        var outcomes = new List<object>(10);
+        string? actualLibreOfficeVersion = null;
+        string? engineHash = null;
+        object? mixedBatch = null;
         try
         {
             var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
             var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
             var renderer = DesktopComposition.CreateProductionRenderer(cache, artifacts);
+            var enginePath = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_PATH");
+            engineHash = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_SHA256");
+            var conversionConfigured = (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) &&
+                !string.IsNullOrWhiteSpace(enginePath) && engineHash?.Length == 64 && engineHash.All(Uri.IsHexDigit);
+            const bool preparationAvailable = false;
             var presentation = new ProductionPresentationSources(new SourceIntakeService(cache), renderer, cache,
-                rendererAvailable: true, artifacts: artifacts);
+                rendererAvailable: true, artifacts: artifacts, preparationAvailable: preparationAvailable,
+                documentConversionConfigured: conversionConfigured);
             var pngPath = Path.Combine(root, "synthetic_one_pixel.png");
+            var rtfPath = Path.Combine(root, "synthetic_text.rtf");
+            File.WriteAllText(rtfPath, "{\\rtf1\\ansi Synthetic RTF fixture}", System.Text.Encoding.ASCII);
             File.WriteAllBytes(pngPath, CreateOnePixelPng());
+            var docxPath = WriteDocxFixture(root, "synthetic_sections_table.docx");
+            var odtPath = WriteOdfFixture(root, "synthetic_text.odt", "application/vnd.oasis.opendocument.text", "text");
+            var odsPath = WriteOdfFixture(root, "synthetic_table.ods", "application/vnd.oasis.opendocument.spreadsheet", "spreadsheet");
+            var odpPath = WriteOdfFixture(root, "synthetic_slide.odp", "application/vnd.oasis.opendocument.presentation", "presentation");
             var fixtures = new[]
             {
                 Fixture("synthetic_two_page.pdf", "pdf", "accepted"),
                 Fixture(pngPath, "png", "accepted"),
-                Fixture("synthetic_sections_table.docx", "docx", "unsupported"),
-                Fixture("synthetic_mixed_page_sizes.xlsx", "xlsx", "unsupported"),
-                Fixture("synthetic_two_slides.pptx", "pptx", "unsupported"),
+                Fixture(docxPath, "docx", conversionConfigured ? "converted" : "unsupported"),
+                Fixture("synthetic_mixed_page_sizes.xlsx", "xlsx", conversionConfigured ? "converted" : "unsupported"),
+                Fixture("synthetic_two_slides.pptx", "pptx", conversionConfigured ? "converted" : "unsupported"),
+                Fixture(rtfPath, "rtf", conversionConfigured ? "converted" : "unsupported"),
+                Fixture(odtPath, "odt", conversionConfigured ? "converted" : "unsupported"),
+                Fixture(odsPath, "ods", conversionConfigured ? "converted" : "unsupported"),
+                Fixture(odpPath, "odp", conversionConfigured ? "converted" : "unsupported"),
                 Fixture("synthetic_truncated_package.docx", "docx", "rejected")
             };
 
             var queueItems = presentation.ImportAsync(fixtures.Select(item => item.Path)).GetAwaiter().GetResult();
             Require(queueItems.Count == fixtures.Length, "Production import did not return one queue row per selected fixture.");
 
-            var outcomes = new List<object>(fixtures.Length);
             for (var index = 0; index < fixtures.Length; index++)
             {
                 var fixture = fixtures[index];
                 var queueItem = queueItems[index];
+                Require(queueItem.Title == fixture.Name, "Production import changed the selected document order or identity.");
                 var findings = presentation.GetFindings(queueItem.Id);
                 var rendererFinding = findings.FirstOrDefault(item => item.Title == "Renderer");
                 string actualOutcome;
                 string? rendererStatus = rendererFinding?.Status;
                 string? intakeDiagnostic = null;
 
-                if (fixture.ExpectedOutcome == "accepted")
+                if (fixture.ExpectedOutcome is "accepted" or "converted")
                 {
-                    actualOutcome = "accepted";
-                    Require(queueItem.Status.StartsWith("Ready to prepare · ", StringComparison.Ordinal),
-                        $"{fixture.Extension} did not become an application queue item ready to prepare.");
+                    actualOutcome = fixture.ExpectedOutcome;
+                    var expectedStatusPrefix = preparationAvailable ? "Ready to prepare · " : "Artifact available · ";
+                    Require(queueItem.Status.StartsWith(expectedStatusPrefix, StringComparison.Ordinal),
+                        $"{fixture.Extension} did not report its expected application queue capability; queue status was '{queueItem.Status}', renderer status was '{rendererStatus ?? "missing"}', and renderer detail was '{rendererFinding?.Detail ?? "missing"}'.");
                     Require(rendererStatus == RenderStatus.Succeeded.ToString(), $"{fixture.Extension} import did not persist an application render artifact.");
                     Require(rendererFinding!.Detail.Contains("persisted", StringComparison.Ordinal), $"{fixture.Extension} import did not report its persisted artifact result.");
+                    if (fixture.ExpectedOutcome == "converted")
+                    {
+                        var tokens = rendererFinding.Detail.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                        Require(tokens.Length >= 3 && tokens[1] == "artifact" && tokens[0] is "Rendered" or "PDF",
+                            $"{fixture.Extension} did not report a persisted converted artifact identity; renderer detail was '{rendererFinding.Detail}'.");
+                        var receipt = artifacts.GetReceipt(tokens[2]);
+                        Require(receipt.EngineId == "libreoffice", $"{fixture.Extension} artifact did not record LibreOffice.");
+                        var pinnedVersion = Environment.GetEnvironmentVariable("PAPERBATCH_LO_EXPECTED_VERSION");
+                        Require(HasPinnedLibreOfficeVersion(receipt.EngineVersion, pinnedVersion),
+                            $"{fixture.Extension} artifact did not record a version matching the pinned LibreOffice release.");
+                        if (actualLibreOfficeVersion is null) actualLibreOfficeVersion = receipt.EngineVersion;
+                        Require(receipt.EngineVersion == actualLibreOfficeVersion,
+                            "Supported document formats did not report one consistent LibreOffice engine version.");
+                        Require(receipt.Options.TryGetValue("source-format", out var sourceFormat) &&
+                            string.Equals(sourceFormat, fixture.Extension, StringComparison.OrdinalIgnoreCase),
+                            $"{fixture.Extension} artifact metadata did not preserve source format.");
+                        Require(receipt.Options.TryGetValue("engine-sha256", out var recordedHash) && recordedHash == engineHash?.ToLowerInvariant(),
+                            $"{fixture.Extension} artifact metadata did not preserve the configured engine digest.");
+                        Require(receipt.Options.TryGetValue("macro-policy", out var macroPolicy) && macroPolicy == "disabled" &&
+                            receipt.Options.TryGetValue("link-refresh-policy", out var linkPolicy) && linkPolicy == "disabled",
+                            $"{fixture.Extension} artifact did not record macro and external-link protections.");
+                    }
                 }
                 else if (fixture.ExpectedOutcome == "unsupported")
                 {
@@ -77,11 +126,25 @@ internal static class ApplicationImportEvidenceTests
                     applicationOutcome = actualOutcome,
                     queueStatus = queueItem.Status,
                     rendererStatus,
+                    rendererDetail = rendererFinding?.Detail,
                     intakeDiagnostic
                 });
             }
 
-            WriteReportIfRequested(outcomes);
+            mixedBatch = OperatingSystem.IsWindows() && conversionConfigured &&
+                !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH"))
+                ? PrepareAndFakePrintMixedBatch(fixtures.Where(item => item.ExpectedOutcome is "accepted" or "converted").ToArray(), cache, artifacts, renderer)
+                : null;
+            WriteReportIfRequested(outcomes, actualLibreOfficeVersion, engineHash, mixedBatch, preparationAvailable: preparationAvailable);
+        }
+        catch (Exception exception)
+        {
+            try { WriteReportIfRequested(outcomes, actualLibreOfficeVersion, engineHash, mixedBatch, exception.Message, preparationAvailable: false); }
+            catch (Exception reportException)
+            {
+                Console.Error.WriteLine($"Application import failure evidence could not be written: {reportException.GetType().Name}.");
+            }
+            throw;
         }
         finally
         {
@@ -97,6 +160,149 @@ internal static class ApplicationImportEvidenceTests
             var bytes = File.ReadAllBytes(path);
             return (Path.GetFileName(name), extension, expectedOutcome, path, Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
         }
+    }
+
+    internal static bool HasPinnedLibreOfficeVersion(string? observed, string? pinned) =>
+        !string.IsNullOrWhiteSpace(observed) && !string.IsNullOrWhiteSpace(pinned) &&
+        (string.Equals(observed, pinned, StringComparison.Ordinal) ||
+         Regex.IsMatch(observed,
+             @"\A" + Regex.Escape(pinned) + @"(?: Build [0-9]+| [0-9]+\(Build:[0-9]+\)| [0-9a-f]{7,40})\z",
+             RegexOptions.CultureInvariant));
+
+    internal static void PinnedLibreOfficeVersionAcceptsReleaseBuildIdentity()
+    {
+        const string pinned = "LibreOffice 26.2.2.2";
+        Require(HasPinnedLibreOfficeVersion(pinned, pinned), "The exact pinned version was rejected.");
+        Require(HasPinnedLibreOfficeVersion(pinned + " Build 2", pinned), "The Windows MSI build suffix was rejected.");
+        Require(HasPinnedLibreOfficeVersion(pinned + " 1f77d10d6938fd34972958f64b2bcfa54f8b1ba5", pinned),
+            "The Linux release commit identity suffix was rejected.");
+        Require(!HasPinnedLibreOfficeVersion("LibreOffice 26.2.2.20", pinned), "A shared-prefix version was accepted.");
+        Require(!HasPinnedLibreOfficeVersion(pinned + " local build", pinned), "An unrecognized suffix was accepted.");
+    }
+
+    private static object PrepareAndFakePrintMixedBatch(
+        (string Name, string Extension, string ExpectedOutcome, string Path, string Sha256)[] fixtures,
+        SourceSnapshotCache cache, RenderArtifactStore artifacts, RendererCoordinator renderer)
+    {
+        var pdfiumPath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH")!;
+        var pdfiumHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_SHA256")!;
+        var pdfium = new PdfiumArtifactInspector(pdfiumPath, pdfiumHash);
+        pdfium.ValidateConfiguredRuntime();
+        var root = Path.Combine(Path.GetTempPath(), "paperbatch-lo-mixed-batch-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var intake = new SourceIntakeService(cache);
+            var runs = new SqliteRunStore(Path.Combine(root, "runs.db"));
+            runs.Initialize();
+            var composer = new PdfiumPageCompositionAdapter(pdfiumPath, pdfiumHash);
+            var preparation = new PreparedArtifactCoordinator(intake, cache, renderer, pdfium, pdfium, composer, artifacts, runs);
+            var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
+                artifacts: artifacts, previewRenderer: pdfium, runStore: runs, preparationAvailable: true,
+                coordinatorTransport: new PreparedArtifactTestTransport(preparation));
+            var imported = sources.ImportAsync(fixtures.Select(item => item.Path)).GetAwaiter().GetResult();
+            Require(imported.Select(item => item.Title).SequenceEqual(fixtures.Select(item => item.Name)),
+                "Mixed-batch production import did not preserve source order.");
+            var prepared = sources.PrepareQueueAsync(
+                new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto,
+                    ScalingMode.ShrinkToFit, PrinterId: "fake-libreo-test-queue"),
+                new LayoutOptions()).GetAwaiter().GetResult();
+            Require(prepared.Succeeded, "Production mixed-batch preparation failed: " + string.Join("; ", prepared.Diagnostics));
+            var run = prepared.Run!;
+            Require(run.Items.Length == fixtures.Length, "Prepared batch omitted a supported source.");
+            Require(run.Items.Select(item => item.Source.Sha256).SequenceEqual(fixtures.Select(item => item.Sha256)),
+                "Prepared batch changed source identity or order.");
+            Require(run.FinalArtifact is not null, "Prepared batch did not persist its final PDF.");
+
+            var backend = new CapturingPrintBackend();
+            var print = new WindowsPrintCoordinator(runs, backend, () => "fake-libreo-batch-run", artifacts);
+            var first = print.SubmitRunAsync(run, "libreoffice-mixed-batch-submit", DateTimeOffset.UtcNow).GetAwaiter().GetResult();
+            Require(first.Count == 1 && first[0].Status == PrintSubmissionStatus.Accepted && backend.SubmissionCount == 1,
+                $"Prepared batch was not submitted once through the injected fake print backend (results={first.Count}, status={first.FirstOrDefault()?.Status}, reason={first.FirstOrDefault()?.Reason}, submissions={backend.SubmissionCount}).");
+            var replay = print.SubmitRunAsync(run, "libreoffice-mixed-batch-submit", DateTimeOffset.UtcNow.AddMinutes(1)).GetAwaiter().GetResult();
+            Require(replay.Count == 0 && backend.SubmissionCount == 1, "A repeated batch submission reached the print backend twice.");
+            return new
+            {
+                sourceCount = run.Items.Length,
+                sourceOrder = run.Items.Select(item => item.Source.Sha256).ToArray(),
+                preparedArtifact = new { sha256 = run.FinalArtifact!.Sha256, lengthBytes = run.FinalArtifact.LengthBytes, pageCount = run.FinalArtifact.PageCount },
+                segmentCount = run.Segments.Length,
+                jobCount = prepared.Persistence!.Jobs.Length,
+                fakeBackendSubmissions = backend.SubmissionCount,
+                replaySubmissions = replay.Count,
+                physicalOutput = "not produced; fake backend only"
+            };
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    private static string WriteDocxFixture(string root, string name)
+    {
+        var path = Path.Combine(root, name);
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+        WriteEntry("[Content_Types].xml",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">" +
+            "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>" +
+            "<Default Extension=\"xml\" ContentType=\"application/xml\"/>" +
+            "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>" +
+            "<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>" +
+            "</Types>");
+        WriteEntry("_rels/.rels",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>" +
+            "</Relationships>");
+        WriteEntry("word/_rels/document.xml.rels",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>" +
+            "</Relationships>");
+        WriteEntry("word/styles.xml",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">" +
+            "<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/><w:qFormat/></w:style>" +
+            "<w:style w:type=\"paragraph\" w:styleId=\"Title\"><w:name w:val=\"Title\"/><w:basedOn w:val=\"Normal\"/><w:qFormat/></w:style>" +
+            "</w:styles>");
+        WriteEntry("word/document.xml",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>" +
+            "<w:p><w:pPr><w:pStyle w:val=\"Title\"/></w:pPr><w:r><w:t>PaperBatch synthetic conversion fixture</w:t></w:r></w:p>" +
+            "<w:p><w:pPr><w:sectPr><w:type w:val=\"nextPage\"/><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr></w:pPr><w:r><w:t>Synthetic section one</w:t></w:r></w:p>" +
+            "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w=\"2400\"/><w:gridCol w:w=\"4800\"/></w:tblGrid><w:tr>" +
+            "<w:tc><w:p><w:r><w:t>Label</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Synthetic value</w:t></w:r></w:p></w:tc></w:tr></w:tbl>" +
+            "<w:sectPr><w:pgSz w:w=\"15840\" w:h=\"12240\" w:orient=\"landscape\"/></w:sectPr></w:body></w:document>");
+        return path;
+
+        void WriteEntry(string entryName, string content)
+        {
+            var entry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
+            using var writer = new StreamWriter(entry.Open(), new System.Text.UTF8Encoding(false));
+            writer.Write(content);
+        }
+    }
+
+    private static string WriteOdfFixture(string root, string name, string mimeType, string family)
+    {
+        var path = Path.Combine(root, name);
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+        var mime = archive.CreateEntry("mimetype", CompressionLevel.NoCompression);
+        using (var writer = new StreamWriter(mime.Open(), System.Text.Encoding.ASCII)) writer.Write(mimeType);
+        var manifest = archive.CreateEntry("META-INF/manifest.xml");
+        using (var writer = new StreamWriter(manifest.Open(), System.Text.Encoding.UTF8))
+            writer.Write($"<manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\"><manifest:file-entry manifest:full-path=\"/\" manifest:media-type=\"{mimeType}\"/></manifest:manifest>");
+        var content = archive.CreateEntry("content.xml");
+        using (var writer = new StreamWriter(content.Open(), System.Text.Encoding.UTF8))
+        {
+            var body = family switch
+            {
+                "text" => "<office:body><office:text><text:p>Synthetic ODT fixture</text:p></office:text></office:body>",
+                "spreadsheet" => "<office:body><office:spreadsheet><table:table table:name=\"Sheet1\"><table:table-row><table:table-cell office:value-type=\"string\"><text:p>Synthetic ODS fixture</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body>",
+                _ => "<office:body><office:presentation><draw:page draw:name=\"Slide1\" draw:style-name=\"dp1\"><draw:frame draw:style-name=\"gr1\" draw:text-style-name=\"P1\" svg:width=\"8cm\" svg:height=\"2cm\" svg:x=\"1cm\" svg:y=\"1cm\"><draw:text-box><text:p>Synthetic ODP fixture</text:p></draw:text-box></draw:frame></draw:page></office:presentation></office:body>"
+            };
+            writer.Write($"<office:document-content xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\" xmlns:table=\"urn:oasis:names:tc:opendocument:xmlns:table:1.0\" xmlns:draw=\"urn:oasis:names:tc:opendocument:xmlns:drawing:1.0\" xmlns:svg=\"urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0\">{body}</office:document-content>");
+        }
+        return path;
     }
 
     private static byte[] CreateOnePixelPng()
@@ -139,7 +345,9 @@ internal static class ApplicationImportEvidenceTests
         return ~crc;
     }
 
-    private static void WriteReportIfRequested(IReadOnlyList<object> outcomes)
+    private static void WriteReportIfRequested(IReadOnlyList<object> outcomes, string? libreOfficeVersion,
+        string? libreOfficeEngineSha256, object? mixedBatchPreparation, string? failure = null,
+        bool preparationAvailable = false)
     {
         var reportPath = Environment.GetEnvironmentVariable("PAPERBATCH_APPLICATION_IMPORT_REPORT");
         if (string.IsNullOrWhiteSpace(reportPath)) return;
@@ -153,12 +361,19 @@ internal static class ApplicationImportEvidenceTests
             runAttempt = Environment.GetEnvironmentVariable("GITHUB_RUN_ATTEMPT"),
             runnerOs = Environment.GetEnvironmentVariable("RUNNER_OS"),
             runnerImage = Environment.GetEnvironmentVariable("ImageOS") ?? Environment.GetEnvironmentVariable("ImageVersion"),
+            libreOffice = string.IsNullOrWhiteSpace(libreOfficeVersion) ? null : new { version = libreOfficeVersion, engineSha256 = libreOfficeEngineSha256 },
             outcomes,
+            preparationAvailable,
+            mixedBatchPreparation,
+            failure = string.IsNullOrWhiteSpace(failure) ? null : failure[..Math.Min(failure.Length, 1024)],
             evidenceLimits = new[]
             {
                 "This runs PaperBatch's production queue import path and registered production renderers with synthetic fixtures.",
-                "PDF intake and pass-through artifact persistence are accepted; DOCX, XLSX, and PPTX pass intake checks but have no production renderer and are reported unsupported.",
-                "Malformed OOXML is rejected before rendering. LibreOffice is not invoked by this application import run; standalone LibreOffice conversion does not establish PaperBatch import support.",
+                "PDF and PNG pass-through/raster rendering are accepted. Configured LibreOffice conversion records the actual engine version and executable SHA-256; conversion is not Microsoft Office/WPS equivalence or visual-fidelity evidence.",
+                "The private conversion profile disables macros and external-link refresh. PDFium remains separately required for page inspection, composition, and batch preparation.",
+                "Limits: 512 MiB per source and final PDF; Linux RLIMIT_FSIZE is a hard per-file cap; Windows output monitoring is best-effort and may overshoot before the final 512 MiB check; neither OS caps aggregate profile/cache/temp storage. One conversion runs at a time across processes sharing the same per-user PaperBatch data root; timeout or cancellation stops and reaps the owned process tree before operation-directory cleanup.",
+                "Malformed OOXML is rejected before rendering. macOS conversion remains unsupported.",
+                "Windows mixed-batch preparation and submission use an injected fake print backend that creates no OS print job.",
                 "No Office/WPS compatibility, visual fidelity, desktop printing, or physical output is established."
             }
         };
@@ -167,6 +382,40 @@ internal static class ApplicationImportEvidenceTests
         var fullPath = Path.GetFullPath(reportPath);
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
         File.WriteAllBytes(fullPath, bytes);
+    }
+
+    private sealed class CapturingPrintBackend : IWindowsPrintBackend
+    {
+        public int SubmissionCount { get; private set; }
+
+        public Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(string queueIdentity, CancellationToken cancellationToken = default)
+        {
+            var options = new Dictionary<PrintOption, PrintOptionCapability>
+            {
+                [PrintOption.Media] = new(CapabilityState.Supported, ["Letter"], null),
+                [PrintOption.Color] = new(CapabilityState.Supported, ["Color"], null),
+                [PrintOption.Duplex] = new(CapabilityState.Supported, [nameof(DuplexMode.Simplex)], null),
+                [PrintOption.Copies] = new(CapabilityState.Supported, ["1..1"], null)
+            };
+            return Task.FromResult(new PrinterCapabilitySnapshot(queueIdentity, "Synthetic queue", "Fake test backend",
+                "none", "fake-capability-fingerprint", options));
+        }
+
+        public async Task<OsJobReceipt> SubmitAsync(WindowsPrintSubmission submission, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var bytes = new MemoryStream();
+            await submission.PdfContent.CopyToAsync(bytes, cancellationToken).ConfigureAwait(false);
+            Require(bytes.Length > 0, "Fake print backend received an empty PDF artifact.");
+            SubmissionCount++;
+            return new OsJobReceipt(submission.Options.QueueIdentity, "fake-os-job-" + SubmissionCount,
+                submission.RunNonce, submission.SubmittedAtUtc, "Fake test backend", "none", "fake-capability-fingerprint");
+        }
+
+        public Task<PrintBackendJobStatus> GetStatusAsync(OsJobReceipt receipt, CancellationToken cancellationToken = default) =>
+            Task.FromResult(PrintBackendJobStatus.Accepted);
+
+        public Task<bool> CancelAsync(OsJobReceipt receipt, CancellationToken cancellationToken = default) => Task.FromResult(false);
     }
 
     private static void Require(bool condition, string message)
