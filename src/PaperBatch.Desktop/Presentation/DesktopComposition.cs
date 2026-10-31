@@ -86,21 +86,22 @@ internal static class DesktopComposition
         // Unsupported formats have no renderer. Submission is available only with the pinned PDFium runtime and Windows backend.
         var sources = new ProductionPresentationSources(intake, renderer, cache, rendererAvailable: true,
             artifacts: artifactStore, previewRenderer: previewRenderer, runStore: store, preparationAvailable: preparationAvailable,
-            printerCapabilityReader: printerBackend, printAvailable: printAvailable);
+            printerCapabilityReader: printerBackend, printAvailable: printAvailable,
+            documentConversionConfigured: documentConversionConfigured);
         return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE",
                 !preparationAvailable
                     ? $"PDF pass-through and supported JPEG/PNG artifact rendering are available. Preparation and final preview require an explicitly configured PDFium runtime; read-only printer capability inspection is Windows-only; {DocumentConversionStatus(documentConversionConfigured)}."
                     : !printAvailable
                         ? $"PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. {DocumentConversionStatus(documentConversionConfigured)}; read-only local printer capability inspection is Windows-only and desktop print submission is unavailable."
-                        : $"PDF, JPEG, PNG, and configured LibreOffice document inputs can be prepared with the pinned PDFium runtime. Explicit Windows queue selection and a deliberate Print click submit the persisted PDF through the shared per-user coordinator; displayed states are OS spooler reports, not confirmation of paper output. LibreOffice is not Microsoft Office/WPS equivalence or visual-fidelity evidence.", false));
+                        : $"PDF, JPEG, and PNG inputs can be prepared with the pinned PDFium runtime; {DocumentConversionStatus(documentConversionConfigured)}. Explicit Windows queue selection and a deliberate Print click submit the persisted PDF through the shared per-user coordinator; displayed states are OS spooler reports, not confirmation of paper output. LibreOffice is not Microsoft Office/WPS equivalence or visual-fidelity evidence.", false));
     }
 
-    private static string DocumentConversionStatus(bool configured) => configured
-        ? "the explicitly pinned LibreOffice document converter is configured"
+    internal static string DocumentConversionStatus(bool configured) => configured
+        ? "a LibreOffice engine path and SHA-256 pin are configured; conversion availability is checked at runtime"
         : OperatingSystem.IsMacOS()
-            ? "LibreOffice document conversion is unsupported on macOS"
-            : "LibreOffice document conversion requires an explicit engine path and trusted SHA-256 pin";
+            ? "document conversion is unsupported on macOS"
+            : "document conversion requires an explicit engine path and trusted SHA-256 pin";
 
     private static bool IsExplicitLibreOfficePinConfigured(string? enginePath, string? engineSha256) =>
         (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) &&
@@ -157,6 +158,7 @@ internal sealed class ProductionPresentationSources :
     private readonly IPdfArtifactPreviewRenderer? _previewRenderer;
     private readonly SqliteRunStore? _runStore;
     private readonly bool _preparationAvailable;
+    private readonly bool _documentConversionConfigured;
     private readonly IWindowsGdiNativeAdapter? _printerCapabilityReader;
     private readonly bool _printAvailable;
     private readonly ILocalCoordinatorTransport _coordinatorTransport;
@@ -178,7 +180,7 @@ internal sealed class ProductionPresentationSources :
         RenderArtifactStore? artifacts = null, IPdfArtifactPreviewRenderer? previewRenderer = null,
         SqliteRunStore? runStore = null, bool preparationAvailable = false,
         IWindowsGdiNativeAdapter? printerCapabilityReader = null, bool printAvailable = false,
-        ILocalCoordinatorTransport? coordinatorTransport = null)
+        ILocalCoordinatorTransport? coordinatorTransport = null, bool documentConversionConfigured = false)
     {
         _intake = intake;
         _renderer = renderer ?? new RendererCoordinator(Array.Empty<IRendererAdapter>());
@@ -188,6 +190,7 @@ internal sealed class ProductionPresentationSources :
         _previewRenderer = previewRenderer;
         _runStore = runStore;
         _preparationAvailable = preparationAvailable;
+        _documentConversionConfigured = documentConversionConfigured;
         _printerCapabilityReader = printerCapabilityReader;
         _printAvailable = printAvailable;
         _coordinatorTransport = coordinatorTransport ?? new AutoStartingCoordinatorTransport();
@@ -477,8 +480,15 @@ internal sealed class ProductionPresentationSources :
                         RendererExecutionContext.BackgroundWorker), TimeSpan.FromMinutes(2), cancellationToken), cancellationToken).ConfigureAwait(false);
                     if (result.Status == RenderStatus.Succeeded && result.Artifact is not null)
                     {
-                        status = "Ready to prepare · " + format;
-                        _preparableQueueItems.Add(id);
+                        if (_preparationAvailable)
+                        {
+                            status = "Ready to prepare · " + format;
+                            _preparableQueueItems.Add(id);
+                        }
+                        else
+                        {
+                            status = "Artifact available · " + format + "; PDFium is required for preparation";
+                        }
                     }
                     else
                     {
@@ -711,8 +721,8 @@ internal sealed class ProductionPresentationSources :
     public IReadOnlyList<EffectiveSettingSnapshot> GetEffectiveSettings(string queueItemId) =>
         [new("Renderer", _rendererAvailable ? "Partial" : "Unavailable", _rendererAvailable
             ? (!_preparationAvailable
-                ? "Background PDF pass-through and JPEG/PNG artifact rendering are configured; preparation needs the explicitly pinned PDFium runtime."
-                : "Pinned PDFium preparation is configured for supported PDF/JPEG/PNG formats; Office and other unregistered formats remain unsupported.")
+                ? $"Background PDF pass-through and JPEG/PNG artifact rendering are configured; {DesktopComposition.DocumentConversionStatus(_documentConversionConfigured)}; preparation needs the explicitly pinned PDFium runtime."
+                : $"Pinned PDFium preparation is configured for supported PDF/JPEG/PNG formats; {DesktopComposition.DocumentConversionStatus(_documentConversionConfigured)}.")
             : "No renderer is configured; no setting is treated as effective."),
          new("Printer", "Not selected", "The UI does not choose a default printer or silently substitute one.")];
     public void RegisterPreparedRun(string queueItemId, PreparedRun run)

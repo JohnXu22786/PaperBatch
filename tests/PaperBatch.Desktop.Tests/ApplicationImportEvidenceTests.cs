@@ -18,17 +18,23 @@ internal static class ApplicationImportEvidenceTests
     {
         var root = Path.Combine(Path.GetTempPath(), "paperbatch-app-import-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
+        var outcomes = new List<object>(10);
+        string? actualLibreOfficeVersion = null;
+        string? engineHash = null;
+        object? mixedBatch = null;
         try
         {
             var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
             var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
             var renderer = DesktopComposition.CreateProductionRenderer(cache, artifacts);
-            var presentation = new ProductionPresentationSources(new SourceIntakeService(cache), renderer, cache,
-                rendererAvailable: true, artifacts: artifacts);
             var enginePath = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_PATH");
-            var engineHash = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_SHA256");
+            engineHash = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_SHA256");
             var conversionConfigured = (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) &&
                 !string.IsNullOrWhiteSpace(enginePath) && engineHash?.Length == 64 && engineHash.All(Uri.IsHexDigit);
+            const bool preparationAvailable = false;
+            var presentation = new ProductionPresentationSources(new SourceIntakeService(cache), renderer, cache,
+                rendererAvailable: true, artifacts: artifacts, preparationAvailable: preparationAvailable,
+                documentConversionConfigured: conversionConfigured);
             var pngPath = Path.Combine(root, "synthetic_one_pixel.png");
             var rtfPath = Path.Combine(root, "synthetic_text.rtf");
             File.WriteAllText(rtfPath, "{\\rtf1\\ansi Synthetic RTF fixture}", System.Text.Encoding.ASCII);
@@ -53,8 +59,6 @@ internal static class ApplicationImportEvidenceTests
             var queueItems = presentation.ImportAsync(fixtures.Select(item => item.Path)).GetAwaiter().GetResult();
             Require(queueItems.Count == fixtures.Length, "Production import did not return one queue row per selected fixture.");
 
-            var outcomes = new List<object>(fixtures.Length);
-            string? actualLibreOfficeVersion = null;
             for (var index = 0; index < fixtures.Length; index++)
             {
                 var fixture = fixtures[index];
@@ -69,15 +73,16 @@ internal static class ApplicationImportEvidenceTests
                 if (fixture.ExpectedOutcome is "accepted" or "converted")
                 {
                     actualOutcome = fixture.ExpectedOutcome;
-                    Require(queueItem.Status.StartsWith("Ready to prepare · ", StringComparison.Ordinal),
-                        $"{fixture.Extension} did not become an application queue item ready to prepare.");
+                    var expectedStatusPrefix = preparationAvailable ? "Ready to prepare · " : "Artifact available · ";
+                    Require(queueItem.Status.StartsWith(expectedStatusPrefix, StringComparison.Ordinal),
+                        $"{fixture.Extension} did not report its expected application queue capability; queue status was '{queueItem.Status}', renderer status was '{rendererStatus ?? "missing"}', and renderer detail was '{rendererFinding?.Detail ?? "missing"}'.");
                     Require(rendererStatus == RenderStatus.Succeeded.ToString(), $"{fixture.Extension} import did not persist an application render artifact.");
                     Require(rendererFinding!.Detail.Contains("persisted", StringComparison.Ordinal), $"{fixture.Extension} import did not report its persisted artifact result.");
                     if (fixture.ExpectedOutcome == "converted")
                     {
                         var tokens = rendererFinding.Detail.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                        Require(tokens.Length >= 3 && tokens[0] == "Rendered" && tokens[1] == "artifact",
-                            $"{fixture.Extension} did not report a persisted converted artifact identity.");
+                        Require(tokens.Length >= 3 && tokens[1] == "artifact" && tokens[0] is "Rendered" or "PDF",
+                            $"{fixture.Extension} did not report a persisted converted artifact identity; renderer detail was '{rendererFinding.Detail}'.");
                         var receipt = artifacts.GetReceipt(tokens[2]);
                         Require(receipt.EngineId == "libreoffice", $"{fixture.Extension} artifact did not record LibreOffice.");
                         var pinnedVersion = Environment.GetEnvironmentVariable("PAPERBATCH_LO_EXPECTED_VERSION");
@@ -120,15 +125,25 @@ internal static class ApplicationImportEvidenceTests
                     applicationOutcome = actualOutcome,
                     queueStatus = queueItem.Status,
                     rendererStatus,
+                    rendererDetail = rendererFinding?.Detail,
                     intakeDiagnostic
                 });
             }
 
-            var mixedBatch = OperatingSystem.IsWindows() && conversionConfigured &&
+            mixedBatch = OperatingSystem.IsWindows() && conversionConfigured &&
                 !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH"))
                 ? PrepareAndFakePrintMixedBatch(fixtures.Where(item => item.ExpectedOutcome is "accepted" or "converted").ToArray(), cache, artifacts, renderer)
                 : null;
-            WriteReportIfRequested(outcomes, actualLibreOfficeVersion, engineHash, mixedBatch);
+            WriteReportIfRequested(outcomes, actualLibreOfficeVersion, engineHash, mixedBatch, preparationAvailable: preparationAvailable);
+        }
+        catch (Exception exception)
+        {
+            try { WriteReportIfRequested(outcomes, actualLibreOfficeVersion, engineHash, mixedBatch, exception.Message, preparationAvailable: false); }
+            catch (Exception reportException)
+            {
+                Console.Error.WriteLine($"Application import failure evidence could not be written: {reportException.GetType().Name}.");
+            }
+            throw;
         }
         finally
         {
@@ -277,7 +292,8 @@ internal static class ApplicationImportEvidenceTests
     }
 
     private static void WriteReportIfRequested(IReadOnlyList<object> outcomes, string? libreOfficeVersion,
-        string? libreOfficeEngineSha256, object? mixedBatchPreparation)
+        string? libreOfficeEngineSha256, object? mixedBatchPreparation, string? failure = null,
+        bool preparationAvailable = false)
     {
         var reportPath = Environment.GetEnvironmentVariable("PAPERBATCH_APPLICATION_IMPORT_REPORT");
         if (string.IsNullOrWhiteSpace(reportPath)) return;
@@ -293,7 +309,9 @@ internal static class ApplicationImportEvidenceTests
             runnerImage = Environment.GetEnvironmentVariable("ImageOS") ?? Environment.GetEnvironmentVariable("ImageVersion"),
             libreOffice = string.IsNullOrWhiteSpace(libreOfficeVersion) ? null : new { version = libreOfficeVersion, engineSha256 = libreOfficeEngineSha256 },
             outcomes,
+            preparationAvailable,
             mixedBatchPreparation,
+            failure = string.IsNullOrWhiteSpace(failure) ? null : failure[..Math.Min(failure.Length, 1024)],
             evidenceLimits = new[]
             {
                 "This runs PaperBatch's production queue import path and registered production renderers with synthetic fixtures.",

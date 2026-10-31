@@ -66,14 +66,17 @@ def render(path: Path) -> tuple[str, int]:
                 )
     if not valid:
         lines.insert(4, "Application import report identity, outcomes, or evidence limits failed validation; this run is not a pass.")
+    failure = report.get("failure") if isinstance(report, dict) else None
+    if isinstance(failure, str) and failure:
+        bounded_failure = " ".join(failure.split())[:500].replace("|", "\\|").replace("`", "'")
+        lines.insert(5, f"Import test stopped: `{bounded_failure}`")
     engine = report.get("libreOffice") if isinstance(report, dict) else None
     if isinstance(engine, dict):
         lines.append(f"LibreOffice: `{engine.get('version', 'unknown')}`; engine SHA-256 `{engine.get('engineSha256', 'unknown')}`.")
-    lines.extend([
-        "",
-        "This exercises PaperBatch's production queue-import path and configured pinned LibreOffice renderer. PDF/PNG and supported document formats produce persisted artifacts; malformed OOXML is rejected before rendering.",
-        "LibreOffice conversion is not Microsoft Office/WPS equivalence or visual-fidelity evidence. PDFium remains separately required for page inspection, composition, and batch preparation. No printer or physical-output claim is made.",
-    ])
+        lines.append("This run exercised PaperBatch's production queue-import path with the configured pinned LibreOffice renderer. PDF/PNG and supported document formats produced persisted artifacts; malformed OOXML was rejected before rendering.")
+    else:
+        lines.append("This run exercised PaperBatch's production queue-import path without a configured LibreOffice renderer. PDF/PNG inputs produced persisted artifacts; document formats remained unsupported.")
+    lines.append("LibreOffice conversion is not Microsoft Office/WPS equivalence or visual-fidelity evidence. PDFium remains separately required for page inspection, composition, and batch preparation. No printer or physical-output claim is made.")
     mixed = report.get("mixedBatchPreparation") if isinstance(report, dict) else None
     if isinstance(mixed, dict):
         lines.append(
@@ -87,6 +90,8 @@ def render(path: Path) -> tuple[str, int]:
 def _valid_report(report: Any) -> bool:
     if not isinstance(report, dict) or report.get("schemaVersion") != 1 or report.get("evidenceType") != "paperbatch-production-queue-import":
         return False
+    if report.get("failure") is not None:
+        return False
     if report.get("sourceCommit") != os.environ.get("PB_SOURCE_COMMIT"):
         return False
     for field, env_name in (("workflow", "GITHUB_WORKFLOW"), ("runId", "GITHUB_RUN_ID"),
@@ -94,6 +99,9 @@ def _valid_report(report: Any) -> bool:
         if report.get(field) != os.environ.get(env_name):
             return False
     configured = os.environ.get("RUNNER_OS") in ("Linux", "Windows")
+    preparation_available = report.get("preparationAvailable")
+    if not isinstance(preparation_available, bool):
+        return False
     expected = {name: (format_name, ("converted" if configured else "unsupported") if result == "document" else result)
                 for name, (format_name, result) in EXPECTED_BASE.items()}
     outcomes = report.get("outcomes")
@@ -116,7 +124,8 @@ def _valid_report(report: Any) -> bool:
         queue_status = item.get("queueStatus")
         if not isinstance(queue_status, str):
             return False
-        if outcome in ("accepted", "converted") and (not queue_status.startswith("Ready to prepare · ") or renderer != "Succeeded"):
+        expected_status_prefix = "Ready to prepare · " if preparation_available else "Artifact available · "
+        if outcome in ("accepted", "converted") and (not queue_status.startswith(expected_status_prefix) or renderer != "Succeeded"):
             return False
         if outcome == "unsupported" and (queue_status != "Unsupported format" or renderer != "Unsupported"):
             return False
@@ -139,11 +148,17 @@ def _valid_report(report: Any) -> bool:
         if not isinstance(mixed, dict):
             return False
         prepared_artifact = mixed.get("preparedArtifact")
+        source_order = mixed.get("sourceOrder")
+        expected_source_order = [item["sha256"] for item in report["outcomes"]
+                                 if item["applicationOutcome"] in ("accepted", "converted")]
         if (mixed.get("sourceCount") != 9 or mixed.get("segmentCount") != 1
                 or mixed.get("jobCount") != 1 or mixed.get("fakeBackendSubmissions") != 1
                 or mixed.get("replaySubmissions") != 0
+                or not isinstance(source_order, list) or source_order != expected_source_order
                 or not isinstance(prepared_artifact, dict)
-                or not re.fullmatch(r"[0-9a-f]{64}", str(prepared_artifact.get("sha256", "")))):
+                or not re.fullmatch(r"[0-9a-f]{64}", str(prepared_artifact.get("sha256", "")))
+                or type(prepared_artifact.get("lengthBytes")) is not int or prepared_artifact["lengthBytes"] <= 0
+                or type(prepared_artifact.get("pageCount")) is not int or prepared_artifact["pageCount"] <= 0):
             return False
     elif mixed is not None:
         return False

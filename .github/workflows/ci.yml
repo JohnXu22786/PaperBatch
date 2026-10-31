@@ -182,7 +182,16 @@ jobs:
         id: headless-desktop-tests
         env:
           PAPERBATCH_APPLICATION_IMPORT_REPORT: ${{ runner.temp }}/paperbatch-application-import-report.json
-        run: dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
+        run: python tools/capture_bounded_command_output.py --output "${{ runner.temp }}/paperbatch-desktop-test-output.txt" -- dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
+
+      - name: Upload bounded focused desktop test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paperbatch-desktop-test-output-${{ runner.os }}
+          path: ${{ runner.temp }}/paperbatch-desktop-test-output.txt
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload bounded PaperBatch application import report
         if: always()

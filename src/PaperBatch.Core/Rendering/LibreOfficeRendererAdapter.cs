@@ -1,6 +1,9 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.ComponentModel;
 using PaperBatch.Core.Intake;
 
@@ -63,7 +66,8 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
         if (request.ExecutionContext != RendererExecutionContext.BackgroundWorker || !SupportedFormats.Contains(request.Format) ||
-            !(OperatingSystem.IsLinux() || OperatingSystem.IsWindows()) || !File.Exists(_enginePath) || !File.Exists(_launcherPath))
+            !(OperatingSystem.IsLinux() || OperatingSystem.IsWindows()) || !File.Exists(_enginePath) || !File.Exists(_launcherPath) ||
+            (OperatingSystem.IsWindows() && !File.Exists(Path.Combine(_programDirectory, "fundamental.ini"))))
             return ValueTask.FromResult(false);
 
         try
@@ -185,7 +189,12 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         var startInfo = CreateBaseStartInfo(profileUri, stagedEnginePath);
         startInfo.ArgumentList.Add("--version");
         var result = await RunOwnedProcessAsync(startInfo, TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);
-        if (result.Status != OwnedProcessStatus.Exited || result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.Output)) return null;
+        if (result.Status != OwnedProcessStatus.Exited || result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.Output))
+        {
+            if (Environment.GetEnvironmentVariable("PAPERBATCH_LO_DIAGNOSTICS") == "1")
+                Console.Error.WriteLine($"LibreOffice version query failed: status={result.Status}, exit={result.ExitCode}, output={result.Output}");
+            return null;
+        }
         var lines = result.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         return lines.FirstOrDefault(line => line.StartsWith("LibreOffice ", StringComparison.OrdinalIgnoreCase) ||
             line.StartsWith("LibreOfficeDev ", StringComparison.OrdinalIgnoreCase));
@@ -212,6 +221,9 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         }
         else if (OperatingSystem.IsWindows())
         {
+            info.Environment.Remove("URE_BOOTSTRAP");
+            var fundamental = Path.Combine(_programDirectory, "fundamental.ini");
+            info.Environment["URE_BOOTSTRAP"] = new Uri(fundamental).AbsoluteUri;
             var existingPath = info.Environment.TryGetValue("PATH", out var path) ? path : string.Empty;
             info.Environment["PATH"] = string.IsNullOrEmpty(existingPath)
                 ? _programDirectory
@@ -245,6 +257,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         }
     }
 
+    [SupportedOSPlatform("windows")]
     private void VerifyWindowsRuntimeInstallationReadOnly()
     {
         var root = Path.GetFullPath(_installationDirectory).TrimEnd(Path.DirectorySeparatorChar);
@@ -256,6 +269,9 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         if (!programFiles.Any(path => root.StartsWith(path.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
                 StringComparison.OrdinalIgnoreCase)))
             throw new UnauthorizedAccessException("The LibreOffice runtime must be installed below a protected Program Files directory.");
+        var protectedProgramFiles = programFiles.First(path => root.StartsWith(
+            path.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+        VerifyWindowsRuntimeEntryAcl(protectedProgramFiles);
 
         for (var current = new DirectoryInfo(root); current is not null; current = current.Parent)
         {
@@ -274,6 +290,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             var directory = pending.Pop();
             if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
                 throw new UnauthorizedAccessException("A LibreOffice runtime directory cannot be a reparse point.");
+            VerifyWindowsRuntimeEntryAcl(directory);
             foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
             {
                 if (++checkedEntries > 20_000)
@@ -281,6 +298,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
                 var attributes = File.GetAttributes(entry);
                 if ((attributes & FileAttributes.ReparsePoint) != 0)
                     throw new UnauthorizedAccessException("A LibreOffice runtime entry cannot be a reparse point.");
+                VerifyWindowsRuntimeEntryAcl(entry);
                 if ((attributes & FileAttributes.Directory) != 0) pending.Push(entry);
             }
         }
@@ -292,6 +310,45 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
                 throw new UnauthorizedAccessException("The configured LibreOffice engine or launcher escapes its protected installation.");
         }
     }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyWindowsRuntimeEntryAcl(string path)
+    {
+        var security = Directory.Exists(path)
+            ? (FileSystemSecurity)new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner)
+            : new FileInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier ??
+            throw new UnauthorizedAccessException("A LibreOffice runtime entry has no resolvable owner SID.");
+        var currentUser = WindowsIdentity.GetCurrent().User?.Value;
+        if (!IsTrustedWindowsWriter(owner.Value, currentUser))
+            throw new UnauthorizedAccessException("A LibreOffice runtime entry is owned by an untrusted account.");
+
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true,
+            typeof(SecurityIdentifier));
+        foreach (FileSystemAccessRule rule in rules)
+        {
+            if (rule.AccessControlType != AccessControlType.Allow ||
+                (rule.PropagationFlags & PropagationFlags.InheritOnly) != 0 ||
+                (rule.FileSystemRights & UntrustedWindowsWriteRights) == 0)
+                continue;
+            if (rule.IdentityReference is SecurityIdentifier sid && IsTrustedWindowsWriter(sid.Value, currentUser))
+                continue;
+            throw new UnauthorizedAccessException("A LibreOffice runtime entry grants write access to an untrusted account.");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static bool IsTrustedWindowsWriter(string sid, string? currentUser) =>
+        string.Equals(sid, currentUser, StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(sid, "S-1-5-18", StringComparison.Ordinal) || // Local System
+        string.Equals(sid, "S-1-5-32-544", StringComparison.Ordinal) || // Builtin Administrators
+        string.Equals(sid, "S-1-3-0", StringComparison.Ordinal) || // Creator Owner; actual object owner is checked separately
+        string.Equals(sid, "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", StringComparison.Ordinal); // TrustedInstaller
+
+    [SupportedOSPlatform("windows")]
+    private const FileSystemRights UntrustedWindowsWriteRights = FileSystemRights.Write | FileSystemRights.Modify |
+        FileSystemRights.Delete | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership |
+        FileSystemRights.CreateFiles | FileSystemRights.CreateDirectories | FileSystemRights.DeleteSubdirectoriesAndFiles;
 
     private static void EnsureTrustedPath(string path, string trustedRoot)
     {
