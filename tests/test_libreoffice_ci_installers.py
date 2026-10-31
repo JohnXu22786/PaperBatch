@@ -98,7 +98,11 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertIn("26.2.2.2", macos)
         linux = (ROOT / "tools/install_libreoffice_linux.sh").read_text(encoding="utf-8")
         self.assertIn("gpgv --status-fd=1", linux)
-        self.assertIn("/opt/libreoffice26.2/program/soffice.bin", linux)
+        self.assertIn("install_root='/usr/local/lib/paperbatch-libreoffice26.2'", linux)
+        self.assertIn("cp -a \"$source_install/.\" \"$install_root/\"", linux)
+        self.assertIn('engine="$install_root/program/soffice.bin"', linux)
+        self.assertIn('launcher="$install_root/program/soffice"', linux)
+        self.assertNotIn("engine='/opt/libreoffice26.2/program/soffice.bin'", linux)
 
     def test_windows_installer_version_check_requires_a_token_boundary(self):
         windows = (ROOT / "tools/install_libreoffice_windows.ps1").read_text(encoding="utf-8")
