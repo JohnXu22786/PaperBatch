@@ -39,6 +39,7 @@ internal static class ApplicationImportEvidenceTests
             var rtfPath = Path.Combine(root, "synthetic_text.rtf");
             File.WriteAllText(rtfPath, "{\\rtf1\\ansi Synthetic RTF fixture}", System.Text.Encoding.ASCII);
             File.WriteAllBytes(pngPath, CreateOnePixelPng());
+            var docxPath = WriteDocxFixture(root, "synthetic_sections_table.docx");
             var odtPath = WriteOdfFixture(root, "synthetic_text.odt", "application/vnd.oasis.opendocument.text", "text");
             var odsPath = WriteOdfFixture(root, "synthetic_table.ods", "application/vnd.oasis.opendocument.spreadsheet", "spreadsheet");
             var odpPath = WriteOdfFixture(root, "synthetic_slide.odp", "application/vnd.oasis.opendocument.presentation", "presentation");
@@ -46,7 +47,7 @@ internal static class ApplicationImportEvidenceTests
             {
                 Fixture("synthetic_two_page.pdf", "pdf", "accepted"),
                 Fixture(pngPath, "png", "accepted"),
-                Fixture("synthetic_sections_table.docx", "docx", conversionConfigured ? "converted" : "unsupported"),
+                Fixture(docxPath, "docx", conversionConfigured ? "converted" : "unsupported"),
                 Fixture("synthetic_mixed_page_sizes.xlsx", "xlsx", conversionConfigured ? "converted" : "unsupported"),
                 Fixture("synthetic_two_slides.pptx", "pptx", conversionConfigured ? "converted" : "unsupported"),
                 Fixture(rtfPath, "rtf", conversionConfigured ? "converted" : "unsupported"),
@@ -225,6 +226,47 @@ internal static class ApplicationImportEvidenceTests
             try { Directory.Delete(root, recursive: true); }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    private static string WriteDocxFixture(string root, string name)
+    {
+        var path = Path.Combine(root, name);
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+        WriteEntry("[Content_Types].xml",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">" +
+            "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>" +
+            "<Default Extension=\"xml\" ContentType=\"application/xml\"/>" +
+            "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>" +
+            "<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>" +
+            "</Types>");
+        WriteEntry("_rels/.rels",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>" +
+            "</Relationships>");
+        WriteEntry("word/_rels/document.xml.rels",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>" +
+            "</Relationships>");
+        WriteEntry("word/styles.xml",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">" +
+            "<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/><w:qFormat/></w:style>" +
+            "<w:style w:type=\"paragraph\" w:styleId=\"Title\"><w:name w:val=\"Title\"/><w:basedOn w:val=\"Normal\"/><w:qFormat/></w:style>" +
+            "</w:styles>");
+        WriteEntry("word/document.xml",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>" +
+            "<w:p><w:pPr><w:pStyle w:val=\"Title\"/></w:pPr><w:r><w:t>PaperBatch synthetic conversion fixture</w:t></w:r></w:p>" +
+            "<w:p><w:pPr><w:sectPr><w:type w:val=\"nextPage\"/><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr></w:pPr><w:r><w:t>Synthetic section one</w:t></w:r></w:p>" +
+            "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w=\"2400\"/><w:gridCol w:w=\"4800\"/></w:tblGrid><w:tr>" +
+            "<w:tc><w:p><w:r><w:t>Label</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Synthetic value</w:t></w:r></w:p></w:tc></w:tr></w:tbl>" +
+            "<w:sectPr><w:pgSz w:w=\"15840\" w:h=\"12240\" w:orient=\"landscape\"/></w:sectPr></w:body></w:document>");
+        return path;
+
+        void WriteEntry(string entryName, string content)
+        {
+            var entry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
+            using var writer = new StreamWriter(entry.Open(), new System.Text.UTF8Encoding(false));
+            writer.Write(content);
         }
     }
 
