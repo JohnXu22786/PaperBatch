@@ -61,6 +61,9 @@ if (args.Length == 6 && args[0] == "--source-cache-worker")
     return SourceIntakeTests.RunCrossProcessCacheWorker(args[1], args[2], args[3], args[4], args[5]);
 }
 
+if (args.Length >= 2 && args[0] == "--office-probe-output-child")
+    return OfficeProbeProcessTests.RunChild(args[1], args.Skip(2).ToArray());
+
 var tests = new List<(string Name, Action Run)>
 {
     ("app data override isolates the resolved PaperBatch local data root", CoreTests.AppDataPathHonorsExplicitOverride),
@@ -105,6 +108,8 @@ var tests = new List<(string Name, Action Run)>
     ("cancelled render is not launched", RendererTests.CancelledRequestDoesNotLaunchAnAdapter),
     ("renderer capability failure does not try another adapter", RendererTests.CapabilityFailureStopsWithoutTryingAnotherAdapter),
     ("pinned LibreOffice version requires a token boundary", RendererTests.PinnedLibreOfficeVersionRequiresTokenBoundary),
+    ("OfficeProbe bounds concurrent version process output", OfficeProbeProcessTests.BoundsConcurrentVersionOutput),
+    ("OfficeProbe stops timed-out version process output", OfficeProbeProcessTests.StopsTimedOutVersionProcess),
     ("physical device output is required for G1", PhysicalDeviceOutputIsRequiredForG1),
     ("suite-specific evidence is required", SuiteSpecificEvidenceIsRequired),
     ("queue and driver inventory does not verify a print route", QueueAndDriverInventoryDoesNotVerifyPrintRoute),
@@ -365,6 +370,9 @@ if (OperatingSystem.IsLinux())
     tests.Add(("LibreOffice file-size limit is enforced by the kernel", RendererTests.LibreOfficeFileSizeLimitIsEnforcedByTheKernel));
     tests.Add(("LibreOffice version timeout stops its owned process", RendererTests.LibreOfficeVersionQueryStopsOnTimeout));
 }
+
+if (args.Length == 1 && args[0] == "--office-probe-output-only")
+    tests = tests.Where(test => test.Name.StartsWith("OfficeProbe ", StringComparison.Ordinal)).ToList();
 Console.WriteLine("SKIP native LibreOffice integration (not part of the pre-U10 print-path evidence lane)");
 
 var failures = 0;

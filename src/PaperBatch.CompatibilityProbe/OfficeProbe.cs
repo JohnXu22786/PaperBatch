@@ -5,8 +5,10 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 using Microsoft.Win32;
+using System.ComponentModel;
 
 namespace PaperBatch.CompatibilityProbe;
 
@@ -40,10 +42,18 @@ internal sealed record LibreOfficeVersionEvidenceValue(
     string ExpectedSha256,
     string RuntimeComponentsSha256);
 
+internal readonly record struct BoundedVersionProcessResult(
+    bool Exited,
+    int ExitCode,
+    string StandardOutput,
+    string StandardError);
+
 internal sealed record OfficeBinaryInspection(string Sha256, string? Architecture, long SizeBytes);
 
 public static class OfficeProbe
 {
+    internal const int MaximumVersionOutputCharacters = 4096;
+
     private static readonly string[] ExecutableNames =
     [
         "soffice",
@@ -921,26 +931,25 @@ public static class OfficeProbe
                 return ProbeEvidence.Blocked(EvidenceSource.Native, "isolated LibreOffice --version process", "The process could not be started.");
             }
 
-            var standardOutput = process.StandardOutput.ReadToEndAsync();
-            var standardError = process.StandardError.ReadToEndAsync();
-            if (!process.WaitForExit(15_000))
+            var result = RunVersionProcessWithBoundedOutput(process, TimeSpan.FromMilliseconds(15_000));
+            if (!result.Exited)
             {
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit();
                 snapshot.VerifyRuntimeComponentsUnchanged();
-                return ProbeEvidence.Blocked(EvidenceSource.Native, "isolated LibreOffice --version process", "The probe-owned process exceeded the 15 second timeout and was stopped.");
+                return ProbeEvidence.Blocked(
+                    EvidenceSource.Native,
+                    "isolated LibreOffice --version process",
+                    "The probe exceeded the 15 second timeout; complete process-tree termination could not be confirmed.");
             }
 
-            Task.WaitAll(standardOutput, standardError);
             snapshot.VerifyRuntimeComponentsUnchanged();
-            var output = (standardOutput.Result + "\n" + standardError.Result).Trim();
-            if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
+            var output = (result.StandardOutput + "\n" + result.StandardError).Trim();
+            if (result.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
             {
                 var diagnostic = output.Length > 500 ? output[..500] : output;
                 return ProbeEvidence.Blocked(
                     EvidenceSource.Native,
                     "isolated LibreOffice --version process",
-                    $"The isolated version command exited with code {process.ExitCode}. {diagnostic}");
+                    $"The isolated version command exited with code {result.ExitCode}. {diagnostic}");
             }
 
             if (!IsLibreOfficeVersionOutput(output))
@@ -982,6 +991,125 @@ public static class OfficeProbe
                 // The report remains valid; a temporary-profile cleanup failure is not a native pass.
             }
         }
+    }
+
+    internal static BoundedVersionProcessResult RunVersionProcessWithBoundedOutput(
+        Process process,
+        TimeSpan timeout)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+
+        using var processTree = VersionProcessTree.Create(process);
+        using var cancellation = new CancellationTokenSource();
+        var standardOutput = ReadBoundedVersionOutputAsync(process.StandardOutput, cancellation.Token);
+        var standardError = ReadBoundedVersionOutputAsync(process.StandardError, cancellation.Token);
+        var completion = Task.WhenAll(process.WaitForExitAsync(), standardOutput, standardError);
+        var timer = Stopwatch.StartNew();
+        var cleanupBudget = TimeSpan.FromMilliseconds(Math.Min(1000, timeout.TotalMilliseconds / 4));
+        try
+        {
+            completion.WaitAsync(timeout - cleanupBudget).GetAwaiter().GetResult();
+        }
+        catch (TimeoutException)
+        {
+            try
+            {
+                processTree.Terminate(process, timeout - timer.Elapsed);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or PlatformNotSupportedException)
+            {
+            }
+
+            cancellation.Cancel();
+            process.StandardOutput.Dispose();
+            process.StandardError.Dispose();
+            ObserveDrainCompletion(standardOutput);
+            ObserveDrainCompletion(standardError);
+            return new BoundedVersionProcessResult(false, -1, string.Empty, string.Empty);
+        }
+
+        return new BoundedVersionProcessResult(
+            true,
+            process.ExitCode,
+            standardOutput.GetAwaiter().GetResult(),
+            standardError.GetAwaiter().GetResult());
+    }
+
+    private static async Task<string> ReadBoundedVersionOutputAsync(StreamReader reader, CancellationToken cancellationToken)
+    {
+        var buffer = new char[1024];
+        var captured = new StringBuilder(MaximumVersionOutputCharacters);
+        try
+        {
+            int count;
+            while ((count = await reader.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) != 0)
+            {
+                var remaining = MaximumVersionOutputCharacters - captured.Length;
+                if (remaining > 0)
+                    captured.Append(buffer, 0, Math.Min(count, remaining));
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        return captured.ToString();
+    }
+
+    private static void ObserveDrainCompletion(Task<string> drain)
+    {
+        _ = drain.ContinueWith(
+            completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private sealed class VersionProcessTree : IDisposable
+    {
+        private readonly SafeFileHandle? _job;
+
+        private VersionProcessTree(SafeFileHandle? job)
+        {
+            _job = job;
+        }
+
+        public static VersionProcessTree Create(Process process)
+        {
+            if (!OperatingSystem.IsWindows()) return new VersionProcessTree(null);
+
+            var job = CreateJobObject(IntPtr.Zero, null);
+            if (!job.IsInvalid && AssignProcessToJobObject(job, process.Handle))
+                return new VersionProcessTree(job);
+            job.Dispose();
+            return new VersionProcessTree(null);
+        }
+
+        public void Terminate(Process process, TimeSpan waitBudget)
+        {
+            if (_job is { IsInvalid: false, IsClosed: false })
+                _ = TerminateJobObject(_job, 1);
+
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                if (waitBudget > TimeSpan.Zero)
+                    process.WaitForExit((int)Math.Min(int.MaxValue, waitBudget.TotalMilliseconds));
+            }
+        }
+
+        public void Dispose() => _job?.Dispose();
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateJobObject(IntPtr jobAttributes, string? name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AssignProcessToJobObject(SafeFileHandle job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool TerminateJobObject(SafeFileHandle job, uint exitCode);
+
     }
 
     private static bool IsLibreOfficeVersionOutput(string output)
