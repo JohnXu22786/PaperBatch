@@ -1002,6 +1002,33 @@ public static class SourceFormatPreflight
     private static bool IsJpegStartOfFrame(byte marker) => marker is >= 0xc0 and <= 0xc3 or >= 0xc5 and <= 0xc7 or
         >= 0xc9 and <= 0xcb or >= 0xcd and <= 0xcf;
 
+    private static bool IsValidJpegScanParameters(
+        byte frameMarker,
+        int componentCount,
+        byte precision,
+        byte spectralStart,
+        byte spectralEnd,
+        byte successiveApproximation)
+    {
+        var highApproximation = successiveApproximation >> 4;
+        var lowApproximation = successiveApproximation & 0x0f;
+        if (frameMarker is 0xc2 or 0xc6 or 0xca or 0xce)
+        {
+            return spectralStart <= 63 && spectralEnd <= 63 && spectralStart <= spectralEnd &&
+                   (spectralStart == 0 ? spectralEnd == 0 : componentCount == 1) &&
+                   highApproximation <= 13 && lowApproximation <= 13 &&
+                   (highApproximation == 0 || highApproximation == lowApproximation + 1);
+        }
+
+        if (frameMarker is 0xc3 or 0xc7 or 0xcb or 0xcf)
+        {
+            return spectralStart is >= 1 and <= 7 && spectralEnd == 0 &&
+                   highApproximation == 0 && lowApproximation < precision;
+        }
+
+        return spectralStart == 0 && spectralEnd == 63 && successiveApproximation == 0;
+    }
+
     private static bool ValidateJpeg(
         Stream input,
         long length,
@@ -1018,12 +1045,25 @@ public static class SourceFormatPreflight
         var offset = 2L;
         var hasFrame = false;
         var hasScan = false;
+        byte frameMarker = 0;
+        var restartInterval = 0;
         var markerCount = 0;
         long scanOffset = -1;
         Span<byte> markerByte = stackalloc byte[1];
         Span<byte> lengthBytes = stackalloc byte[2];
         Span<byte> frameHeader = stackalloc byte[6];
+        Span<byte> componentHeader = stackalloc byte[3];
+        Span<byte> restartIntervalBytes = stackalloc byte[2];
         Span<byte> scanComponents = stackalloc byte[1];
+        Span<byte> scanComponentSpec = stackalloc byte[2];
+        Span<byte> scanParameters = stackalloc byte[3];
+        var frameComponentIds = new bool[256];
+        var firstScanComponentIds = new bool[256];
+        var frameComponentCount = 0;
+        byte framePrecision = 0;
+        byte firstScanSpectralStart = 0;
+        byte firstScanSpectralEnd = 0;
+        byte firstScanApproximation = 0;
         while (offset < length && ++markerCount <= 4096)
         {
             if (!ReadExactlyAt(input, offset, markerByte) || markerByte[0] != 0xff)
@@ -1067,9 +1107,15 @@ public static class SourceFormatPreflight
             }
 
             var segmentDataOffset = segmentLengthOffset + 2;
+            if (marker == 0xdd)
+            {
+                if (segmentLength != 4 || !ReadExactlyAt(input, segmentDataOffset, restartIntervalBytes)) break;
+                restartInterval = BinaryPrimitives.ReadUInt16BigEndian(restartIntervalBytes);
+            }
+
             if (IsJpegStartOfFrame(marker))
             {
-                if (segmentLength < 11 || !ReadExactlyAt(input, segmentDataOffset, frameHeader))
+                if (hasFrame || segmentLength < 11 || !ReadExactlyAt(input, segmentDataOffset, frameHeader))
                 {
                     break;
                 }
@@ -1082,12 +1128,29 @@ public static class SourceFormatPreflight
                     break;
                 }
 
+                frameComponentCount = 0;
+                for (var index = 0; index < componentCount; index++)
+                {
+                    if (!ReadExactlyAt(input, segmentDataOffset + 6 + index * 3, componentHeader) ||
+                        frameComponentIds[componentHeader[0]])
+                    {
+                        break;
+                    }
+
+                    frameComponentIds[componentHeader[0]] = true;
+                    frameComponentCount++;
+                }
+
+                if (frameComponentCount != componentCount) break;
+
                 if (width == 0 || height == 0 || (long)width * height > options.MaximumRasterPixels)
                 {
                     diagnostics.Add(Error(IntakeDiagnosticCode.UnsafePackage, "The JPEG dimensions exceed the configured raster limit."));
                     return false;
                 }
 
+                frameMarker = marker;
+                framePrecision = frameHeader[0];
                 hasFrame = true;
             }
 
@@ -1096,12 +1159,43 @@ public static class SourceFormatPreflight
             {
                 hasScan = hasFrame && segmentLength >= 8 && ReadExactlyAt(input, segmentDataOffset, scanComponents) &&
                           scanComponents[0] > 0 && segmentLength == 6 + scanComponents[0] * 2;
+                if (hasScan)
+                {
+                    for (var index = 0; index < scanComponents[0]; index++)
+                    {
+                        if (!ReadExactlyAt(input, segmentDataOffset + 1 + index * 2, scanComponentSpec) ||
+                            (scanComponentSpec[1] >> 4) > 3 || (scanComponentSpec[1] & 0x0f) > 3 ||
+                            !frameComponentIds[scanComponentSpec[0]] || firstScanComponentIds[scanComponentSpec[0]])
+                        {
+                            hasScan = false;
+                            break;
+                        }
+
+                        firstScanComponentIds[scanComponentSpec[0]] = true;
+                    }
+
+                    hasScan = hasScan && ReadExactlyAt(
+                        input, segmentDataOffset + 1 + scanComponents[0] * 2, scanParameters) &&
+                        IsValidJpegScanParameters(
+                            frameMarker, scanComponents[0], framePrecision,
+                            scanParameters[0], scanParameters[1], scanParameters[2]);
+                    if (hasScan)
+                    {
+                        firstScanSpectralStart = scanParameters[0];
+                        firstScanSpectralEnd = scanParameters[1];
+                        firstScanApproximation = scanParameters[2];
+                    }
+                }
+
                 scanOffset = offset;
                 break;
             }
         }
 
-        if (!hasFrame || !hasScan || markerCount > 4096 || !HasJpegScanDataAndEndMarker(input, scanOffset, length))
+        if (!hasFrame || !hasScan || markerCount > 4096 ||
+            !HasJpegScanDataAndEndMarker(
+                input, scanOffset, length, frameComponentIds, firstScanComponentIds, frameMarker, framePrecision,
+                firstScanSpectralStart, firstScanSpectralEnd, firstScanApproximation, restartInterval))
         {
             diagnostics.Add(Error(IntakeDiagnosticCode.MalformedContainer, "The JPEG frame, scan, or terminal end marker is missing or malformed."));
             return false;
@@ -1110,50 +1204,313 @@ public static class SourceFormatPreflight
         return true;
     }
 
-    private static bool HasJpegScanDataAndEndMarker(Stream input, long scanOffset, long length)
+    private static bool HasJpegScanDataAndEndMarker(
+        Stream input,
+        long scanOffset,
+        long length,
+        bool[] frameComponentIds,
+        bool[] firstScanComponentIds,
+        byte frameMarker,
+        byte framePrecision,
+        byte firstScanSpectralStart,
+        byte firstScanSpectralEnd,
+        byte firstScanApproximation,
+        int restartInterval)
     {
         if (scanOffset < 0 || scanOffset >= length || length < 2 ||
             !ReadExactlyAt(input, length - 2, stackalloc byte[] { 0xff, 0xd9 })) return false;
 
         var buffer = new byte[8192];
-        var sawScanData = false;
-        var sawMarkerPrefix = false;
-        input.Position = scanOffset;
-        while (true)
+        var scanComponentIds = new bool[256];
+        var sequentialComponentIds = new bool[256];
+        var progressiveFrame = frameMarker is 0xc2 or 0xc6 or 0xca or 0xce;
+        var progressiveApproximation = new sbyte[256, 64];
+        if (progressiveFrame)
         {
-            var read = input.Read(buffer, 0, buffer.Length);
-            if (read == 0) return false;
-            for (var index = 0; index < read; index++)
+            for (var componentId = 0; componentId < 256; componentId++)
             {
-                var value = buffer[index];
-                if (!sawMarkerPrefix)
+                for (var coefficient = 0; coefficient < 64; coefficient++)
                 {
-                    if (value == 0xff)
-                    {
-                        sawMarkerPrefix = true;
-                    }
-                    else
-                    {
-                        sawScanData = true;
-                    }
+                    progressiveApproximation[componentId, coefficient] = -1;
+                }
+            }
 
-                    continue;
+            if ((firstScanApproximation >> 4) != 0) return false;
+            var initialApproximation = (sbyte)(firstScanApproximation & 0x0f);
+            for (var componentId = 0; componentId < 256; componentId++)
+            {
+                if (!firstScanComponentIds[componentId]) continue;
+                for (var coefficient = firstScanSpectralStart; coefficient <= firstScanSpectralEnd; coefficient++)
+                {
+                    progressiveApproximation[componentId, coefficient] = initialApproximation;
                 }
+            }
 
-                if (value == 0xff) continue;
-                sawMarkerPrefix = false;
-                if (value == 0x00)
+            if (firstScanSpectralStart > 0)
+            {
+                for (var componentId = 0; componentId < 256; componentId++)
                 {
-                    sawScanData = true;
+                    if (firstScanComponentIds[componentId] && progressiveApproximation[componentId, 0] < 0) return false;
                 }
-                else if (value == 0xd9)
+            }
+        }
+        var expectedRestartMarker = 0;
+        if (!progressiveFrame) Array.Copy(firstScanComponentIds, sequentialComponentIds, firstScanComponentIds.Length);
+        var bufferedOffset = scanOffset;
+        var bufferIndex = 0;
+        var bufferLength = 0;
+        var offset = scanOffset;
+        var inScan = true;
+        var sawScanData = false;
+        var scanHasData = false;
+        input.Position = scanOffset;
+
+        bool TryReadByte(out byte value)
+        {
+            if (bufferIndex == bufferLength)
+            {
+                input.Position = bufferedOffset;
+                bufferLength = input.Read(buffer, 0, buffer.Length);
+                if (bufferLength == 0)
                 {
-                    return sawScanData;
-                }
-                else if (!sawScanData)
-                {
+                    value = 0;
                     return false;
                 }
+
+                bufferedOffset += bufferLength;
+                bufferIndex = 0;
+            }
+
+            value = buffer[bufferIndex++];
+            offset++;
+            return true;
+        }
+
+        while (true)
+        {
+            if (!TryReadByte(out var value)) return false;
+            if (inScan && value != 0xff)
+            {
+                sawScanData = true;
+                scanHasData = true;
+                continue;
+            }
+
+            if (!inScan && value != 0xff) return false;
+            if (value != 0xff) return false;
+
+            var hasMarkerFillBytes = false;
+            do
+            {
+                if (!TryReadByte(out value)) return false;
+                if (value == 0xff) hasMarkerFillBytes = true;
+            } while (value == 0xff);
+
+            var marker = value;
+            if (inScan && marker == 0x00)
+            {
+                if (hasMarkerFillBytes) return false;
+                sawScanData = true;
+                scanHasData = true;
+                continue;
+            }
+
+            if (inScan && marker is >= 0xd0 and <= 0xd7)
+            {
+                if (restartInterval == 0 || marker != 0xd0 + expectedRestartMarker || !scanHasData) return false;
+                expectedRestartMarker = (expectedRestartMarker + 1) & 7;
+                scanHasData = false;
+                continue;
+            }
+
+            if (marker == 0xd9)
+            {
+                var allFrameComponentsComplete = true;
+                for (var componentId = 0; componentId < frameComponentIds.Length; componentId++)
+                {
+                    if (!frameComponentIds[componentId]) continue;
+                    if (progressiveFrame)
+                    {
+                        if (progressiveApproximation[componentId, 0] >= 0) continue;
+                    }
+                    else if (sequentialComponentIds[componentId])
+                    {
+                        continue;
+                    }
+
+                    allFrameComponentsComplete = false;
+                    break;
+                }
+
+                return sawScanData && scanHasData && offset == length && allFrameComponentsComplete;
+            }
+            if (inScan && !scanHasData) return false;
+            if (IsJpegStartOfFrame(marker) || marker is 0xd8 or 0x00 or 0x01 or >= 0xd0 and <= 0xd7 ||
+                !(marker is 0xc4 or 0xcc or 0xda or 0xdb or 0xdd or
+                  >= 0xe0 and <= 0xef or 0xfe))
+            {
+                return false;
+            }
+
+            if (!TryReadByte(out var lengthHigh) || !TryReadByte(out var lengthLow)) return false;
+            var segmentLength = (lengthHigh << 8) | lengthLow;
+            if (segmentLength < 2 || segmentLength - 2 > length - offset) return false;
+            if (marker == 0xdd && segmentLength != 4) return false;
+
+            var segmentDataLength = segmentLength - 2;
+            var componentCount = 0;
+            if (marker == 0xda)
+            {
+                if (segmentDataLength < 6 || !TryReadByte(out var scanComponents)) return false;
+                componentCount = scanComponents;
+                if (componentCount == 0 || segmentDataLength != 4 + componentCount * 2) return false;
+                Array.Clear(scanComponentIds);
+                for (var index = 0; index < componentCount; index++)
+                {
+                    if (!TryReadByte(out var componentId) || !TryReadByte(out var tableSelectors) ||
+                        (tableSelectors >> 4) > 3 || (tableSelectors & 0x0f) > 3 ||
+                        !frameComponentIds[componentId] || scanComponentIds[componentId] ||
+                        (!progressiveFrame && sequentialComponentIds[componentId])) return false;
+                    scanComponentIds[componentId] = true;
+                    if (!progressiveFrame) sequentialComponentIds[componentId] = true;
+                }
+
+                if (!TryReadByte(out var spectralStart) || !TryReadByte(out var spectralEnd) ||
+                    !TryReadByte(out var successiveApproximation) ||
+                    !IsValidJpegScanParameters(
+                        frameMarker, componentCount, framePrecision,
+                        spectralStart, spectralEnd, successiveApproximation)) return false;
+
+                if (progressiveFrame)
+                {
+                    var highApproximation = successiveApproximation >> 4;
+                    var lowApproximation = (sbyte)(successiveApproximation & 0x0f);
+                    if (spectralStart > 0)
+                    {
+                        for (var componentId = 0; componentId < scanComponentIds.Length; componentId++)
+                        {
+                            if (scanComponentIds[componentId] && progressiveApproximation[componentId, 0] < 0) return false;
+                        }
+                    }
+
+                    for (var componentId = 0; componentId < scanComponentIds.Length; componentId++)
+                    {
+                        if (!scanComponentIds[componentId]) continue;
+                        for (var coefficient = spectralStart; coefficient <= spectralEnd; coefficient++)
+                        {
+                            var previousApproximation = progressiveApproximation[componentId, coefficient];
+                            if (highApproximation == 0 ? previousApproximation >= 0 : previousApproximation != highApproximation)
+                            {
+                                return false;
+                            }
+
+                            progressiveApproximation[componentId, coefficient] = lowApproximation;
+                        }
+                    }
+                }
+
+                segmentDataLength -= 4 + componentCount * 2;
+            }
+            else if (marker == 0xc4)
+            {
+                if (segmentDataLength == 0) return false;
+                var remaining = segmentDataLength;
+                while (remaining > 0)
+                {
+                    if (remaining < 17 || !TryReadByte(out var tableInfo)) return false;
+                    remaining--;
+                    var tableClass = tableInfo >> 4;
+                    if (tableClass > 1 || (tableInfo & 0x0f) > 3) return false;
+
+                    var symbolCount = 0;
+                    var availableCodeSlots = 1;
+                    for (var index = 0; index < 16; index++)
+                    {
+                        if (!TryReadByte(out var count)) return false;
+                        remaining--;
+                        availableCodeSlots *= 2;
+                        if (count > availableCodeSlots) return false;
+                        availableCodeSlots -= count;
+                        symbolCount += count;
+                        if (symbolCount > 256) return false;
+                    }
+
+                    if (symbolCount == 0 || availableCodeSlots == 0 || symbolCount > remaining) return false;
+                    var symbolsRemaining = symbolCount;
+                    while (symbolsRemaining-- > 0)
+                    {
+                        if (!TryReadByte(out _)) return false;
+                    }
+
+                    remaining -= symbolCount;
+                }
+
+                segmentDataLength = 0;
+            }
+            else if (marker == 0xdb)
+            {
+                if (segmentDataLength == 0) return false;
+                var remaining = segmentDataLength;
+                while (remaining > 0)
+                {
+                    if (remaining < 65 || !TryReadByte(out var tableInfo)) return false;
+                    remaining--;
+                    var precision = tableInfo >> 4;
+                    if (precision > 1 || (tableInfo & 0x0f) > 3) return false;
+
+                    var valueBytes = 64 * (precision + 1);
+                    if (valueBytes > remaining) return false;
+                    for (var index = 0; index < valueBytes; index += precision + 1)
+                    {
+                        if (!TryReadByte(out var high)) return false;
+                        if (precision == 1)
+                        {
+                            if (!TryReadByte(out var low) || high == 0 && low == 0) return false;
+                        }
+                        else if (high == 0)
+                        {
+                            return false;
+                        }
+                    }
+
+                    remaining -= valueBytes;
+                }
+
+                segmentDataLength = 0;
+            }
+            else if (marker == 0xcc)
+            {
+                if (segmentDataLength == 0 || (segmentDataLength & 1) != 0) return false;
+                var remaining = segmentDataLength;
+                while (remaining > 0)
+                {
+                    if (!TryReadByte(out var tableInfo) || !TryReadByte(out var conditioning)) return false;
+                    var tableClass = tableInfo >> 4;
+                    if (tableClass > 1 || (tableInfo & 0x0f) > 3 ||
+                        (tableClass == 0 && (conditioning & 0x0f) > (conditioning >> 4)) ||
+                        (tableClass == 1 && conditioning > 63)) return false;
+                    remaining -= 2;
+                }
+
+                segmentDataLength = 0;
+            }
+            else if (marker == 0xdd)
+            {
+                if (segmentLength != 4 || !TryReadByte(out var intervalHigh) || !TryReadByte(out var intervalLow)) return false;
+                restartInterval = (intervalHigh << 8) | intervalLow;
+                segmentDataLength = 0;
+            }
+
+            while (segmentDataLength-- > 0)
+            {
+                if (!TryReadByte(out _)) return false;
+            }
+
+            inScan = marker == 0xda;
+            if (inScan)
+            {
+                scanHasData = false;
+                expectedRestartMarker = 0;
             }
         }
     }

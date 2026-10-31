@@ -392,6 +392,138 @@ internal static class SourceIntakeTests
         Assert.True(SourceFormatPreflight.Inspect(invalidNextTiffDirectory, ".tiff").Diagnostics.Any(diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
     }
 
+    internal static void PreflightRejectsInvalidJpegMarkersAfterScanData()
+    {
+        var validBaseline = JpegBytes();
+        var malformed = new byte[validBaseline.Length + 2];
+        Array.Copy(validBaseline, 0, malformed, 0, validBaseline.Length - 2);
+        malformed[^4] = 0xff;
+        malformed[^3] = 0xd8;
+        Array.Copy(validBaseline, validBaseline.Length - 2, malformed, malformed.Length - 2, 2);
+        using var malformedInput = new MemoryStream(malformed);
+        Assert.True(SourceFormatPreflight.Inspect(malformedInput, ".jpg").Diagnostics.Any(
+            diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+
+        var duplicateFrame = new byte[validBaseline.Length + 13];
+        Array.Copy(validBaseline, 0, duplicateFrame, 0, validBaseline.Length - 2);
+        new byte[] { 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00 }
+            .CopyTo(duplicateFrame, validBaseline.Length - 2);
+        Array.Copy(validBaseline, validBaseline.Length - 2, duplicateFrame, duplicateFrame.Length - 2, 2);
+        using var duplicateFrameInput = new MemoryStream(duplicateFrame);
+        Assert.True(SourceFormatPreflight.Inspect(duplicateFrameInput, ".jpg").Diagnostics.Any(
+            diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+
+        var malformedDnl = new byte[validBaseline.Length + 4];
+        Array.Copy(validBaseline, 0, malformedDnl, 0, validBaseline.Length - 2);
+        new byte[] { 0xff, 0xdc, 0x00, 0x02 }.CopyTo(malformedDnl, validBaseline.Length - 2);
+        Array.Copy(validBaseline, validBaseline.Length - 2, malformedDnl, malformedDnl.Length - 2, 2);
+        using var malformedDnlInput = new MemoryStream(malformedDnl);
+        Assert.True(SourceFormatPreflight.Inspect(malformedDnlInput, ".jpg").Diagnostics.Any(
+            diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+
+        var oversubscribedDht = new byte[24];
+        oversubscribedDht[0] = 0xff;
+        oversubscribedDht[1] = 0xc4;
+        oversubscribedDht[3] = 0x16;
+        oversubscribedDht[5] = 3;
+        oversubscribedDht[21] = 1;
+        oversubscribedDht[22] = 2;
+        oversubscribedDht[23] = 3;
+        var completeDht = new byte[23];
+        completeDht[0] = 0xff;
+        completeDht[1] = 0xc4;
+        completeDht[3] = 0x15;
+        completeDht[5] = 2;
+        completeDht[21] = 1;
+        completeDht[22] = 2;
+        foreach (var malformedTableSegment in new byte[][]
+        {
+            [0xff, 0xc4, 0x00, 0x02],
+            oversubscribedDht,
+            completeDht,
+            [0xff, 0xdb, 0x00, 0x02],
+            [0xff, 0xdd, 0x00, 0x02],
+            [0xff, 0xff, 0x00],
+            [0xff, 0xd0, 0x03],
+            [0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x44, 0x00, 0x3f, 0x00],
+            [0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3e, 0x00],
+            [0xff, 0xda, 0x00, 0x0a, 0x02, 0x01, 0x00, 0x02, 0x00, 0x00, 0x3f, 0x00],
+            [0xff, 0xda, 0x00, 0x0a, 0x02, 0x01, 0x00, 0x01, 0x00, 0x00, 0x3f, 0x00],
+            [0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x03],
+            [0xff, 0xcc, 0x00, 0x04, 0x00, 0x01]
+        })
+        {
+            using var malformedTableInput = new MemoryStream(JpegWithPostScanSegment(validBaseline, malformedTableSegment));
+            Assert.True(SourceFormatPreflight.Inspect(malformedTableInput, ".jpg").Diagnostics.Any(
+                diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+        }
+
+        using var restartIntervalInput = new MemoryStream(JpegWithPostScanSegment(
+            JpegWithRestartInterval(validBaseline), [0xff, 0xd0, 0x03]));
+        Assert.Equal(SourcePreflightStatus.Ready, SourceFormatPreflight.Inspect(restartIntervalInput, ".jpg").Status, "A correctly configured restart marker was rejected.");
+
+        using var emptyFirstScanInput = new MemoryStream(JpegWithPostScanSegment(
+            JpegBytes(includeScanData: false),
+            [0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x03]));
+        Assert.True(SourceFormatPreflight.Inspect(emptyFirstScanInput, ".jpg").Diagnostics.Any(
+            diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+
+        var malformedInitialScan = JpegBytes();
+        var initialSosOffset = Array.IndexOf(malformedInitialScan, (byte)0xda);
+        malformedInitialScan[initialSosOffset + 8] = 0x3e;
+        using var malformedInitialScanInput = new MemoryStream(malformedInitialScan);
+        Assert.True(SourceFormatPreflight.Inspect(malformedInitialScanInput, ".jpg").Diagnostics.Any(
+            diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+
+        using var baselineInput = new MemoryStream(JpegBytes());
+        Assert.Equal(SourcePreflightStatus.Ready, SourceFormatPreflight.Inspect(baselineInput, ".jpg").Status, "The baseline JPEG fixture was rejected.");
+
+        var baselineWithFillByte = new byte[validBaseline.Length + 1];
+        Array.Copy(validBaseline, 0, baselineWithFillByte, 0, validBaseline.Length - 2);
+        baselineWithFillByte[^3] = 0xff;
+        Array.Copy(validBaseline, validBaseline.Length - 2, baselineWithFillByte, baselineWithFillByte.Length - 2, 2);
+        using var baselineWithFillInput = new MemoryStream(baselineWithFillByte);
+        Assert.Equal(SourcePreflightStatus.Ready, SourceFormatPreflight.Inspect(baselineWithFillInput, ".jpg").Status, "A valid EOI fill byte was rejected.");
+
+        using var progressiveInput = new MemoryStream(ProgressiveJpegBytes());
+        var progressiveResult = SourceFormatPreflight.Inspect(progressiveInput, ".jpg");
+        Assert.Equal(SourcePreflightStatus.Ready, progressiveResult.Status,
+            $"The progressive multi-scan JPEG fixture was rejected: {string.Join("; ", progressiveResult.Diagnostics.Select(diagnostic => diagnostic.Message))}");
+
+        using var missingProgressiveComponentDcInput = new MemoryStream(ProgressiveJpegMissingComponentDcBytes());
+        Assert.True(SourceFormatPreflight.Inspect(missingProgressiveComponentDcInput, ".jpg").Diagnostics.Any(
+            diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+
+        using var refinedProgressiveInput = new MemoryStream(ProgressiveJpegBytes(1, 63, 1, includeRefinement: true));
+        Assert.Equal(SourcePreflightStatus.Ready, SourceFormatPreflight.Inspect(refinedProgressiveInput, ".jpg").Status,
+            "A valid progressive refinement scan was rejected.");
+
+        foreach (var (spectralStart, spectralEnd, approximation) in new (byte, byte, byte)[]
+        {
+            (0, 0, 0),
+            (1, 63, 0x10)
+        })
+        {
+            using var invalidProgressiveScan = new MemoryStream(
+                ProgressiveJpegBytes(spectralStart, spectralEnd, approximation));
+            Assert.True(SourceFormatPreflight.Inspect(invalidProgressiveScan, ".jpg").Diagnostics.Any(
+                diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+        }
+
+        using var acBeforeDcInput = new MemoryStream(ProgressiveJpegBytes(
+            0, 0, 0, firstSpectralStart: 1, firstSpectralEnd: 63));
+        Assert.True(SourceFormatPreflight.Inspect(acBeforeDcInput, ".jpg").Diagnostics.Any(
+            diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+
+        using var incompleteSequentialInput = new MemoryStream(SequentialJpegWithTwoComponents(includeSecondScan: false));
+        Assert.True(SourceFormatPreflight.Inspect(incompleteSequentialInput, ".jpg").Diagnostics.Any(
+            diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+
+        using var splitSequentialInput = new MemoryStream(SequentialJpegWithTwoComponents(includeSecondScan: true));
+        Assert.Equal(SourcePreflightStatus.Ready, SourceFormatPreflight.Inspect(splitSequentialInput, ".jpg").Status,
+            "A valid sequential JPEG with components split across scans was rejected.");
+    }
+
     internal static void PreflightAcceptsPdfXrefStreamPngUpPredictor()
     {
         using var predictedXref = new MemoryStream(PdfXrefStreamBytes(encrypted: false, pngUpPredictor: true));
@@ -1235,6 +1367,84 @@ internal static class SourceIntakeTests
         output.Write([0xff, 0xda, 0x00, 0x08, 1, 1, 0, 0, 0x3f, 0]);
         output.Write(includeScanData ? [0, 0xff, 0xd9] : [0xff, 0xd9]);
         return output.ToArray();
+    }
+
+    private static byte[] ProgressiveJpegBytes(
+        byte spectralStart = 1,
+        byte spectralEnd = 63,
+        byte approximation = 0,
+        bool includeRefinement = false,
+        byte firstSpectralStart = 0,
+        byte firstSpectralEnd = 0,
+        byte firstApproximation = 0)
+    {
+        using var output = new MemoryStream();
+        output.Write([0xff, 0xd8]);
+        output.Write([0xff, 0xc2, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00]);
+        output.Write([0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, firstSpectralStart, firstSpectralEnd, firstApproximation, 0x01]);
+        output.Write([0xff, 0xdb, 0x00, 0x43, 0x00]);
+        output.Write(Enumerable.Repeat((byte)1, 64).ToArray());
+        output.Write([0xff, 0xc4, 0x00, 0x26, 0x00, 0x01]);
+        output.Write(new byte[15]);
+        output.Write([0x00]);
+        output.Write([0x10, 0x01]);
+        output.Write(new byte[15]);
+        output.Write([0x00]);
+        output.Write([0xff, 0xdd, 0x00, 0x04, 0x00, 0x01]);
+        output.Write([0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, spectralStart, spectralEnd, approximation, 0x02]);
+        if (includeRefinement)
+        {
+            output.Write([0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x3f, 0x10, 0x03]);
+        }
+
+        output.Write([0xff, 0xd9]);
+        return output.ToArray();
+    }
+
+    private static byte[] ProgressiveJpegMissingComponentDcBytes()
+    {
+        using var output = new MemoryStream();
+        output.Write([0xff, 0xd8]);
+        output.Write([0xff, 0xc2, 0x00, 0x0e, 0x08, 0x00, 0x01, 0x00, 0x01, 0x02, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00]);
+        output.Write([0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        output.Write([0xff, 0xd9]);
+        return output.ToArray();
+    }
+
+    private static byte[] SequentialJpegWithTwoComponents(bool includeSecondScan)
+    {
+        using var output = new MemoryStream();
+        output.Write([0xff, 0xd8]);
+        output.Write([0xff, 0xc0, 0x00, 0x0e, 0x08, 0x00, 0x01, 0x00, 0x01, 0x02, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00]);
+        output.Write([0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x01]);
+        if (includeSecondScan)
+        {
+            output.Write([0xff, 0xda, 0x00, 0x08, 0x01, 0x02, 0x00, 0x00, 0x3f, 0x00, 0x02]);
+        }
+
+        output.Write([0xff, 0xd9]);
+        return output.ToArray();
+    }
+
+    private static byte[] JpegWithPostScanSegment(byte[] jpeg, byte[] segment)
+    {
+        var result = new byte[jpeg.Length + segment.Length];
+        Array.Copy(jpeg, 0, result, 0, jpeg.Length - 2);
+        segment.CopyTo(result, jpeg.Length - 2);
+        Array.Copy(jpeg, jpeg.Length - 2, result, result.Length - 2, 2);
+        return result;
+    }
+
+    private static byte[] JpegWithRestartInterval(byte[] jpeg)
+    {
+        var sosMarkerOffset = Array.IndexOf(jpeg, (byte)0xda);
+        if (sosMarkerOffset < 1) throw new InvalidOperationException("The synthetic JPEG SOS marker is missing.");
+
+        var result = new byte[jpeg.Length + 6];
+        Array.Copy(jpeg, 0, result, 0, sosMarkerOffset - 1);
+        new byte[] { 0xff, 0xdd, 0x00, 0x04, 0x00, 0x01 }.CopyTo(result, sosMarkerOffset - 1);
+        Array.Copy(jpeg, sosMarkerOffset - 1, result, sosMarkerOffset + 5, jpeg.Length - (sosMarkerOffset - 1));
+        return result;
     }
 
     private static void WriteBigEndianUInt16(Stream output, ushort value)
