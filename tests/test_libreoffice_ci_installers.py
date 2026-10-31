@@ -52,14 +52,14 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(ROOT / "tools/capture_bounded_command_output.py"),
                  "--output", str(output_path), "--max-bytes", "32", "--",
-                 sys.executable, "-c", "import sys; print('x' * 100); print('failure marker'); sys.exit(7)"],
+                 sys.executable, "-c", "import sys; sys.stdout.write('x' * 100 + '\\r\\nfailure marker\\r\\n'); sys.exit(7)"],
                 capture_output=True, check=False,
             )
             self.assertEqual(result.returncode, 7)
             self.assertIn(b"failure marker", result.stdout)
             bounded = output_path.read_bytes()
             self.assertLessEqual(len(bounded), 32)
-            self.assertTrue(bounded.endswith(b"failure marker\n"))
+            self.assertEqual(bounded.splitlines()[-1], b"failure marker")
 
     def test_general_matrix_keeps_import_evidence_and_print_contract_is_windows_only(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
