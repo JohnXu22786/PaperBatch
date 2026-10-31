@@ -26,6 +26,15 @@ EXPECTED_BASE = {
 }
 
 
+def _matches_pinned_engine_version(observed: Any, pinned: Any) -> bool:
+    if not isinstance(observed, str) or not isinstance(pinned, str):
+        return False
+    if observed == pinned:
+        return True
+    suffix = observed[len(pinned):] if observed.startswith(pinned) else ""
+    return bool(re.fullmatch(r"(?: Build [0-9]+| [0-9]+\(Build:[0-9]+\))", suffix))
+
+
 def render(path: Path) -> tuple[str, int]:
     lines = ["## PaperBatch production document conversion and import", ""]
     lines.append(
@@ -116,7 +125,10 @@ def _valid_report(report: Any) -> bool:
     limits = report.get("evidenceLimits")
     engine = report.get("libreOffice")
     if configured:
-        if (not isinstance(engine, dict) or engine.get("version") != os.environ.get("PAPERBATCH_LO_EXPECTED_VERSION")
+        pinned_version = os.environ.get("PAPERBATCH_LO_EXPECTED_VERSION")
+        observed_version = engine.get("version") if isinstance(engine, dict) else None
+        if (not isinstance(engine, dict) or not isinstance(pinned_version, str)
+                or not _matches_pinned_engine_version(observed_version, pinned_version)
                 or engine.get("engineSha256") != os.environ.get("PAPERBATCH_LO_ENGINE_SHA256")
                 or not re.fullmatch(r"[0-9a-f]{64}", str(engine.get("engineSha256", "")))):
             return False
@@ -124,10 +136,14 @@ def _valid_report(report: Any) -> bool:
         return False
     mixed = report.get("mixedBatchPreparation")
     if os.environ.get("RUNNER_OS") == "Windows":
-        if (not isinstance(mixed, dict) or mixed.get("sourceCount") != 9 or mixed.get("segmentCount") != 1
+        if not isinstance(mixed, dict):
+            return False
+        prepared_artifact = mixed.get("preparedArtifact")
+        if (mixed.get("sourceCount") != 9 or mixed.get("segmentCount") != 1
                 or mixed.get("jobCount") != 1 or mixed.get("fakeBackendSubmissions") != 1
                 or mixed.get("replaySubmissions") != 0
-                or not re.fullmatch(r"[0-9a-f]{64}", str(mixed.get("preparedArtifact", {}).get("sha256", "")))):
+                or not isinstance(prepared_artifact, dict)
+                or not re.fullmatch(r"[0-9a-f]{64}", str(prepared_artifact.get("sha256", "")))):
             return False
     elif mixed is not None:
         return False

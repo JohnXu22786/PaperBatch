@@ -103,7 +103,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             WriteOwnerMarker(ownerMarker);
             markerCreated = true;
             var profileUri = LibreOfficeProfilePolicy.CreatePrivateProfile(operation);
-            _ = await StagePinnedEngineAsync(operation, cancellationToken).ConfigureAwait(false);
+            var stagedEnginePath = await StagePinnedEngineAsync(operation, cancellationToken).ConfigureAwait(false);
             var extension = ExtensionFor(request.Format);
             var sourcePath = Path.Combine(operation, "source" + extension);
             var pdfPath = Path.Combine(operation, "source.pdf");
@@ -115,10 +115,10 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
                 if (sourcePreflight.Status != SourcePreflightStatus.Ready)
                     return RenderResult.Failed("The source snapshot failed structural or encryption safety checks.");
             }
-            var version = await ReadVersionAsync(profileUri, cancellationToken).ConfigureAwait(false);
+            var version = await ReadVersionAsync(profileUri, stagedEnginePath, cancellationToken).ConfigureAwait(false);
             if (version is null) return RenderResult.Failed("LibreOffice did not provide a usable version receipt.");
 
-            var startInfo = CreateBaseStartInfo(profileUri);
+            var startInfo = CreateBaseStartInfo(profileUri, stagedEnginePath);
             startInfo.ArgumentList.Add("--convert-to");
             startInfo.ArgumentList.Add("pdf");
             startInfo.ArgumentList.Add("--outdir");
@@ -180,9 +180,9 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         }
     }
 
-    private async Task<string?> ReadVersionAsync(Uri profileUri, CancellationToken cancellationToken)
+    private async Task<string?> ReadVersionAsync(Uri profileUri, string stagedEnginePath, CancellationToken cancellationToken)
     {
-        var startInfo = CreateBaseStartInfo(profileUri);
+        var startInfo = CreateBaseStartInfo(profileUri, stagedEnginePath);
         startInfo.ArgumentList.Add("--version");
         var result = await RunOwnedProcessAsync(startInfo, TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);
         if (result.Status != OwnedProcessStatus.Exited || result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.Output)) return null;
@@ -191,9 +191,9 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             line.StartsWith("LibreOfficeDev ", StringComparison.OrdinalIgnoreCase));
     }
 
-    private ProcessStartInfo CreateBaseStartInfo(Uri profileUri)
+    private ProcessStartInfo CreateBaseStartInfo(Uri profileUri, string stagedEnginePath)
     {
-        var info = new ProcessStartInfo(_launcherPath)
+        var info = new ProcessStartInfo(stagedEnginePath)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -209,6 +209,13 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             info.Environment["LD_LIBRARY_PATH"] = _programDirectory;
             var fundamental = Path.Combine(_programDirectory, "fundamentalrc");
             if (File.Exists(fundamental)) info.Environment["URE_BOOTSTRAP"] = new Uri(fundamental).AbsoluteUri;
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            var existingPath = info.Environment.TryGetValue("PATH", out var path) ? path : string.Empty;
+            info.Environment["PATH"] = string.IsNullOrEmpty(existingPath)
+                ? _programDirectory
+                : _programDirectory + Path.PathSeparator + existingPath;
         }
         info.ArgumentList.Add("--headless");
         info.ArgumentList.Add("--nologo");

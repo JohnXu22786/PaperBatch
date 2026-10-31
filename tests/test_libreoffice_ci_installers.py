@@ -306,6 +306,104 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertEqual(malformed_status, 1)
         self.assertIn("not a pass", malformed)
 
+    def test_application_import_summary_reports_actual_pinned_version_with_build_suffix(self):
+        context = {
+            "PB_SOURCE_COMMIT": "a" * 40, "GITHUB_WORKFLOW": "CI", "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "2", "RUNNER_OS": "Linux", "RUNNER_NAME": "Hosted Agent",
+            "ImageOS": "ubuntu-24.04", "ImageVersion": "20261020.1",
+            "PAPERBATCH_LO_EXPECTED_VERSION": "LibreOffice 26.2.2.2", "PAPERBATCH_LO_ENGINE_SHA256": "c" * 64,
+        }
+        outcomes = [
+            {"fixture": "synthetic_two_page.pdf", "format": "pdf", "applicationOutcome": "accepted",
+             "queueStatus": "Ready to prepare · Pdf", "rendererStatus": "Succeeded", "sha256": "b" * 64},
+            {"fixture": "synthetic_one_pixel.png", "format": "png", "applicationOutcome": "accepted",
+             "queueStatus": "Ready to prepare · Png", "rendererStatus": "Succeeded", "sha256": "b" * 64},
+        ]
+        for fixture, fmt in (("synthetic_sections_table.docx", "docx"), ("synthetic_mixed_page_sizes.xlsx", "xlsx"),
+                             ("synthetic_two_slides.pptx", "pptx"), ("synthetic_text.rtf", "rtf"),
+                             ("synthetic_text.odt", "odt"), ("synthetic_table.ods", "ods"),
+                             ("synthetic_slide.odp", "odp")):
+            outcomes.append({"fixture": fixture, "format": fmt, "applicationOutcome": "converted",
+                             "queueStatus": "Ready to prepare · LibreOffice", "rendererStatus": "Succeeded", "sha256": "b" * 64})
+        outcomes.append({"fixture": "synthetic_truncated_package.docx", "format": "docx", "applicationOutcome": "rejected",
+                         "queueStatus": "Needs attention", "rendererStatus": None, "intakeDiagnostic": "MalformedContainer", "sha256": "b" * 64})
+        report = {
+            "schemaVersion": 1, "evidenceType": "paperbatch-production-queue-import", "sourceCommit": "a" * 40,
+            "workflow": "CI", "runId": "123", "runAttempt": "2", "runnerOs": "Linux", "runnerImage": "ubuntu-24.04",
+            "libreOffice": {"version": "LibreOffice 26.2.2.2 Build 2", "engineSha256": "c" * 64},
+            "outcomes": outcomes,
+            "evidenceLimits": ["PDFium remains separately required", "No Microsoft Office/WPS equivalence", "synthetic inputs", "no physical output"],
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, context, clear=True):
+            path = Path(directory) / "report.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            rendered, status = build_application_import_ci_summary.render(path)
+            report["libreOffice"]["version"] = "LibreOffice 26.2.2.20 Build 2"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            wrong_version, wrong_version_status = build_application_import_ci_summary.render(path)
+            report["libreOffice"]["version"] = "LibreOffice 26.2.2.2 unrelated"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            unrelated_suffix, unrelated_suffix_status = build_application_import_ci_summary.render(path)
+            report["libreOffice"]["version"] = "LibreOffice 26.2.2.2 "
+            path.write_text(json.dumps(report), encoding="utf-8")
+            trailing_space, trailing_space_status = build_application_import_ci_summary.render(path)
+
+        self.assertEqual(status, 0)
+        self.assertIn("LibreOffice 26.2.2.2 Build 2", rendered)
+        self.assertEqual(wrong_version_status, 1)
+        self.assertIn("not a pass", wrong_version)
+        self.assertEqual(unrelated_suffix_status, 1)
+        self.assertIn("not a pass", unrelated_suffix)
+        self.assertEqual(trailing_space_status, 1)
+        self.assertIn("not a pass", trailing_space)
+
+    def test_application_import_summary_rejects_malformed_windows_prepared_artifact(self):
+        context = {
+            "PB_SOURCE_COMMIT": "a" * 40, "GITHUB_WORKFLOW": "CI", "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "2", "RUNNER_OS": "Windows", "RUNNER_NAME": "Hosted Agent",
+            "ImageOS": "win22", "ImageVersion": "20261020.1",
+            "PAPERBATCH_LO_EXPECTED_VERSION": "LibreOffice 26.2.2.2", "PAPERBATCH_LO_ENGINE_SHA256": "c" * 64,
+        }
+        outcomes = [
+            {"fixture": "synthetic_two_page.pdf", "format": "pdf", "applicationOutcome": "accepted",
+             "queueStatus": "Ready to prepare · Pdf", "rendererStatus": "Succeeded", "sha256": "b" * 64},
+            {"fixture": "synthetic_one_pixel.png", "format": "png", "applicationOutcome": "accepted",
+             "queueStatus": "Ready to prepare · Png", "rendererStatus": "Succeeded", "sha256": "b" * 64},
+        ]
+        for fixture, fmt in (("synthetic_sections_table.docx", "docx"), ("synthetic_mixed_page_sizes.xlsx", "xlsx"),
+                             ("synthetic_two_slides.pptx", "pptx"), ("synthetic_text.rtf", "rtf"),
+                             ("synthetic_text.odt", "odt"), ("synthetic_table.ods", "ods"),
+                             ("synthetic_slide.odp", "odp")):
+            outcomes.append({"fixture": fixture, "format": fmt, "applicationOutcome": "converted",
+                             "queueStatus": "Ready to prepare · LibreOffice", "rendererStatus": "Succeeded", "sha256": "b" * 64})
+        outcomes.append({"fixture": "synthetic_truncated_package.docx", "format": "docx", "applicationOutcome": "rejected",
+                         "queueStatus": "Needs attention", "rendererStatus": None, "intakeDiagnostic": "MalformedContainer", "sha256": "b" * 64})
+        mixed = {"sourceCount": 9, "segmentCount": 1, "jobCount": 1, "fakeBackendSubmissions": 1,
+                 "replaySubmissions": 0, "preparedArtifact": {"sha256": "d" * 64}}
+        report = {
+            "schemaVersion": 1, "evidenceType": "paperbatch-production-queue-import", "sourceCommit": "a" * 40,
+            "workflow": "CI", "runId": "123", "runAttempt": "2", "runnerOs": "Windows", "runnerImage": "win22",
+            "libreOffice": {"version": "LibreOffice 26.2.2.2 Build 2", "engineSha256": "c" * 64},
+            "outcomes": outcomes, "mixedBatchPreparation": mixed,
+            "evidenceLimits": ["PDFium remains separately required", "No Microsoft Office/WPS equivalence", "synthetic inputs", "no physical output"],
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, context, clear=True):
+            path = Path(directory) / "report.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            valid, valid_status = build_application_import_ci_summary.render(path)
+            report["mixedBatchPreparation"]["preparedArtifact"] = None
+            path.write_text(json.dumps(report), encoding="utf-8")
+            null_artifact, null_status = build_application_import_ci_summary.render(path)
+            report["mixedBatchPreparation"]["preparedArtifact"] = []
+            path.write_text(json.dumps(report), encoding="utf-8")
+            list_artifact, list_status = build_application_import_ci_summary.render(path)
+
+        self.assertEqual(valid_status, 0)
+        self.assertEqual(null_status, 1)
+        self.assertIn("not a pass", null_artifact)
+        self.assertEqual(list_status, 1)
+        self.assertIn("not a pass", list_artifact)
+
 
 if __name__ == "__main__":
     unittest.main()

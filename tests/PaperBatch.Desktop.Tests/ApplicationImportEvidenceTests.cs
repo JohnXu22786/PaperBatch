@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using PaperBatch.Core.Domain;
 using PaperBatch.Core.Layout;
 using PaperBatch.Core.Persistence;
@@ -53,6 +54,7 @@ internal static class ApplicationImportEvidenceTests
             Require(queueItems.Count == fixtures.Length, "Production import did not return one queue row per selected fixture.");
 
             var outcomes = new List<object>(fixtures.Length);
+            string? actualLibreOfficeVersion = null;
             for (var index = 0; index < fixtures.Length; index++)
             {
                 var fixture = fixtures[index];
@@ -78,8 +80,12 @@ internal static class ApplicationImportEvidenceTests
                             $"{fixture.Extension} did not report a persisted converted artifact identity.");
                         var receipt = artifacts.GetReceipt(tokens[2]);
                         Require(receipt.EngineId == "libreoffice", $"{fixture.Extension} artifact did not record LibreOffice.");
-                        Require(receipt.EngineVersion == Environment.GetEnvironmentVariable("PAPERBATCH_LO_EXPECTED_VERSION"),
-                            $"{fixture.Extension} artifact did not record the actual pinned LibreOffice version.");
+                        var pinnedVersion = Environment.GetEnvironmentVariable("PAPERBATCH_LO_EXPECTED_VERSION");
+                        Require(HasPinnedLibreOfficeVersion(receipt.EngineVersion, pinnedVersion),
+                            $"{fixture.Extension} artifact did not record a version matching the pinned LibreOffice release.");
+                        if (actualLibreOfficeVersion is null) actualLibreOfficeVersion = receipt.EngineVersion;
+                        Require(receipt.EngineVersion == actualLibreOfficeVersion,
+                            "Supported document formats did not report one consistent LibreOffice engine version.");
                         Require(receipt.Options.TryGetValue("source-format", out var sourceFormat) &&
                             string.Equals(sourceFormat, fixture.Extension, StringComparison.OrdinalIgnoreCase),
                             $"{fixture.Extension} artifact metadata did not preserve source format.");
@@ -122,7 +128,7 @@ internal static class ApplicationImportEvidenceTests
                 !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH"))
                 ? PrepareAndFakePrintMixedBatch(fixtures.Where(item => item.ExpectedOutcome is "accepted" or "converted").ToArray(), cache, artifacts, renderer)
                 : null;
-            WriteReportIfRequested(outcomes, Environment.GetEnvironmentVariable("PAPERBATCH_LO_EXPECTED_VERSION"), engineHash, mixedBatch);
+            WriteReportIfRequested(outcomes, actualLibreOfficeVersion, engineHash, mixedBatch);
         }
         finally
         {
@@ -139,6 +145,13 @@ internal static class ApplicationImportEvidenceTests
             return (Path.GetFileName(name), extension, expectedOutcome, path, Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
         }
     }
+
+    private static bool HasPinnedLibreOfficeVersion(string? observed, string? pinned) =>
+        !string.IsNullOrWhiteSpace(observed) && !string.IsNullOrWhiteSpace(pinned) &&
+        (string.Equals(observed, pinned, StringComparison.Ordinal) ||
+         Regex.IsMatch(observed,
+             @"\A" + Regex.Escape(pinned) + @"(?: Build [0-9]+| [0-9]+\(Build:[0-9]+\))\z",
+             RegexOptions.CultureInvariant));
 
     private static object PrepareAndFakePrintMixedBatch(
         (string Name, string Extension, string ExpectedOutcome, string Path, string Sha256)[] fixtures,
