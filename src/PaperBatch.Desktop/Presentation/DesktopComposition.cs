@@ -52,7 +52,6 @@ internal static class DesktopComposition
         });
         var intake = new SourceIntakeService(cache);
         var artifactStore = new RenderArtifactStore(Path.Combine(root, "RenderArtifacts"));
-        var renderer = CreateProductionRenderer(cache, artifactStore);
         var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
         store.Initialize();
         var printerBackend = OperatingSystem.IsWindows() ? new WindowsGdiNativeAdapter() : null;
@@ -60,6 +59,10 @@ internal static class DesktopComposition
         var preparationAvailable = false;
         var pdfiumPath = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_PATH");
         var pdfiumHash = Environment.GetEnvironmentVariable("PAPERBATCH_PDFIUM_RUNTIME_SHA256");
+        var renderer = CreateProductionRenderer(cache, artifactStore, pdfiumPath, pdfiumHash);
+        var loPath = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_PATH");
+        var loHash = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_SHA256");
+        var documentConversionConfigured = IsExplicitLibreOfficePinConfigured(loPath, loHash);
         if (!string.IsNullOrWhiteSpace(pdfiumPath) && !string.IsNullOrWhiteSpace(pdfiumHash))
         {
             if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
@@ -87,16 +90,50 @@ internal static class DesktopComposition
         return new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
             new WorkspaceStatusSnapshot("PRODUCTION MODE",
                 !preparationAvailable
-                    ? "PDF pass-through and supported JPEG/PNG artifact rendering are available. Preparation and final preview require an explicitly configured PDFium runtime; read-only printer capability inspection is Windows-only; LibreOffice conversion is unavailable."
+                    ? $"PDF pass-through and supported JPEG/PNG artifact rendering are available. Preparation and final preview require an explicitly configured PDFium runtime; read-only printer capability inspection is Windows-only; {DocumentConversionStatus(documentConversionConfigured)}."
                     : !printAvailable
-                        ? "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Read-only local printer capability inspection is Windows-only; Office conversion and desktop print submission are unavailable."
-                        : "PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. Explicit Windows queue selection and a deliberate Print click submit the persisted PDF through the shared per-user coordinator; displayed states are OS spooler reports, not confirmation of paper output.", false));
+                        ? $"PDF, JPEG and PNG queue inputs can be prepared with the pinned PDFium runtime. {DocumentConversionStatus(documentConversionConfigured)}; read-only local printer capability inspection is Windows-only and desktop print submission is unavailable."
+                        : $"PDF, JPEG, PNG, and configured LibreOffice document inputs can be prepared with the pinned PDFium runtime. Explicit Windows queue selection and a deliberate Print click submit the persisted PDF through the shared per-user coordinator; displayed states are OS spooler reports, not confirmation of paper output. LibreOffice is not Microsoft Office/WPS equivalence or visual-fidelity evidence.", false));
     }
 
-    internal static RendererCoordinator CreateProductionRenderer(SourceSnapshotCache cache, RenderArtifactStore artifacts) => new RendererCoordinator([
-        new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts)),
-        new BuiltInImageRendererAdapter(cache, artifacts)
-    ]);
+    private static string DocumentConversionStatus(bool configured) => configured
+        ? "the explicitly pinned LibreOffice document converter is configured"
+        : OperatingSystem.IsMacOS()
+            ? "LibreOffice document conversion is unsupported on macOS"
+            : "LibreOffice document conversion requires an explicit engine path and trusted SHA-256 pin";
+
+    private static bool IsExplicitLibreOfficePinConfigured(string? enginePath, string? engineSha256) =>
+        (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) &&
+        !string.IsNullOrWhiteSpace(enginePath) && engineSha256 is { Length: 64 } && engineSha256.All(Uri.IsHexDigit);
+
+    internal static RendererCoordinator CreateProductionRenderer(SourceSnapshotCache cache, RenderArtifactStore artifacts,
+        string? pdfiumPath = null, string? pdfiumHash = null) => new RendererCoordinator(
+        CreateProductionRendererAdapters(cache, artifacts, pdfiumPath, pdfiumHash,
+            Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_PATH"),
+            Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_SHA256")));
+
+    internal static IReadOnlyList<IRendererAdapter> CreateProductionRendererAdapters(SourceSnapshotCache cache,
+        RenderArtifactStore artifacts, string? pdfiumPath, string? pdfiumHash, string? libreOfficePath, string? libreOfficeHash)
+    {
+        var adapters = new List<IRendererAdapter>
+        {
+            new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts)),
+            new BuiltInImageRendererAdapter(cache, artifacts)
+        };
+        if ((OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) &&
+            !string.IsNullOrWhiteSpace(libreOfficePath) && !string.IsNullOrWhiteSpace(libreOfficeHash))
+        {
+            IPdfArtifactInspector? pdfInspector = null;
+            if (!string.IsNullOrWhiteSpace(pdfiumPath) && !string.IsNullOrWhiteSpace(pdfiumHash))
+            {
+                try { pdfInspector = new PdfiumArtifactInspector(pdfiumPath, pdfiumHash); }
+                catch (ArgumentException) { /* Preparation remains disabled by the separate PDFium gate. */ }
+            }
+            try { adapters.Add(new LibreOfficeRendererAdapter(cache, artifacts, pdfInspector, libreOfficePath, libreOfficeHash)); }
+            catch (ArgumentException) { /* A malformed LibreOffice engine pin never enables conversion. */ }
+        }
+        return adapters;
+    }
 }
 
 internal sealed class ProductionPresentationSources :

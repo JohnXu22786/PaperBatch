@@ -23,10 +23,14 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         macos = (ROOT / "tools/install_libreoffice_macos.sh").read_text(encoding="utf-8")
 
         self.assertIn("os: [ubuntu-latest, windows-latest, macos-latest]", workflow)
-        self.assertNotIn("LibreOffice", workflow)
+        self.assertIn("Install pinned LibreOffice on hosted Linux", workflow)
+        self.assertIn("Install pinned LibreOffice on hosted Windows", workflow)
+        self.assertIn("${RUNNER_ENVIRONMENT:-}\" == 'github-hosted'", (ROOT / "tools/install_libreoffice_linux.sh").read_text(encoding="utf-8"))
+        self.assertIn("$env:RUNNER_ENVIRONMENT -ne 'github-hosted'", windows)
         self.assertNotIn("run_libreoffice_corpus.py", workflow)
         self.assertNotIn("synthetic-ooxml-libreoffice-report", workflow)
         self.assertIn("build_application_import_ci_summary.py", workflow)
+        self.assertIn("install_libreoffice_linux.sh", workflow)
         self.assertIn("PB_JOB_NAME: Windows batch print contract", workflow)
         self.assertIn("${{ runner.os == 'Windows' && format('{0}/windows-batch-print-contract.json', runner.temp) || '' }}", workflow)
         self.assertIn("name: windows-batch-print-contract", workflow)
@@ -42,7 +46,13 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         self.assertNotIn("Contents/MacOS/soffice.bin", macos)
         self.assertLess(macos.index("codesign --verify --deep --strict"), macos.index("resolve_macos_libreoffice_engine.py"))
         self.assertIn("26.2.2.2", windows)
+        self.assertIn("$engine = Join-Path $installRoot 'program\\soffice.bin'", windows)
+        self.assertIn("$launcher = Join-Path $installRoot 'program\\soffice.com'", windows)
+        self.assertIn("$engineHash = (Get-FileHash -LiteralPath $engine -Algorithm SHA256).Hash.ToLowerInvariant()", windows)
         self.assertIn("26.2.2.2", macos)
+        linux = (ROOT / "tools/install_libreoffice_linux.sh").read_text(encoding="utf-8")
+        self.assertIn("gpgv --status-fd=1", linux)
+        self.assertIn("/opt/libreoffice26.2/program/soffice.bin", linux)
 
     def test_windows_installer_version_check_requires_a_token_boundary(self):
         windows = (ROOT / "tools/install_libreoffice_windows.ps1").read_text(encoding="utf-8")
@@ -54,7 +64,8 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         cleanup = workflow.index("Remove temporary PDFium test runtime")
         self.assertIn("if: always() && runner.os == 'Windows'", workflow[cleanup:cleanup + 150])
-        self.assertNotIn("LibreOffice", workflow)
+        self.assertIn("Install pinned LibreOffice on hosted Linux", workflow)
+        self.assertIn("Install pinned LibreOffice on hosted Windows", workflow)
         self.assertNotIn("paperbatch-lo-corpus-report", workflow)
 
     def test_vendor_signature_checks_remain_in_the_standalone_installer_scripts(self):
@@ -248,6 +259,10 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
             "synthetic_sections_table.docx": ("docx", "unsupported", "Unsupported format", "Unsupported", None),
             "synthetic_mixed_page_sizes.xlsx": ("xlsx", "unsupported", "Unsupported format", "Unsupported", None),
             "synthetic_two_slides.pptx": ("pptx", "unsupported", "Unsupported format", "Unsupported", None),
+            "synthetic_text.rtf": ("rtf", "unsupported", "Unsupported format", "Unsupported", None),
+            "synthetic_text.odt": ("odt", "unsupported", "Unsupported format", "Unsupported", None),
+            "synthetic_table.ods": ("ods", "unsupported", "Unsupported format", "Unsupported", None),
+            "synthetic_slide.odp": ("odp", "unsupported", "Unsupported format", "Unsupported", None),
             "synthetic_truncated_package.docx": ("docx", "rejected", "Needs attention", None, "MalformedContainer"),
         }
         outcomes = [
@@ -260,8 +275,8 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
             "workflow": "CI", "runId": "123", "runAttempt": "2", "runnerOs": "macOS", "runnerImage": "macos-15",
             "outcomes": outcomes,
             "evidenceLimits": [
-                "production queue import", "standalone LibreOffice conversion does not establish PaperBatch import support",
-                "No Office/WPS compatibility claim", "synthetic inputs only",
+                "production queue import", "PDFium remains separately required for page inspection, composition, and batch preparation",
+                "No Microsoft Office/WPS equivalence or visual-fidelity evidence", "synthetic inputs only",
             ],
         }
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, context, clear=True):
@@ -271,7 +286,7 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertIn("production queue-import path", rendered)
             self.assertIn("synthetic_sections_table.docx", rendered)
-            self.assertIn("Standalone LibreOffice conversion does not establish PaperBatch import support", rendered)
+            self.assertIn("not Microsoft Office/WPS equivalence", rendered)
             report["runId"] = "999"
             path.write_text(json.dumps(report), encoding="utf-8")
             mismatched, mismatched_status = build_application_import_ci_summary.render(path)

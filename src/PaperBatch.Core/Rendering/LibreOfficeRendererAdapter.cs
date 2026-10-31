@@ -24,16 +24,13 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
     private static readonly TimeSpan ProcessTimeout = TimeSpan.FromMinutes(2);
     private static readonly HashSet<SourceFormat> SupportedFormats =
     [
-        SourceFormat.Doc, SourceFormat.Docx, SourceFormat.Rtf,
-        SourceFormat.Xls, SourceFormat.Xlsx,
-        SourceFormat.Ppt, SourceFormat.Pptx,
-        SourceFormat.Odt, SourceFormat.Ods, SourceFormat.Odp,
-        SourceFormat.Jpeg, SourceFormat.Png, SourceFormat.Tiff
+        SourceFormat.Docx, SourceFormat.Rtf, SourceFormat.Xlsx, SourceFormat.Pptx,
+        SourceFormat.Odt, SourceFormat.Ods, SourceFormat.Odp
     ];
 
     private readonly SourceSnapshotCache _snapshots;
     private readonly RenderArtifactStore _artifacts;
-    private readonly IPdfArtifactInspector _pdfInspector;
+    private readonly IPdfArtifactInspector? _pdfInspector;
     private readonly string _enginePath;
     private readonly string _engineSha256;
     private readonly string _programDirectory;
@@ -43,13 +40,13 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
     public LibreOfficeRendererAdapter(
         SourceSnapshotCache snapshots,
         RenderArtifactStore artifacts,
-        IPdfArtifactInspector pdfInspector,
+        IPdfArtifactInspector? pdfInspector,
         string directEnginePath,
         string trustedEngineSha256)
     {
         _snapshots = snapshots ?? throw new ArgumentNullException(nameof(snapshots));
         _artifacts = artifacts ?? throw new ArgumentNullException(nameof(artifacts));
-        _pdfInspector = pdfInspector ?? throw new ArgumentNullException(nameof(pdfInspector));
+        _pdfInspector = pdfInspector;
         ArgumentException.ThrowIfNullOrWhiteSpace(directEnginePath);
         if (trustedEngineSha256 is null || trustedEngineSha256.Length != 64 || !trustedEngineSha256.All(Uri.IsHexDigit))
             throw new ArgumentException("A trusted direct-engine SHA-256 pin is required.", nameof(trustedEngineSha256));
@@ -58,7 +55,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         _programDirectory = Path.GetDirectoryName(_enginePath) ?? throw new ArgumentException("The direct engine must have a parent directory.", nameof(directEnginePath));
         _installationDirectory = Directory.GetParent(_programDirectory)?.FullName ??
             throw new ArgumentException("The direct engine must be inside a LibreOffice installation directory.", nameof(directEnginePath));
-        _launcherPath = Path.Combine(_programDirectory, "soffice");
+        _launcherPath = Path.Combine(_programDirectory, OperatingSystem.IsWindows() ? "soffice.com" : "soffice");
     }
 
     public ValueTask<bool> CanRenderAsync(RenderRequest request, CancellationToken cancellationToken)
@@ -66,7 +63,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
         if (request.ExecutionContext != RendererExecutionContext.BackgroundWorker || !SupportedFormats.Contains(request.Format) ||
-            !OperatingSystem.IsLinux() || !File.Exists(_enginePath) || !File.Exists(_launcherPath))
+            !(OperatingSystem.IsLinux() || OperatingSystem.IsWindows()) || !File.Exists(_enginePath) || !File.Exists(_launcherPath))
             return ValueTask.FromResult(false);
 
         try
@@ -74,7 +71,8 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             VerifyRuntimeInstallationReadOnly();
             var info = new FileInfo(_enginePath);
             if ((File.GetAttributes(_enginePath) & FileAttributes.ReparsePoint) != 0) return ValueTask.FromResult(false);
-            if ((File.GetUnixFileMode(_enginePath) & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) == 0)
+            if (OperatingSystem.IsLinux() &&
+                (File.GetUnixFileMode(_enginePath) & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) == 0)
                 return ValueTask.FromResult(false);
             if (info.Length <= 0 || info.Length > 64 * 1024 * 1024) return ValueTask.FromResult(false);
             using var input = new FileStream(_enginePath, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -147,8 +145,10 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             if (preflight.Status != SourcePreflightStatus.Ready)
                 return RenderResult.Failed("LibreOffice output failed PDF structural safety checks.");
             output.Position = 0;
-            var pageCount = await _pdfInspector.GetPageCountAsync(output, cancellationToken).ConfigureAwait(false);
-            if (pageCount <= 0) return RenderResult.Failed("The PDF inspector did not verify a positive page count.");
+            var pageCount = _pdfInspector is null ? 0 :
+                await _pdfInspector.GetPageCountAsync(output, cancellationToken).ConfigureAwait(false);
+            if (_pdfInspector is not null && pageCount <= 0)
+                return RenderResult.Failed("The PDF inspector did not verify a positive page count.");
             output.Position = 0;
             var artifact = await _artifacts.PersistPdfAsync(output, "libreoffice", version,
                 new Dictionary<string, string>(StringComparer.Ordinal)
@@ -220,6 +220,11 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
 
     private void VerifyRuntimeInstallationReadOnly()
     {
+        if (OperatingSystem.IsWindows())
+        {
+            VerifyWindowsRuntimeInstallationReadOnly();
+            return;
+        }
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
         var trustedRoot = Path.GetFullPath(_installationDirectory).TrimEnd(Path.DirectorySeparatorChar);
         EnsureTrustedPath(trustedRoot, trustedRoot);
@@ -230,6 +235,54 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         {
             if (++checkedFiles > 10_000) throw new IOException("The LibreOffice runtime contains too many shared-library entries.");
             EnsureTrustedPath(library, trustedRoot);
+        }
+    }
+
+    private void VerifyWindowsRuntimeInstallationReadOnly()
+    {
+        var root = Path.GetFullPath(_installationDirectory).TrimEnd(Path.DirectorySeparatorChar);
+        var programFiles = new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
+        }.Where(path => !string.IsNullOrWhiteSpace(path)).Select(Path.GetFullPath).ToArray();
+        if (!programFiles.Any(path => root.StartsWith(path.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase)))
+            throw new UnauthorizedAccessException("The LibreOffice runtime must be installed below a protected Program Files directory.");
+
+        for (var current = new DirectoryInfo(root); current is not null; current = current.Parent)
+        {
+            if ((File.GetAttributes(current.FullName) & FileAttributes.ReparsePoint) != 0)
+                throw new UnauthorizedAccessException("A LibreOffice runtime ancestor cannot be a reparse point.");
+            if (string.Equals(current.FullName.TrimEnd(Path.DirectorySeparatorChar),
+                    Path.GetPathRoot(root)?.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+                break;
+        }
+
+        var pending = new Stack<string>();
+        pending.Push(root);
+        var checkedEntries = 0;
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop();
+            if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+                throw new UnauthorizedAccessException("A LibreOffice runtime directory cannot be a reparse point.");
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            {
+                if (++checkedEntries > 20_000)
+                    throw new IOException("The LibreOffice runtime contains too many entries.");
+                var attributes = File.GetAttributes(entry);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new UnauthorizedAccessException("A LibreOffice runtime entry cannot be a reparse point.");
+                if ((attributes & FileAttributes.Directory) != 0) pending.Push(entry);
+            }
+        }
+        foreach (var path in new[] { _enginePath, _launcherPath })
+        {
+            var fullPath = Path.GetFullPath(path);
+            if (!fullPath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                (File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
+                throw new UnauthorizedAccessException("The configured LibreOffice engine or launcher escapes its protected installation.");
         }
     }
 

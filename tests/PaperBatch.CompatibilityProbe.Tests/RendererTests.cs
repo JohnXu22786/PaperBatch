@@ -1,5 +1,6 @@
 using PaperBatch.Core.Intake;
 using PaperBatch.Core.Rendering;
+using PaperBatch.Core.Ipc;
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Security.AccessControl;
@@ -581,6 +582,35 @@ internal static class RendererTests
         foreach (var offset in offsets.Skip(1)) builder.Append(offset.ToString("D10", System.Globalization.CultureInfo.InvariantCulture)).Append(" 00000 n \n");
         builder.Append("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n").Append(xref).Append("\n%%EOF\n");
         return Encoding.ASCII.GetBytes(builder.ToString());
+    }
+
+    public static void CoordinatorProductionRendererRequiresExplicitPin()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-coordinator-renderers-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+            var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+            var unconfigured = ProductionCoordinatorRequestHandler.CreateProductionRendererAdapters(
+                cache, artifacts, null, null, null, null);
+            Assert.Equal(2, unconfigured.Count);
+            Assert.False(unconfigured.Any(adapter => adapter is LibreOfficeRendererAdapter));
+
+            var malformed = ProductionCoordinatorRequestHandler.CreateProductionRendererAdapters(
+                cache, artifacts, null, null, Path.Combine(root, "program", "soffice.bin"), new string('z', 64));
+            Assert.Equal(2, malformed.Count);
+
+            var pinned = ProductionCoordinatorRequestHandler.CreateProductionRendererAdapters(
+                cache, artifacts, null, null, Path.Combine(root, "program", "soffice.bin"), new string('a', 64));
+            var supportedPlatform = OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
+            Assert.Equal(supportedPlatform ? 3 : 2, pinned.Count);
+            Assert.Equal(supportedPlatform, pinned.Any(adapter => adapter is LibreOfficeRendererAdapter));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
     }
 
     public static void LibreOfficeCapabilityRejectsUserWritableRuntimeTree()

@@ -65,6 +65,7 @@ var tests = new List<(string Name, Action Run)>
     ("built-in PNG renderer rejects a corrupt compressed raster", RendererTests.BuiltInPngRendererRejectsCorruptCompressedRaster),
     ("built-in PNG renderer rejects alpha rather than dropping it", RendererTests.BuiltInPngRendererRejectsAlphaRatherThanDroppingIt),
     ("LibreOffice capability rejects user-writable runtime trees", RendererTests.LibreOfficeCapabilityRejectsUserWritableRuntimeTree),
+    ("coordinator production renderer requires an explicit LibreOffice engine pin", RendererTests.CoordinatorProductionRendererRequiresExplicitPin),
     ("LibreOffice capability accepts protected trees and rejects group-writable libraries", RendererTests.LibreOfficeCapabilityAcceptsProtectedTreeAndRejectsGroupWritableLibrary),
     ("LibreOffice capability rejects a writable ancestor of a protected runtime", RendererTests.LibreOfficeCapabilityRejectsWritableAncestorOfProtectedRuntime),
     ("LibreOffice capability rejects dependency symlink escapes", RendererTests.LibreOfficeCapabilityRejectsDependencySymlinkEscape),

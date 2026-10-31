@@ -34,6 +34,7 @@ var tests = new (string Name, Action Run)[]
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
     ("overlapping imports return only their own rows and keep the view-model queue complete", OverlappingImportsKeepOperationRowsIsolated),
     ("real production queue import reports per-format intake and renderer outcomes", ApplicationImportEvidenceTests.ProductionQueueImportReportsFormatOutcomes),
+    ("production renderer composition requires an explicit LibreOffice pin while keeping PDFium separate", ProductionRendererCompositionRequiresExplicitPins),
     ("intentional duplicate sources have independent queue row identities", IntentionalDuplicateQueueRowsRemainIndependent),
     ("cancelled renderer batch releases every captured snapshot", CancelledRendererBatchReleasesEverySnapshot),
     ("macOS safely captures a regular source file", MacSourceCaptureUsesSafeNativeIdentity),
@@ -54,6 +55,34 @@ var tests = new (string Name, Action Run)[]
     ("corrupt saved history leaves production shell available with an error state", CorruptSavedHistoryRemainsVisibleAsAnError),
     ("presentation assembly keeps native backends behind shared core contracts", PresentationAssemblyReferencesCoreWithoutNativeImports)
 };
+
+static void ProductionRendererCompositionRequiresExplicitPins()
+{
+    var root = Path.Combine(Path.GetTempPath(), $"paperbatch-renderer-composition-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+        var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+        var empty = DesktopComposition.CreateProductionRendererAdapters(cache, artifacts, null, null, null, null);
+        Assert.Equal(2, empty.Count);
+        Assert.True(!empty.Any(adapter => adapter is LibreOfficeRendererAdapter));
+
+        var partial = DesktopComposition.CreateProductionRendererAdapters(cache, artifacts, null, null,
+            Path.Combine(root, "program", "soffice.bin"), null);
+        Assert.Equal(2, partial.Count);
+
+        var pinned = DesktopComposition.CreateProductionRendererAdapters(cache, artifacts, null, null,
+            Path.Combine(root, "program", "soffice.bin"), new string('a', 64));
+        var expectedCount = OperatingSystem.IsWindows() || OperatingSystem.IsLinux() ? 3 : 2;
+        Assert.Equal(expectedCount, pinned.Count);
+        Assert.Equal(OperatingSystem.IsWindows() || OperatingSystem.IsLinux(), pinned.Any(adapter => adapter is LibreOfficeRendererAdapter));
+    }
+    finally
+    {
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+}
 
 AppBuilder.Configure<App>()
     .UseHeadless(new AvaloniaHeadlessPlatformOptions())

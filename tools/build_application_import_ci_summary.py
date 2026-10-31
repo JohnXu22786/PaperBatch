@@ -12,18 +12,22 @@ from typing import Any
 
 MAX_REPORT_BYTES = 16 * 1024
 MAX_SUMMARY_BYTES = 4_000
-EXPECTED = {
+EXPECTED_BASE = {
     "synthetic_two_page.pdf": ("pdf", "accepted"),
     "synthetic_one_pixel.png": ("png", "accepted"),
-    "synthetic_sections_table.docx": ("docx", "unsupported"),
-    "synthetic_mixed_page_sizes.xlsx": ("xlsx", "unsupported"),
-    "synthetic_two_slides.pptx": ("pptx", "unsupported"),
+    "synthetic_sections_table.docx": ("docx", "document"),
+    "synthetic_mixed_page_sizes.xlsx": ("xlsx", "document"),
+    "synthetic_two_slides.pptx": ("pptx", "document"),
+    "synthetic_text.rtf": ("rtf", "document"),
+    "synthetic_text.odt": ("odt", "document"),
+    "synthetic_table.ods": ("ods", "document"),
+    "synthetic_slide.odp": ("odp", "document"),
     "synthetic_truncated_package.docx": ("docx", "rejected"),
 }
 
 
 def render(path: Path) -> tuple[str, int]:
-    lines = ["## PaperBatch production document import", ""]
+    lines = ["## PaperBatch production document conversion and import", ""]
     lines.append(
         f"Exact run: commit `{os.environ.get('PB_SOURCE_COMMIT', 'unknown')}`; workflow `{os.environ.get('GITHUB_WORKFLOW', 'unknown')}`; "
         f"run `{os.environ.get('GITHUB_RUN_ID', 'unknown')}` attempt `{os.environ.get('GITHUB_RUN_ATTEMPT', 'unknown')}`."
@@ -45,7 +49,7 @@ def render(path: Path) -> tuple[str, int]:
     lines.extend(["", "| Fixture | Format | Application outcome | Queue status | Renderer |", "|---|---|---|---|---|"])
     outcomes: Any = report.get("outcomes", []) if isinstance(report, dict) else []
     if isinstance(outcomes, list):
-        for item in outcomes[:len(EXPECTED)]:
+        for item in outcomes[:len(EXPECTED_BASE)]:
             if isinstance(item, dict):
                 lines.append(
                     f"| `{item.get('fixture', 'unknown')}` | {item.get('format', 'unknown')} | {item.get('applicationOutcome', 'unknown')} "
@@ -53,11 +57,21 @@ def render(path: Path) -> tuple[str, int]:
                 )
     if not valid:
         lines.insert(4, "Application import report identity, outcomes, or evidence limits failed validation; this run is not a pass.")
+    engine = report.get("libreOffice") if isinstance(report, dict) else None
+    if isinstance(engine, dict):
+        lines.append(f"LibreOffice: `{engine.get('version', 'unknown')}`; engine SHA-256 `{engine.get('engineSha256', 'unknown')}`.")
     lines.extend([
         "",
-        "This exercises PaperBatch's production queue-import path. PDF and PNG are accepted and produce persisted artifacts; DOCX/XLSX/PPTX pass intake checks but remain unsupported by the production renderer; malformed OOXML is rejected before rendering.",
-        "LibreOffice is not invoked by this test. Standalone LibreOffice conversion does not establish PaperBatch import support. No Microsoft Office/WPS compatibility, visual fidelity, printer, or physical-output claim is made.",
+        "This exercises PaperBatch's production queue-import path and configured pinned LibreOffice renderer. PDF/PNG and supported document formats produce persisted artifacts; malformed OOXML is rejected before rendering.",
+        "LibreOffice conversion is not Microsoft Office/WPS equivalence or visual-fidelity evidence. PDFium remains separately required for page inspection, composition, and batch preparation. No printer or physical-output claim is made.",
     ])
+    mixed = report.get("mixedBatchPreparation") if isinstance(report, dict) else None
+    if isinstance(mixed, dict):
+        lines.append(
+            f"Windows mixed batch: {mixed.get('sourceCount', 0)} ordered sources; {mixed.get('segmentCount', 0)} segment(s), "
+            f"{mixed.get('jobCount', 0)} job(s); fake backend submissions {mixed.get('fakeBackendSubmissions', 0)}; "
+            f"replay submissions {mixed.get('replaySubmissions', 0)}. Physical output was not produced."
+        )
     return _bound("\n".join(lines) + "\n"), 0 if valid else 1
 
 
@@ -70,17 +84,20 @@ def _valid_report(report: Any) -> bool:
                             ("runAttempt", "GITHUB_RUN_ATTEMPT"), ("runnerOs", "RUNNER_OS")):
         if report.get(field) != os.environ.get(env_name):
             return False
+    configured = os.environ.get("RUNNER_OS") in ("Linux", "Windows")
+    expected = {name: (format_name, ("converted" if configured else "unsupported") if result == "document" else result)
+                for name, (format_name, result) in EXPECTED_BASE.items()}
     outcomes = report.get("outcomes")
-    if not isinstance(outcomes, list) or len(outcomes) != len(EXPECTED):
+    if not isinstance(outcomes, list) or len(outcomes) != len(expected):
         return False
     found: dict[str, dict[str, Any]] = {}
     for item in outcomes:
         if not isinstance(item, dict) or not isinstance(item.get("fixture"), str) or item["fixture"] in found:
             return False
         found[item["fixture"]] = item
-    if set(found) != set(EXPECTED):
+    if set(found) != set(expected):
         return False
-    for fixture, (format_name, outcome) in EXPECTED.items():
+    for fixture, (format_name, outcome) in expected.items():
         item = found[fixture]
         if item.get("format") != format_name or item.get("applicationOutcome") != outcome:
             return False
@@ -90,16 +107,33 @@ def _valid_report(report: Any) -> bool:
         queue_status = item.get("queueStatus")
         if not isinstance(queue_status, str):
             return False
-        if outcome == "accepted" and (not queue_status.startswith("Ready to prepare · ") or renderer != "Succeeded"):
+        if outcome in ("accepted", "converted") and (not queue_status.startswith("Ready to prepare · ") or renderer != "Succeeded"):
             return False
         if outcome == "unsupported" and (queue_status != "Unsupported format" or renderer != "Unsupported"):
             return False
         if outcome == "rejected" and (queue_status != "Needs attention" or item.get("intakeDiagnostic") != "MalformedContainer" or renderer is not None):
             return False
     limits = report.get("evidenceLimits")
+    engine = report.get("libreOffice")
+    if configured:
+        if (not isinstance(engine, dict) or engine.get("version") != os.environ.get("PAPERBATCH_LO_EXPECTED_VERSION")
+                or engine.get("engineSha256") != os.environ.get("PAPERBATCH_LO_ENGINE_SHA256")
+                or not re.fullmatch(r"[0-9a-f]{64}", str(engine.get("engineSha256", "")))):
+            return False
+    elif engine is not None:
+        return False
+    mixed = report.get("mixedBatchPreparation")
+    if os.environ.get("RUNNER_OS") == "Windows":
+        if (not isinstance(mixed, dict) or mixed.get("sourceCount") != 9 or mixed.get("segmentCount") != 1
+                or mixed.get("jobCount") != 1 or mixed.get("fakeBackendSubmissions") != 1
+                or mixed.get("replaySubmissions") != 0
+                or not re.fullmatch(r"[0-9a-f]{64}", str(mixed.get("preparedArtifact", {}).get("sha256", "")))):
+            return False
+    elif mixed is not None:
+        return False
     return (isinstance(limits, list) and len(limits) >= 4
-            and any("standalone LibreOffice conversion does not establish PaperBatch import support" in str(item) for item in limits)
-            and any("No Office/WPS compatibility" in str(item) for item in limits))
+            and any("PDFium remains separately required" in str(item) for item in limits)
+            and any("Microsoft Office/WPS equivalence" in str(item) for item in limits))
 
 
 def _finish(lines: list[str], message: str, status: int) -> tuple[str, int]:
