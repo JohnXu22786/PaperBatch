@@ -271,16 +271,22 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             throw new UnauthorizedAccessException("The LibreOffice runtime must be installed below a protected Program Files directory.");
         var protectedProgramFiles = programFiles.First(path => root.StartsWith(
             path.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
-        VerifyWindowsRuntimeEntryAcl(protectedProgramFiles);
 
+        var reachedProgramFiles = false;
         for (var current = new DirectoryInfo(root); current is not null; current = current.Parent)
         {
             if ((File.GetAttributes(current.FullName) & FileAttributes.ReparsePoint) != 0)
                 throw new UnauthorizedAccessException("A LibreOffice runtime ancestor cannot be a reparse point.");
+            VerifyWindowsRuntimeEntryAcl(current.FullName);
             if (string.Equals(current.FullName.TrimEnd(Path.DirectorySeparatorChar),
-                    Path.GetPathRoot(root)?.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+                    protectedProgramFiles.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+            {
+                reachedProgramFiles = true;
                 break;
+            }
         }
+        if (!reachedProgramFiles)
+            throw new UnauthorizedAccessException("The LibreOffice installation is not beneath the verified Program Files directory.");
 
         var pending = new Stack<string>();
         pending.Push(root);

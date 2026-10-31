@@ -180,6 +180,10 @@ def _bound(text: str) -> str:
     return encoded[:MAX_SUMMARY_BYTES - len(marker.encode("utf-8"))].decode("utf-8", "ignore") + marker
 
 
+def _escape_workflow_command_data(text: str) -> str:
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("usage: build_application_import_ci_summary.py REPORT")
@@ -190,6 +194,12 @@ def main() -> int:
             stream.write(summary)
     else:
         sys.stdout.write(summary)
+    if status:
+        detail = next((line[len("Import test stopped: `"):-1]
+                       for line in summary.splitlines()
+                       if line.startswith("Import test stopped: `") and line.endswith("`")),
+                      "Application import evidence validation failed; see the bounded report summary.")
+        print(f"::error::{_escape_workflow_command_data(detail)}", file=sys.stderr)
     return status
 
 
