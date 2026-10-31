@@ -52,7 +52,7 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(ROOT / "tools/capture_bounded_command_output.py"),
                  "--output", str(output_path), "--max-bytes", "32", "--",
-                 sys.executable, "-c", "import sys; sys.stdout.write('x' * 100 + '\\r\\nfailure marker\\r\\n'); sys.exit(7)"],
+                 sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x' * 100 + b'\\r\\nfailure marker\\r\\n'); sys.exit(7)"],
                 capture_output=True, check=False,
             )
             self.assertEqual(result.returncode, 7)
