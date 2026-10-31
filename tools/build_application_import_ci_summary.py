@@ -12,6 +12,13 @@ from typing import Any
 
 MAX_REPORT_BYTES = 16 * 1024
 MAX_SUMMARY_BYTES = 4_000
+MAX_TEST_OUTPUT_BYTES = 32 * 1024
+MAX_RUNTIME_DIAGNOSTIC_CHARS = 1_200
+RUNTIME_DIAGNOSTIC_PREFIXES = (
+    "LibreOffice runtime capability check rejected:",
+    "LibreOffice version query failed:",
+    "LibreOffice export failed:",
+)
 EXPECTED_BASE = {
     "synthetic_two_page.pdf": ("pdf", "accepted"),
     "synthetic_one_pixel.png": ("png", "accepted"),
@@ -184,6 +191,30 @@ def _escape_workflow_command_data(text: str) -> str:
     return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
+def _read_runtime_diagnostics(path_value: str | None) -> str:
+    if not path_value:
+        return ""
+    path = Path(path_value)
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(MAX_TEST_OUTPUT_BYTES + 1)
+    except OSError:
+        return ""
+    if len(data) > MAX_TEST_OUTPUT_BYTES:
+        return ""
+    lines = data.decode("utf-8", "replace").splitlines()
+    selected: list[str] = []
+    for line in lines:
+        if not line.startswith(RUNTIME_DIAGNOSTIC_PREFIXES):
+            continue
+        compact = " ".join(line.split())
+        if compact not in selected:
+            selected.append(compact[:400])
+        if len(selected) >= 3:
+            break
+    return " | ".join(selected)[:MAX_RUNTIME_DIAGNOSTIC_CHARS]
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("usage: build_application_import_ci_summary.py REPORT")
@@ -199,6 +230,9 @@ def main() -> int:
                        for line in summary.splitlines()
                        if line.startswith("Import test stopped: `") and line.endswith("`")),
                       "Application import evidence validation failed; see the bounded report summary.")
+        runtime_diagnostics = _read_runtime_diagnostics(os.environ.get("PAPERBATCH_DESKTOP_TEST_OUTPUT"))
+        if runtime_diagnostics:
+            detail += f" LibreOffice diagnostic: {runtime_diagnostics}"
         print(f"::error::{_escape_workflow_command_data(detail)}", file=sys.stderr)
     return status
 

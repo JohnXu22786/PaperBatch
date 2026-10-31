@@ -65,31 +65,46 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
     {
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
-        if (request.ExecutionContext != RendererExecutionContext.BackgroundWorker || !SupportedFormats.Contains(request.Format) ||
-            !(OperatingSystem.IsLinux() || OperatingSystem.IsWindows()) || !File.Exists(_enginePath) || !File.Exists(_launcherPath) ||
-            (OperatingSystem.IsWindows() && !File.Exists(Path.Combine(_programDirectory, "fundamental.ini"))))
-            return ValueTask.FromResult(false);
+        if (request.ExecutionContext != RendererExecutionContext.BackgroundWorker)
+            return RejectCapability("document conversion requires the background-worker execution context.");
+        if (!SupportedFormats.Contains(request.Format))
+            return RejectCapability("the source format is not supported by the LibreOffice adapter.");
+        if (!(OperatingSystem.IsLinux() || OperatingSystem.IsWindows()))
+            return RejectCapability("LibreOffice conversion is supported only on Windows and Linux.");
+        if (!File.Exists(_enginePath) || !File.Exists(_launcherPath))
+            return RejectCapability("the configured LibreOffice engine or launcher file is missing.");
+        if (OperatingSystem.IsWindows() && !File.Exists(Path.Combine(_programDirectory, "fundamental.ini")))
+            return RejectCapability("the configured LibreOffice runtime is missing program/fundamental.ini.");
 
         try
         {
             VerifyRuntimeInstallationReadOnly();
             var info = new FileInfo(_enginePath);
-            if ((File.GetAttributes(_enginePath) & FileAttributes.ReparsePoint) != 0) return ValueTask.FromResult(false);
+            if ((File.GetAttributes(_enginePath) & FileAttributes.ReparsePoint) != 0)
+                return RejectCapability("the configured engine is a reparse point.");
             if (OperatingSystem.IsLinux() &&
                 (File.GetUnixFileMode(_enginePath) & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) == 0)
-                return ValueTask.FromResult(false);
-            if (info.Length <= 0 || info.Length > 64 * 1024 * 1024) return ValueTask.FromResult(false);
+                return RejectCapability("the configured Linux engine is not executable.");
+            if (info.Length <= 0 || info.Length > 64 * 1024 * 1024)
+                return RejectCapability("the configured engine length is outside its allowed bounds.");
             using var input = new FileStream(_enginePath, FileMode.Open, FileAccess.Read, FileShare.Read);
             var digest = Convert.ToHexString(SHA256.HashData(input)).ToLowerInvariant();
             cancellationToken.ThrowIfCancellationRequested();
-            return ValueTask.FromResult(string.Equals(digest, _engineSha256, StringComparison.Ordinal));
+            return string.Equals(digest, _engineSha256, StringComparison.Ordinal)
+                ? ValueTask.FromResult(true)
+                : RejectCapability("the configured engine did not match its pinned SHA-256.");
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or CryptographicException or Win32Exception or NotSupportedException or System.Security.SecurityException)
         {
-            if (Environment.GetEnvironmentVariable("PAPERBATCH_LO_DIAGNOSTICS") == "1")
-                Console.Error.WriteLine($"LibreOffice runtime capability check rejected: {exception.GetType().Name}: {exception.Message}");
-            return ValueTask.FromResult(false);
+            return RejectCapability($"{exception.GetType().Name}: {exception.Message}");
         }
+    }
+
+    private static ValueTask<bool> RejectCapability(string reason)
+    {
+        if (Environment.GetEnvironmentVariable("PAPERBATCH_LO_DIAGNOSTICS") == "1")
+            Console.Error.WriteLine($"LibreOffice runtime capability check rejected: {reason}");
+        return ValueTask.FromResult(false);
     }
 
     public async Task<RenderResult> RenderAsync(RenderRequest request, CancellationToken cancellationToken)

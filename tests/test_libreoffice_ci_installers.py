@@ -25,13 +25,25 @@ class LibreOfficeCiInstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "report.json"
             summary = Path(directory) / "summary.md"
+            test_output = Path(directory) / "test-output.txt"
             report.write_text(json.dumps({"failure": "import failed\n::warning::spoof%detail"}), encoding="utf-8")
+            test_output.write_text(
+                "noise line\nLibreOffice runtime capability check rejected: UnauthorizedAccessException: unsafe runtime ancestor\n",
+                encoding="utf-8",
+            )
             output = StringIO()
-            with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}), \
+            with mock.patch.dict(os.environ, {
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "PAPERBATCH_DESKTOP_TEST_OUTPUT": str(test_output),
+                }), \
                     mock.patch.object(sys, "argv", ["build_application_import_ci_summary.py", str(report)]), \
                     redirect_stderr(output):
                 self.assertEqual(build_application_import_ci_summary.main(), 1)
-            self.assertIn("::error::import failed ::warning::spoof%25detail", output.getvalue())
+            self.assertIn(
+                "::error::import failed ::warning::spoof%25detail LibreOffice diagnostic: "
+                "LibreOffice runtime capability check rejected: UnauthorizedAccessException: unsafe runtime ancestor",
+                output.getvalue(),
+            )
             self.assertIn("Import test stopped:", summary.read_text(encoding="utf-8"))
 
     def test_bounded_command_output_keeps_tail_and_preserves_exit_status(self):
