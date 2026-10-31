@@ -526,6 +526,7 @@ internal static class CoreTests
 
     internal static void CorruptExpiredArtifactDoesNotBlockCoordinatorStatusOrDeleteRetainedArtifacts()
     {
+        using var isolatedRuntime = new RuntimeEnvironmentScope();
         using var temporary = new TemporaryDirectory();
         var dataRoot = temporary.Path;
         var artifactsRoot = Path.Combine(dataRoot, "RenderArtifacts");
@@ -897,6 +898,7 @@ internal static class CoreTests
 
     internal static void CoordinatorHostServesProductionStatusAndUnavailableOperations()
     {
+        using var isolatedRuntime = new RuntimeEnvironmentScope();
         var appName = "PaperBatch-integration-" + Guid.NewGuid().ToString("N");
         var dataRoot = Path.Combine(Path.GetTempPath(), appName);
         Directory.CreateDirectory(dataRoot);
@@ -1297,6 +1299,29 @@ internal static class CoreTests
     }
 
     private static int ReadCount(string path, string table) => int.Parse(ReadScalar(path, $"SELECT COUNT(*) FROM {table};"));
+
+    private sealed class RuntimeEnvironmentScope : IDisposable
+    {
+        private static readonly string[] RuntimeVariables =
+        [
+            "PAPERBATCH_PDFIUM_RUNTIME_PATH",
+            "PAPERBATCH_PDFIUM_RUNTIME_SHA256",
+            "PAPERBATCH_LO_ENGINE_PATH",
+            "PAPERBATCH_LO_ENGINE_SHA256"
+        ];
+        private readonly Dictionary<string, string?> _original = RuntimeVariables.ToDictionary(
+            variable => variable, Environment.GetEnvironmentVariable, StringComparer.Ordinal);
+
+        public RuntimeEnvironmentScope()
+        {
+            foreach (var variable in RuntimeVariables) Environment.SetEnvironmentVariable(variable, null);
+        }
+
+        public void Dispose()
+        {
+            foreach (var (variable, value) in _original) Environment.SetEnvironmentVariable(variable, value);
+        }
+    }
 
     private sealed class TemporaryDirectory : IDisposable
     {
