@@ -204,7 +204,8 @@ internal static class ApplicationImportEvidenceTests
             Require(imported.Select(item => item.Title).SequenceEqual(fixtures.Select(item => item.Name)),
                 "Mixed-batch production import did not preserve source order.");
             var prepared = sources.PrepareQueueAsync(
-                new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto, ScalingMode.ShrinkToFit),
+                new PrintSettings(1, ColorMode.Color, DuplexMode.Simplex, "Letter", Orientation.Auto,
+                    ScalingMode.ShrinkToFit, PrinterId: "fake-libreo-test-queue"),
                 new LayoutOptions()).GetAwaiter().GetResult();
             Require(prepared.Succeeded, "Production mixed-batch preparation failed: " + string.Join("; ", prepared.Diagnostics));
             var run = prepared.Run!;
@@ -217,7 +218,7 @@ internal static class ApplicationImportEvidenceTests
             var print = new WindowsPrintCoordinator(runs, backend, () => "fake-libreo-batch-run", artifacts);
             var first = print.SubmitRunAsync(run, "libreoffice-mixed-batch-submit", DateTimeOffset.UtcNow).GetAwaiter().GetResult();
             Require(first.Count == 1 && first[0].Status == PrintSubmissionStatus.Accepted && backend.SubmissionCount == 1,
-                "Prepared batch was not submitted once through the injected fake print backend.");
+                $"Prepared batch was not submitted once through the injected fake print backend (results={first.Count}, status={first.FirstOrDefault()?.Status}, reason={first.FirstOrDefault()?.Reason}, submissions={backend.SubmissionCount}).");
             var replay = print.SubmitRunAsync(run, "libreoffice-mixed-batch-submit", DateTimeOffset.UtcNow.AddMinutes(1)).GetAwaiter().GetResult();
             Require(replay.Count == 0 && backend.SubmissionCount == 1, "A repeated batch submission reached the print backend twice.");
             return new
