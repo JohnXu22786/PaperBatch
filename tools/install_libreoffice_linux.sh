@@ -30,13 +30,13 @@ tar -xzf "$package" -C "$extract"
 mapfile -t debs < <(find "$extract" -type f -path '*/DEBS/*.deb' -print | sort)
 [[ ${#debs[@]} -gt 0 ]] || { echo 'The signed LibreOffice archive contains no Debian packages.' >&2; exit 1; }
 sudo apt-get update
+# The runner's /opt is shared-writable. Mark it sticky so an untrusted runner
+# account cannot replace the root-owned installation or its entries, while
+# preserving LibreOffice's package-defined install location and config paths.
+sudo chmod +t /opt
 sudo apt-get install -y "${debs[@]}"
-source_install='/opt/libreoffice26.2'
-install_root='/usr/local/lib/paperbatch-libreoffice26.2'
-sudo install -d -o root -g root -m 0755 "$install_root"
-sudo cp -a "$source_install/." "$install_root/"
-engine="$install_root/program/soffice.bin"
-launcher="$install_root/program/soffice"
+engine='/opt/libreoffice26.2/program/soffice.bin'
+launcher='/opt/libreoffice26.2/program/soffice'
 [[ -f "$engine" && -x "$engine" && -f "$launcher" ]] || { echo 'The verified LibreOffice installation is missing its program engine or launcher.' >&2; exit 1; }
 version_output="$("$launcher" --version)"
 [[ "$version_output" =~ ^LibreOffice[[:space:]]+${version}([[:space:]]|$) ]] || { echo 'Installed LibreOffice version did not match the pinned version.' >&2; exit 1; }

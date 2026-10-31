@@ -354,7 +354,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
                 continue;
             if (rule.IdentityReference is SecurityIdentifier sid && IsTrustedWindowsWriter(sid.Value, currentUser))
                 continue;
-            throw new UnauthorizedAccessException("A LibreOffice runtime entry grants write access to an untrusted account.");
+            throw new UnauthorizedAccessException($"LibreOffice runtime entry '{path}' grants write access to untrusted SID {rule.IdentityReference.Value} ({rule.FileSystemRights}).");
         }
     }
 
