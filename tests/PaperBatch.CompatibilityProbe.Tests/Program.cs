@@ -57,6 +57,7 @@ var tests = new List<(string Name, Action Run)>
     ("artifact store rejects malformed receipts as invalid data", RendererTests.ArtifactStoreRejectsMalformedReceiptAsInvalidData),
     ("artifact store protects its Windows directory ACL", RendererTests.ArtifactStoreProtectsItsWindowsDirectoryAcl),
     ("LibreOffice private profile protects its Windows directory ACL", RendererTests.LibreOfficeProfileProtectsItsWindowsDirectoryAcl),
+    ("LibreOffice runtime ACL write mask ignores read-only rights", RendererTests.WindowsRuntimeAclWriteMaskIgnoresReadOnlyRights),
     ("artifact store rejects non-PDF input", RendererTests.ArtifactStoreRejectsNonPdfInput),
     ("pinned PDFium inspector reports page geometry", RendererTests.PinnedPdfiumInspectorReportsPageGeometry),
     ("pinned PDFium renders one bounded preview page", RendererTests.PinnedPdfiumPreviewRendersOnlyOneBoundedPage),

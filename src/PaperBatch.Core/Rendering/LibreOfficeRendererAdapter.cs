@@ -225,6 +225,8 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             RedirectStandardError = true,
             WorkingDirectory = _programDirectory
         };
+        if (Environment.GetEnvironmentVariable("PAPERBATCH_LO_DIAGNOSTICS") == "1")
+            info.Environment["SAL_LOG"] = "+WARN";
         if (OperatingSystem.IsLinux())
         {
             foreach (var key in info.Environment.Keys.Where(key => key.StartsWith("LD_", StringComparison.Ordinal)).ToArray())
@@ -350,7 +352,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         {
             if (rule.AccessControlType != AccessControlType.Allow ||
                 (rule.PropagationFlags & PropagationFlags.InheritOnly) != 0 ||
-                (rule.FileSystemRights & UntrustedWindowsWriteRights) == 0)
+                !GrantsWindowsWriteAccess(rule.FileSystemRights))
                 continue;
             if (rule.IdentityReference is SecurityIdentifier sid && IsTrustedWindowsWriter(sid.Value, currentUser))
                 continue;
@@ -366,10 +368,13 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         string.Equals(sid, "S-1-3-0", StringComparison.Ordinal) || // Creator Owner; actual object owner is checked separately
         string.Equals(sid, "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", StringComparison.Ordinal); // TrustedInstaller
 
-    [SupportedOSPlatform("windows")]
-    private const FileSystemRights UntrustedWindowsWriteRights = FileSystemRights.Write | FileSystemRights.Modify |
-        FileSystemRights.Delete | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership |
-        FileSystemRights.CreateFiles | FileSystemRights.CreateDirectories | FileSystemRights.DeleteSubdirectoriesAndFiles;
+    internal static bool GrantsWindowsWriteAccess(FileSystemRights rights) =>
+        (rights & UntrustedWindowsWriteRights) != 0;
+
+    private const FileSystemRights UntrustedWindowsWriteRights = FileSystemRights.WriteData |
+        FileSystemRights.AppendData | FileSystemRights.WriteExtendedAttributes | FileSystemRights.WriteAttributes |
+        FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles |
+        FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
 
     private static void EnsureTrustedPath(string path, string trustedRoot)
     {

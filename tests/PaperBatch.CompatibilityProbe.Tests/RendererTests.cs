@@ -11,6 +11,15 @@ using System.Security.Cryptography;
 
 internal static class RendererTests
 {
+    public static void WindowsRuntimeAclWriteMaskIgnoresReadOnlyRights()
+    {
+        Assert.False(LibreOfficeRendererAdapter.GrantsWindowsWriteAccess(
+            FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize));
+        Assert.True(LibreOfficeRendererAdapter.GrantsWindowsWriteAccess(FileSystemRights.WriteData));
+        Assert.True(LibreOfficeRendererAdapter.GrantsWindowsWriteAccess(FileSystemRights.Modify));
+        Assert.True(LibreOfficeRendererAdapter.GrantsWindowsWriteAccess(FileSystemRights.Delete));
+    }
+
     public static void PinnedLibreOfficeVersionRequiresTokenBoundary()
     {
         const string pinnedVersion = "LibreOffice 26.2.2.2";
