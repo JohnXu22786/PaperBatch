@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using PaperBatch.Core.Intake;
@@ -9,6 +10,8 @@ public sealed class RenderArtifactStore
 {
     private const string OwnerMarkerName = ".paperbatch-render-artifacts-v1";
     private const string OwnerMarker = "PaperBatch.RenderArtifacts.v1\n";
+    private const string TemporaryLeaseName = ".active";
+    private static readonly TimeSpan TemporaryDirectoryMaxAge = TimeSpan.FromDays(1);
     private const int BufferSize = 64 * 1024;
     private readonly string _root;
     private readonly long _maximumArtifactBytes;
@@ -38,6 +41,7 @@ public sealed class RenderArtifactStore
         var tempId = ".tmp_" + Guid.NewGuid().ToString("N");
         var temporaryDirectory = Path.Combine(_root, tempId);
         CreatePrivateDirectory(temporaryDirectory);
+        var temporaryLease = CreateTemporaryLease(temporaryDirectory);
         var temporaryContent = Path.Combine(temporaryDirectory, "content.pdf");
         var temporaryReceipt = Path.Combine(temporaryDirectory, "receipt.json");
         try
@@ -94,6 +98,8 @@ public sealed class RenderArtifactStore
             try
             {
                 Directory.Move(temporaryDirectory, artifactDirectory);
+                temporaryLease.Dispose();
+                TryDelete(Path.Combine(artifactDirectory, TemporaryLeaseName));
                 return receipt;
             }
             catch (IOException) when (Directory.Exists(artifactDirectory))
@@ -110,6 +116,7 @@ public sealed class RenderArtifactStore
         }
         finally
         {
+            temporaryLease.Dispose();
             TryDeleteDirectory(temporaryDirectory);
         }
     }
@@ -275,13 +282,129 @@ public sealed class RenderArtifactStore
         if (File.Exists(marker))
         {
             if (File.ReadAllText(marker) != OwnerMarker) throw new IOException("The artifact root is not owned by PaperBatch.");
+            ReclaimOrphanedTemporaryDirectories();
             return;
         }
         if (Directory.EnumerateFileSystemEntries(_root).Any()) throw new IOException("The artifact root is not empty and has no PaperBatch owner marker.");
         using var output = CreatePrivateFile(marker);
         using var writer = new StreamWriter(output);
         writer.Write(OwnerMarker);
+        writer.Flush();
+        ReclaimOrphanedTemporaryDirectories();
     }
+
+    private void ReclaimOrphanedTemporaryDirectories()
+    {
+        if ((File.GetAttributes(_root) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != FileAttributes.Directory)
+            throw new IOException("The artifact root cannot be a reparse point.");
+
+        var cutoff = DateTime.UtcNow - TemporaryDirectoryMaxAge;
+        foreach (var directory in Directory.EnumerateDirectories(_root, ".tmp_*", SearchOption.TopDirectoryOnly))
+        {
+            var name = Path.GetFileName(directory);
+            if (name.Length != 37 || !name.StartsWith(".tmp_", StringComparison.Ordinal) ||
+                !Guid.TryParseExact(name[5..], "N", out _))
+                continue;
+
+            try
+            {
+                if ((File.GetAttributes(directory) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != FileAttributes.Directory ||
+                    Directory.GetLastWriteTimeUtc(directory) > cutoff)
+                    continue;
+
+                var entries = Directory.GetFileSystemEntries(directory);
+                if (entries.Any(entry => Path.GetFileName(entry) is not ("content.pdf" or "receipt.json" or TemporaryLeaseName) ||
+                    (File.GetAttributes(entry) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0))
+                    continue;
+
+                var leasePath = Path.Combine(directory, TemporaryLeaseName);
+                FileStream? lease = null;
+                if (File.Exists(leasePath))
+                {
+                    try
+                    {
+                        lease = new FileStream(leasePath, FileMode.Open, FileAccess.ReadWrite,
+                            FileShare.ReadWrite | FileShare.Delete);
+                        if (!TryLockTemporaryLease(lease))
+                        {
+                            lease.Dispose();
+                            continue;
+                        }
+                    }
+                    catch (IOException)
+                    {
+                        lease?.Dispose();
+                        continue;
+                    }
+                    catch (PlatformNotSupportedException)
+                    {
+                        lease?.Dispose();
+                        continue;
+                    }
+                }
+
+                using (lease)
+                {
+                    Directory.Delete(directory, recursive: true);
+                }
+            }
+            catch (IOException)
+            {
+                // A concurrent writer or an inaccessible temp directory is left for a later startup.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Cleanup must not prevent the store from opening for unrelated artifacts.
+            }
+        }
+    }
+
+    private static FileStream CreateTemporaryLease(string directory)
+    {
+        var path = Path.Combine(directory, TemporaryLeaseName);
+        var lease = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite,
+            FileShare.ReadWrite | FileShare.Delete);
+        try
+        {
+            lease.SetLength(1);
+            if (!TryLockTemporaryLease(lease)) throw new IOException("The render temporary directory lease could not be acquired.");
+            return lease;
+        }
+        catch
+        {
+            lease.Dispose();
+            throw;
+        }
+    }
+
+    private static bool TryLockTemporaryLease(FileStream lease)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                lease.Lock(0, 1);
+                return true;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+        }
+
+        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+        {
+            if (Flock(lease.SafeFileHandle.DangerousGetHandle().ToInt32(), 2 | 4) == 0) return true;
+            var error = Marshal.GetLastPInvokeError();
+            if (error is 11 or 35) return false;
+            throw new IOException("The render temporary directory lease could not be locked.", new System.ComponentModel.Win32Exception(error));
+        }
+
+        return false;
+    }
+
+    [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
+    private static extern int Flock(int fileDescriptor, int operation);
 
     private FileStream CreatePrivateFile(string path)
     {

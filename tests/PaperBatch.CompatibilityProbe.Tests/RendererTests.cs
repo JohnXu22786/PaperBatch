@@ -731,6 +731,141 @@ internal static class RendererTests
         }
     }
 
+    public static void ArtifactStoreReclaimsOnlyStaleOwnedTemporaryDirectories()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-orphans-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            _ = new RenderArtifactStore(root);
+            var stale = Path.Combine(root, ".tmp_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(stale);
+            File.WriteAllBytes(Path.Combine(stale, "content.pdf"), [1, 2, 3]);
+            File.WriteAllBytes(Path.Combine(stale, ".active"), [0]);
+            var old = DateTime.UtcNow.AddDays(-2);
+            Directory.SetLastWriteTimeUtc(stale, old);
+
+            _ = new RenderArtifactStore(root);
+
+            Assert.False(Directory.Exists(stale), "A stale, strictly named render temp directory should be reclaimed on store startup.");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStorePreservesRecentAndUnknownTemporaryDirectories()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-orphans-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            _ = new RenderArtifactStore(root);
+            var recent = Path.Combine(root, ".tmp_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(recent);
+            File.WriteAllBytes(Path.Combine(recent, "content.pdf"), [1]);
+            var unknown = Path.Combine(root, ".tmp_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(unknown);
+            File.WriteAllText(Path.Combine(unknown, "foreign.txt"), "preserve");
+            Directory.SetLastWriteTimeUtc(unknown, DateTime.UtcNow.AddDays(-2));
+            var malformed = Path.Combine(root, ".tmp_not-a-guid");
+            Directory.CreateDirectory(malformed);
+            File.WriteAllText(Path.Combine(malformed, "content.pdf"), "preserve");
+            Directory.SetLastWriteTimeUtc(malformed, DateTime.UtcNow.AddDays(-2));
+            string? linked = null;
+            var symlinkTarget = Path.Combine(root, "outside.pdf");
+            if (!OperatingSystem.IsWindows())
+            {
+                File.WriteAllText(symlinkTarget, "preserve");
+                linked = Path.Combine(root, ".tmp_" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(linked);
+                File.CreateSymbolicLink(Path.Combine(linked, "content.pdf"), symlinkTarget);
+                Directory.SetLastWriteTimeUtc(linked, DateTime.UtcNow.AddDays(-2));
+            }
+
+            _ = new RenderArtifactStore(root);
+
+            Assert.True(Directory.Exists(recent));
+            Assert.Equal("preserve", File.ReadAllText(Path.Combine(unknown, "foreign.txt")));
+            Assert.True(Directory.Exists(malformed));
+            if (linked is not null)
+            {
+                Assert.True(Directory.Exists(linked), "Cleanup must leave a temporary directory containing a symbolic link untouched.");
+                Assert.Equal("preserve", File.ReadAllText(symlinkTarget));
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStorePreservesAnActiveTemporaryDirectoryDuringRestartCleanup()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-active-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new RenderArtifactStore(root);
+            var input = new PausedReadStream(OnePagePdf());
+            var persist = store.PersistPdfAsync(input, "test-engine", "1", new Dictionary<string, string>());
+            Assert.True(input.ReadStarted.Wait(TimeSpan.FromSeconds(5)), "The render did not begin reading its source PDF.");
+            var active = Directory.GetDirectories(root, ".tmp_*", SearchOption.TopDirectoryOnly).Single();
+            Directory.SetLastWriteTimeUtc(active, DateTime.UtcNow.AddDays(-2));
+
+            _ = new RenderArtifactStore(root);
+
+            Assert.True(Directory.Exists(active), "Restart cleanup deleted a directory whose active render still held its lease.");
+            input.ContinueReading();
+            var artifact = persist.GetAwaiter().GetResult();
+            Assert.True(Directory.Exists(Path.Combine(root, artifact.Artifact.ArtifactId)));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStoreConcurrentCleanupPreservesFinalizedArtifacts()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-concurrent-cleanup-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new RenderArtifactStore(root);
+            var artifact = store.PersistPdfAsync(new MemoryStream(OnePagePdf()), "test-engine", "1",
+                new Dictionary<string, string>()).GetAwaiter().GetResult();
+            var stale = Path.Combine(root, ".tmp_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(stale);
+            File.WriteAllBytes(Path.Combine(stale, "content.pdf"), [1, 2, 3]);
+            Directory.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(-2));
+
+            Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Task.Run(() => new RenderArtifactStore(root)))).GetAwaiter().GetResult();
+
+            Assert.False(Directory.Exists(stale));
+            Assert.True(Directory.Exists(Path.Combine(root, artifact.Artifact.ArtifactId)));
+            using var reopened = store.OpenRead(artifact.Artifact.ArtifactId);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private sealed class PausedReadStream(byte[] bytes) : MemoryStream(bytes)
+    {
+        private readonly TaskCompletionSource _continue = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public ManualResetEventSlim ReadStarted { get; } = new(false);
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            ReadStarted.Set();
+            await _continue.Task.WaitAsync(cancellationToken);
+            return await base.ReadAsync(buffer, cancellationToken);
+        }
+
+        public void ContinueReading() => _continue.TrySetResult();
+    }
+
     public static void ArtifactStoreRejectsChangedPdfOnReadback()
     {
         var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-{Guid.NewGuid():N}");
