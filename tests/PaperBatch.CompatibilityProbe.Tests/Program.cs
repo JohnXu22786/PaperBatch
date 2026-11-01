@@ -324,6 +324,7 @@ var tests = new List<(string Name, Action Run)>
     ("source enumeration rejects device attributes", SourceIntakeTests.EnumerationRejectsDeviceAttributes),
     ("Windows extended local paths are not treated as network paths", SourceIntakeTests.WindowsExtendedLocalPathIsNotTreatedAsNetworkPath),
     ("source preflight recognizes supported format families", SourceIntakeTests.PreflightRecognizesSupportedFormatFamilies),
+    ("source preflight requires PNG IEND at end of file", SourceIntakeTests.PreflightRequiresPngIendAtEndOfFile),
     ("source preflight rejects mismatches malformed encryption and unsafe packages", SourceIntakeTests.PreflightRejectsMismatchMalformedEncryptionAndUnsafePackages),
     ("source preflight rejects invalid JPEG markers after scan data", SourceIntakeTests.PreflightRejectsInvalidJpegMarkersAfterScanData),
     ("source preflight accepts PDF xref stream PNG Up predictors", SourceIntakeTests.PreflightAcceptsPdfXrefStreamPngUpPredictor),

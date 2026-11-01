@@ -1580,7 +1580,7 @@ public static class SourceFormatPreflight
             if (chunkType == "IDAT") imageDataLength += chunkLength;
             if (chunkType == "IEND")
             {
-                if (chunkLength != 0) break;
+                if (chunkLength != 0 || offset + 4 != length) break;
                 hasEnd = true;
                 break;
             }
