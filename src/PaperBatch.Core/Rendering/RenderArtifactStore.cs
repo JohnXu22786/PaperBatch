@@ -494,6 +494,7 @@ public sealed class RenderArtifactStore
             lease.SetLength(1);
             if (!OperatingSystem.IsWindows() && !TryLockTemporaryLease(lease))
                 throw new IOException("The render temporary directory lease could not be acquired.");
+            EnsureLeasePathVisible(path);
             return lease;
         }
         catch
@@ -501,6 +502,12 @@ public sealed class RenderArtifactStore
             lease.Dispose();
             throw;
         }
+    }
+
+    private static void EnsureLeasePathVisible(string path)
+    {
+        if (!File.Exists(path))
+            throw new IOException("The render lease was removed before it could be acquired.");
     }
 
     private static bool TryLockTemporaryLease(FileStream lease)

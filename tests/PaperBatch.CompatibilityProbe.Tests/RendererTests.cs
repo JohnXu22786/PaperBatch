@@ -11,6 +11,7 @@ using System.Text;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Reflection;
 
 internal static class RendererTests
 {
@@ -880,6 +881,31 @@ internal static class RendererTests
             Assert.Equal(artifact.Artifact.ArtifactId,
                 store.DeleteUnreferencedArtifacts(new HashSet<string>()).Single());
             Assert.False(Directory.Exists(artifactDirectory), "Cleanup should remove an abandoned publication lease with its unreferenced artifact.");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStoreRejectsAnUnlinkedPublicationLease()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-unlinked-lease-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var leasePath = Path.Combine(root, ".publish_artifact_" + new string('a', 64) + "_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var lease = new FileStream(leasePath, FileMode.CreateNew, FileAccess.ReadWrite,
+                OperatingSystem.IsWindows() ? FileShare.Delete : FileShare.ReadWrite | FileShare.Delete);
+            File.Delete(leasePath);
+
+            var check = typeof(RenderArtifactStore).GetMethod("EnsureLeasePathVisible", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.True(check is not null, "Publication must validate that its locked lease remains visible in the artifact root.");
+            TargetInvocationException? exception = null;
+            try { check!.Invoke(null, [leasePath]); }
+            catch (TargetInvocationException caught) { exception = caught; }
+            Assert.True(exception?.InnerException is IOException,
+                "A publisher must not proceed after cleanup unlinks its lease before publication.");
         }
         finally
         {

@@ -105,6 +105,7 @@ var tests = new List<(string Name, Action Run)>
     ("artifact store preserves active temporary directories during restart cleanup", RendererTests.ArtifactStorePreservesAnActiveTemporaryDirectoryDuringRestartCleanup),
     ("artifact store concurrent cleanup preserves finalized artifacts", RendererTests.ArtifactStoreConcurrentCleanupPreservesFinalizedArtifacts),
     ("artifact store deletion handles a publication lease left by a crash", RendererTests.ArtifactStoreDeletionHandlesPublicationLeaseAfterCrash),
+    ("artifact store rejects an unlinked publication lease", RendererTests.ArtifactStoreRejectsAnUnlinkedPublicationLease),
     ("artifact store rejects changed PDF bytes on readback", RendererTests.ArtifactStoreRejectsChangedPdfOnReadback),
     ("artifact store rejects malformed receipts as invalid data", RendererTests.ArtifactStoreRejectsMalformedReceiptAsInvalidData),
     ("LibreOffice process stops when output size limit is exceeded", RendererTests.LibreOfficeProcessStopsWhenOutputLimitExceeded),
