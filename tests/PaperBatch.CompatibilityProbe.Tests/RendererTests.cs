@@ -1022,6 +1022,7 @@ internal static class RendererTests
 
             UnlockArtifactLease(mutationLease);
             mutationLocked = false;
+            mutationLease.Dispose();
             var duplicate = duplicateTask.GetAwaiter().GetResult();
             Assert.Equal(artifact.Artifact.ArtifactId, duplicate.Artifact.ArtifactId);
             Assert.True(Directory.Exists(Path.Combine(root, artifact.Artifact.ArtifactId)));
