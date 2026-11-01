@@ -415,7 +415,10 @@ internal sealed class ProductionPresentationSources :
 
     public bool IsAvailable => _intake is not null;
 
-    public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => _queue.ToArray();
+    public IReadOnlyList<QueueItemSnapshot> GetQueueItems()
+    {
+        lock (_queueStateSync) return _queue.ToArray();
+    }
 
     public void Move(string queueItemId, int delta)
     {
@@ -452,11 +455,12 @@ internal sealed class ProductionPresentationSources :
         var prepared = await _intake.PrepareAsync(inputs, cancellationToken: cancellationToken).ConfigureAwait(false);
         var queueItemIdBySnapshot = new Dictionary<string, string>(StringComparer.Ordinal);
         var importedItems = new List<QueueItemSnapshot>(prepared.Items.Length);
+        var stagedLocations = new Dictionary<string, string>(StringComparer.Ordinal);
+        var stagedSourceHashes = new Dictionary<string, string>(StringComparer.Ordinal);
+        var stagedFindings = new Dictionary<string, List<PreflightFindingSnapshot>>(StringComparer.Ordinal);
+        var stagedPreparableItems = new HashSet<string>(StringComparer.Ordinal);
         try
         {
-            string[] existingIds;
-            lock (_queueStateSync) existingIds = _queue.Select(item => item.Id).ToArray();
-            foreach (var existingId in existingIds) InvalidatePreparedRun(existingId);
             foreach (var source in prepared.Items)
             {
                 // Queue identity belongs to the row. A source snapshot can be shared or
@@ -465,7 +469,7 @@ internal sealed class ProductionPresentationSources :
                 if (source.Snapshot is { } capturedSnapshot)
                 {
                     queueItemIdBySnapshot[capturedSnapshot.SnapshotId] = id;
-                    _queueSourceHashes[id] = capturedSnapshot.Sha256;
+                    stagedSourceHashes[id] = capturedSnapshot.Sha256;
                 }
                 var title = Path.GetFileName(source.SourcePath);
                 var findings = source.Diagnostics.Select(diagnostic => new PreflightFindingSnapshot(
@@ -483,7 +487,7 @@ internal sealed class ProductionPresentationSources :
                         if (_preparationAvailable)
                         {
                             status = "Ready to prepare · " + format;
-                            _preparableQueueItems.Add(id);
+                            stagedPreparableItems.Add(id);
                         }
                         else
                         {
@@ -502,14 +506,35 @@ internal sealed class ProductionPresentationSources :
                                 : "No rendered artifact was returned.")));
                 }
                 var item = new QueueItemSnapshot(id, title, details, status);
-                lock (_queueStateSync)
+                importedItems.Add(item);
+                stagedLocations[id] = source.SourcePath;
+                stagedFindings[id] = findings;
+            }
+
+            string[] invalidatedQueueItemIds;
+            lock (_queueStateSync)
+            {
+                invalidatedQueueItemIds = _queue.Select(item => item.Id).ToArray();
+                foreach (var existingId in invalidatedQueueItemIds)
                 {
-                    _queue.Add(item);
-                    importedItems.Add(item);
-                    _queueLocations[id] = source.SourcePath;
-                    _findings[id] = findings;
+                    _preparedRunsByQueueItem.Remove(existingId);
                     _queueRevision++;
                 }
+                foreach (var item in importedItems)
+                {
+                    _queue.Add(item);
+                    _queueLocations[item.Id] = stagedLocations[item.Id];
+                    if (stagedSourceHashes.TryGetValue(item.Id, out var sourceHash))
+                        _queueSourceHashes[item.Id] = sourceHash;
+                    _findings[item.Id] = stagedFindings[item.Id];
+                    if (stagedPreparableItems.Contains(item.Id)) _preparableQueueItems.Add(item.Id);
+                    _queueRevision++;
+                }
+            }
+            foreach (var existingId in invalidatedQueueItemIds)
+            {
+                try { PreparedArtifactChanged?.Invoke(existingId); }
+                catch { /* A presentation observer cannot turn a committed import into a failed one. */ }
             }
             return importedItems.ToArray();
         }
@@ -523,8 +548,14 @@ internal sealed class ProductionPresentationSources :
                     try { _cache.Release(snapshotId); }
                     catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or System.Security.SecurityException)
                     {
-                        if (queueItemIdBySnapshot.TryGetValue(snapshotId, out var queueItemId) && _findings.TryGetValue(queueItemId, out var findings))
-                            findings.Add(new("Source cache", "Cleanup failed", "The temporary source snapshot could not be released."));
+                        if (queueItemIdBySnapshot.TryGetValue(snapshotId, out var queueItemId))
+                        {
+                            lock (_queueStateSync)
+                            {
+                                if (_findings.TryGetValue(queueItemId, out var findings))
+                                    findings.Add(new("Source cache", "Cleanup failed", "The temporary source snapshot could not be released."));
+                            }
+                        }
                     }
                 }
             }
@@ -542,9 +573,16 @@ internal sealed class ProductionPresentationSources :
     }
 
     private readonly Dictionary<string, List<PreflightFindingSnapshot>> _findings = new(StringComparer.Ordinal);
-    public bool CanPrepare => _preparationAvailable && _queue.Count > 0 &&
-        _queue.All(item => _queueLocations.ContainsKey(item.Id) && _queueSourceHashes.ContainsKey(item.Id) &&
-            _preparableQueueItems.Contains(item.Id));
+    public bool CanPrepare
+    {
+        get
+        {
+            lock (_queueStateSync)
+                return _preparationAvailable && _queue.Count > 0 &&
+                    _queue.All(item => _queueLocations.ContainsKey(item.Id) && _queueSourceHashes.ContainsKey(item.Id) &&
+                        _preparableQueueItems.Contains(item.Id));
+        }
+    }
     public IReadOnlyList<string> ResolutionSummaries => _resolutionSummaries;
 
     public async Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings, LayoutOptions layoutOptions,
@@ -786,11 +824,14 @@ internal sealed class ProductionPresentationSources :
             $"Prepared PDF · page 1 of {artifact.PageCount}", 1, artifact.PageCount,
             image, artifact.ArtifactId, artifact.Sha256);
     }
-    public IReadOnlyList<PreflightFindingSnapshot> GetFindings(string queueItemId) =>
-        _findings.TryGetValue(queueItemId, out var findings) ? findings.ToArray() :
-            [new("Rendering", _rendererAvailable ? "Not run" : "Unavailable", _rendererAvailable
-                ? "No preflight or artifact result exists for this queue item."
-                : "No renderer is configured; source content was not rendered.")];
+    public IReadOnlyList<PreflightFindingSnapshot> GetFindings(string queueItemId)
+    {
+        lock (_queueStateSync)
+            return _findings.TryGetValue(queueItemId, out var findings) ? findings.ToArray() :
+                [new("Rendering", _rendererAvailable ? "Not run" : "Unavailable", _rendererAvailable
+                    ? "No preflight or artifact result exists for this queue item."
+                    : "No renderer is configured; source content was not rendered.")];
+    }
     public string? HistoryReadError { get; private set; }
 
     public IReadOnlyList<HistoryEntrySnapshot> GetHistoryEntries()

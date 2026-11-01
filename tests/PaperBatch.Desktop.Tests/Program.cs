@@ -32,6 +32,7 @@ var tests = new (string Name, Action Run)[]
     ("removing a batch source clears its shared prepared run until re-preparation", RemovingBatchSourceInvalidatesSharedPreparedRun),
     ("language selection localizes desktop section labels", LanguageSelectionLocalizesSectionLabels),
     ("source intake errors remain visible and repeated imports append", SourceIntakeErrorsRemainVisibleAndAppend),
+    ("failed queue imports do not leave completed rows prepareable but invisible", FailedQueueImportDoesNotLeaveInvisiblePrepareableRows),
     ("overlapping imports return only their own rows and keep the view-model queue complete", OverlappingImportsKeepOperationRowsIsolated),
     ("real production queue import reports per-format intake and renderer outcomes", ApplicationImportEvidenceTests.ProductionQueueImportReportsFormatOutcomes),
     ("pinned LibreOffice version accepts its release build identity", ApplicationImportEvidenceTests.PinnedLibreOfficeVersionAcceptsReleaseBuildIdentity),
@@ -475,6 +476,51 @@ static void SourceIntakeErrorsRemainVisibleAndAppend()
     finally
     {
         if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
+    }
+}
+
+static void FailedQueueImportDoesNotLeaveInvisiblePrepareableRows()
+{
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-failed-queue-import-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    var firstPath = Path.Combine(root, "first.pdf");
+    var secondPath = Path.Combine(root, "second.pdf");
+    File.WriteAllBytes(firstPath, TestOnePagePdf());
+    File.WriteAllBytes(secondPath, TestOnePagePdf());
+    var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "snapshots") });
+    var artifacts = new RenderArtifactStore(Path.Combine(root, "artifacts"));
+    using var cancellation = new CancellationTokenSource();
+    var passThrough = new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(cache, artifacts));
+    var blockingRenderer = new BlockingAfterSuccessfulRenderAdapter(passThrough);
+    var renderer = new RendererCoordinator([blockingRenderer]);
+    var sources = new ProductionPresentationSources(new SourceIntakeService(cache), renderer, cache,
+        rendererAvailable: true, artifacts: artifacts, preparationAvailable: true);
+    var viewModel = new DesktopShellViewModel(sources, sources, sources, sources, sources, sources,
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    var queueStateSync = typeof(ProductionPresentationSources)
+        .GetField("_queueStateSync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .GetValue(sources)!;
+    var import = Task.Run(() => viewModel.ImportFilesAsync([firstPath, secondPath], cancellation.Token));
+    try
+    {
+        Assert.True(blockingRenderer.FirstRenderSucceeded.Wait(TimeSpan.FromSeconds(5)),
+            "The first row did not finish rendering.");
+        lock (queueStateSync)
+        {
+            blockingRenderer.ReleaseFirstRender();
+            cancellation.Cancel();
+        }
+        Assert.Throws<OperationCanceledException>(() =>
+            import.GetAwaiter().GetResult());
+
+        Assert.Equal(0, sources.GetQueueItems().Count);
+        Assert.Equal(0, viewModel.QueueItems.Count);
+        Assert.True(!sources.CanPrepare, "A failed import must not leave any hidden rows eligible for preparation.");
+    }
+    finally
+    {
+        blockingRenderer.ReleaseFirstRender();
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
     }
 }
 
@@ -1961,6 +2007,30 @@ sealed class CancellingRendererAdapter(CancellationTokenSource cancellation) : I
     {
         cancellation.Cancel();
         return Task.FromResult(RenderResult.Unsupported("Cancellation cleanup fixture."));
+    }
+}
+
+sealed class BlockingAfterSuccessfulRenderAdapter(IRendererAdapter inner) : IRendererAdapter
+{
+    private readonly TaskCompletionSource _releaseFirstRender = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _renderCount;
+
+    public ManualResetEventSlim FirstRenderSucceeded { get; } = new();
+
+    public void ReleaseFirstRender() => _releaseFirstRender.TrySetResult();
+
+    public ValueTask<bool> CanRenderAsync(RenderRequest request, CancellationToken cancellationToken) =>
+        inner.CanRenderAsync(request, cancellationToken);
+
+    public async Task<RenderResult> RenderAsync(RenderRequest request, CancellationToken cancellationToken)
+    {
+        var result = await inner.RenderAsync(request, cancellationToken).ConfigureAwait(false);
+        if (Interlocked.Increment(ref _renderCount) == 1)
+        {
+            if (result.Status == RenderStatus.Succeeded) FirstRenderSucceeded.Set();
+            await _releaseFirstRender.Task.ConfigureAwait(false);
+        }
+        return result;
     }
 }
 
