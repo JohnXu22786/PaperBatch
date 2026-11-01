@@ -9,7 +9,9 @@ using System.Security.Principal;
 using System.Runtime.Versioning;
 using System.Text;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Reflection;
 
 internal static class RendererTests
 {
@@ -729,6 +731,368 @@ internal static class RendererTests
         {
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
+    }
+
+    public static void ArtifactStoreReclaimsOnlyStaleOwnedTemporaryDirectories()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-orphans-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            _ = new RenderArtifactStore(root);
+            var stale = Path.Combine(root, ".tmp_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(stale);
+            File.WriteAllBytes(Path.Combine(stale, "content.pdf"), [1, 2, 3]);
+            File.WriteAllBytes(Path.Combine(stale, ".active"), [0]);
+            var old = DateTime.UtcNow.AddDays(-2);
+            Directory.SetLastWriteTimeUtc(stale, old);
+
+            _ = new RenderArtifactStore(root);
+
+            Assert.False(Directory.Exists(stale), "A stale, strictly named render temp directory should be reclaimed on store startup.");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStorePreservesRecentAndUnknownTemporaryDirectories()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-orphans-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            _ = new RenderArtifactStore(root);
+            var recent = Path.Combine(root, ".tmp_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(recent);
+            File.WriteAllBytes(Path.Combine(recent, "content.pdf"), [1]);
+            var unknown = Path.Combine(root, ".tmp_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(unknown);
+            File.WriteAllText(Path.Combine(unknown, "foreign.txt"), "preserve");
+            Directory.SetLastWriteTimeUtc(unknown, DateTime.UtcNow.AddDays(-2));
+            var malformed = Path.Combine(root, ".tmp_not-a-guid");
+            Directory.CreateDirectory(malformed);
+            File.WriteAllText(Path.Combine(malformed, "content.pdf"), "preserve");
+            Directory.SetLastWriteTimeUtc(malformed, DateTime.UtcNow.AddDays(-2));
+            var uppercase = Path.Combine(root, ".tmp_" + Guid.NewGuid().ToString("N").ToUpperInvariant());
+            Directory.CreateDirectory(uppercase);
+            File.WriteAllBytes(Path.Combine(uppercase, "content.pdf"), [1]);
+            Directory.SetLastWriteTimeUtc(uppercase, DateTime.UtcNow.AddDays(-2));
+            string? linked = null;
+            var symlinkTarget = Path.Combine(root, "outside.pdf");
+            if (!OperatingSystem.IsWindows())
+            {
+                File.WriteAllText(symlinkTarget, "preserve");
+                linked = Path.Combine(root, ".tmp_" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(linked);
+                File.CreateSymbolicLink(Path.Combine(linked, "content.pdf"), symlinkTarget);
+                Directory.SetLastWriteTimeUtc(linked, DateTime.UtcNow.AddDays(-2));
+            }
+
+            _ = new RenderArtifactStore(root);
+
+            Assert.True(Directory.Exists(recent));
+            Assert.Equal("preserve", File.ReadAllText(Path.Combine(unknown, "foreign.txt")));
+            Assert.True(Directory.Exists(malformed));
+            Assert.True(Directory.Exists(uppercase), "Cleanup must leave GUID names outside the canonical lowercase format untouched.");
+            if (linked is not null)
+            {
+                Assert.True(Directory.Exists(linked), "Cleanup must leave a temporary directory containing a symbolic link untouched.");
+                Assert.Equal("preserve", File.ReadAllText(symlinkTarget));
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStorePreservesAnActiveTemporaryDirectoryDuringRestartCleanup()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-active-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new RenderArtifactStore(root);
+            var input = new PausedReadStream(OnePagePdf());
+            var persist = store.PersistPdfAsync(input, "test-engine", "1", new Dictionary<string, string>());
+            Assert.True(input.ReadStarted.Wait(TimeSpan.FromSeconds(5)), "The render did not begin reading its source PDF.");
+            var active = Directory.GetDirectories(root, ".tmp_*", SearchOption.TopDirectoryOnly).Single();
+            Directory.SetLastWriteTimeUtc(active, DateTime.UtcNow.AddDays(-2));
+
+            _ = new RenderArtifactStore(root);
+
+            Assert.True(Directory.Exists(active), "Restart cleanup deleted a directory whose active render still held its lease.");
+            input.ContinueReading();
+            var artifact = persist.GetAwaiter().GetResult();
+            Assert.True(Directory.Exists(Path.Combine(root, artifact.Artifact.ArtifactId)));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStoreConcurrentCleanupPreservesFinalizedArtifacts()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-concurrent-cleanup-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new RenderArtifactStore(root);
+            var artifact = store.PersistPdfAsync(new MemoryStream(OnePagePdf()), "test-engine", "1",
+                new Dictionary<string, string>()).GetAwaiter().GetResult();
+            var stale = Path.Combine(root, ".tmp_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(stale);
+            File.WriteAllBytes(Path.Combine(stale, "content.pdf"), [1, 2, 3]);
+            Directory.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(-2));
+
+            Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Task.Run(() => new RenderArtifactStore(root)))).GetAwaiter().GetResult();
+
+            Assert.False(Directory.Exists(stale));
+            Assert.True(Directory.Exists(Path.Combine(root, artifact.Artifact.ArtifactId)));
+            using var reopened = store.OpenRead(artifact.Artifact.ArtifactId);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStoreDeletionHandlesPublicationLeaseAfterCrash()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-publication-lease-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new RenderArtifactStore(root);
+            var artifact = store.PersistPdfAsync(new MemoryStream(OnePagePdf()), "test-engine", "1",
+                new Dictionary<string, string>()).GetAwaiter().GetResult();
+            var artifactDirectory = Path.Combine(root, artifact.Artifact.ArtifactId);
+            var leasePath = Path.Combine(root, ".publish_" + artifact.Artifact.ArtifactId + "_" + Guid.NewGuid().ToString("N"));
+            using var lease = new FileStream(leasePath, FileMode.CreateNew, FileAccess.ReadWrite,
+                OperatingSystem.IsWindows() ? FileShare.Delete : FileShare.ReadWrite | FileShare.Delete);
+            lease.SetLength(1);
+            LockArtifactLease(lease);
+
+            Assert.Equal(0, store.DeleteUnreferencedArtifacts(new HashSet<string>()).Count);
+            Assert.True(Directory.Exists(artifactDirectory), "Cleanup must preserve a published artifact whose writer still holds its lease.");
+
+            UnlockArtifactLease(lease);
+            lease.Dispose();
+            Assert.Equal(artifact.Artifact.ArtifactId,
+                store.DeleteUnreferencedArtifacts(new HashSet<string>()).Single());
+            Assert.False(Directory.Exists(artifactDirectory), "Cleanup should remove an abandoned publication lease with its unreferenced artifact.");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStoreRejectsAnUnlinkedPublicationLease()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-unlinked-lease-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var leasePath = Path.Combine(root, ".publish_artifact_" + new string('a', 64) + "_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var lease = new FileStream(leasePath, FileMode.CreateNew, FileAccess.ReadWrite,
+                OperatingSystem.IsWindows() ? FileShare.Delete : FileShare.ReadWrite | FileShare.Delete);
+            File.Delete(leasePath);
+
+            var check = typeof(RenderArtifactStore).GetMethod("EnsureLeasePathVisible", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.True(check is not null, "Publication must validate that its locked lease remains visible in the artifact root.");
+            TargetInvocationException? exception = null;
+            try { check!.Invoke(null, [leasePath]); }
+            catch (TargetInvocationException caught) { exception = caught; }
+            Assert.True(exception?.InnerException is IOException,
+                "A publisher must not proceed after cleanup unlinks its lease before publication.");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStoreDeduplicatedPersistenceCoordinatesWithCleanup()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-deduplicated-cleanup-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var store = new RenderArtifactStore(root);
+        var pdfText = Encoding.ASCII.GetString(OnePagePdf());
+        var padding = new string(' ', 16 * 1024 * 1024);
+        var xrefIndex = pdfText.IndexOf("xref\n", StringComparison.Ordinal);
+        var paddedPdf = pdfText.Insert(xrefIndex, padding);
+        var startXrefValue = paddedPdf.LastIndexOf("startxref\n", StringComparison.Ordinal) + "startxref\n".Length;
+        var startXrefEnd = paddedPdf.IndexOf('\n', startXrefValue);
+        var xrefOffset = long.Parse(paddedPdf.AsSpan(startXrefValue, startXrefEnd - startXrefValue),
+            System.Globalization.CultureInfo.InvariantCulture);
+        paddedPdf = paddedPdf[..startXrefValue] + (xrefOffset + padding.Length)
+            .ToString(System.Globalization.CultureInfo.InvariantCulture) + paddedPdf[startXrefEnd..];
+        var pdfBytes = Encoding.ASCII.GetBytes(paddedPdf);
+        var artifact = store.PersistPdfAsync(new MemoryStream(pdfBytes), "test-engine", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        var artifactDirectory = Path.Combine(root, artifact.Artifact.ArtifactId);
+        var publicationPrefix = ".publish_" + artifact.Artifact.ArtifactId + "_";
+        Task<StoredPdfArtifact>? duplicateTask = null;
+        try
+        {
+            duplicateTask = store.PersistPdfAsync(new MemoryStream(pdfBytes), "test-engine", "1",
+                new Dictionary<string, string>());
+            var leaseDeadline = Stopwatch.GetTimestamp() + 10 * Stopwatch.Frequency;
+            var publicationLeaseObserved = false;
+            IReadOnlyList<string>? deleted = null;
+            while (!duplicateTask.IsCompleted && Stopwatch.GetTimestamp() < leaseDeadline)
+            {
+                if (Directory.EnumerateFiles(root, publicationPrefix + "*", SearchOption.TopDirectoryOnly).Any())
+                {
+                    if (duplicateTask.IsCompleted) continue;
+                    publicationLeaseObserved = true;
+                    deleted = store.DeleteUnreferencedArtifacts(new HashSet<string>());
+                    break;
+                }
+                Thread.Sleep(1);
+            }
+
+            StoredPdfArtifact? duplicate = null;
+            Exception? persistenceFailure = null;
+            try { duplicate = duplicateTask.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult(); }
+            catch (Exception exception) { persistenceFailure = exception; }
+
+            Assert.True(publicationLeaseObserved,
+                "Deduplicated persistence did not hold a publication lease while verifying an existing artifact.");
+            Assert.Equal(0, deleted!.Count);
+            Assert.True(Directory.Exists(artifactDirectory), "Concurrent cleanup deleted an artifact being verified by duplicate persistence.");
+            Assert.True(persistenceFailure is null, $"Duplicate persistence failed during concurrent cleanup: {persistenceFailure}");
+            Assert.Equal(artifact.Artifact.ArtifactId, duplicate!.Artifact.ArtifactId);
+        }
+        finally
+        {
+            if (duplicateTask is not null)
+            {
+                try { duplicateTask.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult(); }
+                catch (Exception) { }
+            }
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStoreSerializesPublicationRegistrationWithCleanup()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-registration-gate-{Guid.NewGuid():N}");
+        RenderArtifactStore? store = null;
+        Task<StoredPdfArtifact>? duplicateTask = null;
+        FileStream? mutationLease = null;
+        var mutationLocked = false;
+        try
+        {
+            store = new RenderArtifactStore(root);
+            var pdf = OnePagePdf();
+            var artifact = store.PersistPdfAsync(new MemoryStream(pdf), "test-engine", "1",
+                new Dictionary<string, string>()).GetAwaiter().GetResult();
+            var lockName = typeof(RenderArtifactStore).GetField("RootMutationLeaseName",
+                BindingFlags.NonPublic | BindingFlags.Static)?.GetRawConstantValue() as string;
+            Assert.True(!string.IsNullOrWhiteSpace(lockName), "The artifact root must have a stable mutation lease for publication registration and cleanup.");
+            mutationLease = new FileStream(Path.Combine(root, lockName!), FileMode.Open, FileAccess.ReadWrite,
+                OperatingSystem.IsWindows() ? FileShare.Delete : FileShare.ReadWrite | FileShare.Delete);
+            LockArtifactLease(mutationLease);
+            mutationLocked = true;
+
+            duplicateTask = store.PersistPdfAsync(new MemoryStream(pdf), "test-engine", "1",
+                new Dictionary<string, string>());
+            var deadline = Stopwatch.GetTimestamp() + 5 * Stopwatch.Frequency;
+            var temporaryContentReady = false;
+            while (Stopwatch.GetTimestamp() < deadline)
+            {
+                temporaryContentReady = Directory.EnumerateDirectories(root, ".tmp_*", SearchOption.TopDirectoryOnly)
+                    .Any(path => File.Exists(Path.Combine(path, "content.pdf")) &&
+                        new FileInfo(Path.Combine(path, "content.pdf")).Length == pdf.Length);
+                if (temporaryContentReady) break;
+                Thread.Sleep(1);
+            }
+            Thread.Sleep(50);
+
+            var publicationLeaseExists = Directory.EnumerateFiles(root,
+                ".publish_" + artifact.Artifact.ArtifactId + "_*", SearchOption.TopDirectoryOnly).Any();
+            var deletedWhileGateHeld = store.DeleteUnreferencedArtifacts(new HashSet<string>());
+
+            Assert.True(temporaryContentReady, "The duplicate render did not finish staging its input PDF.");
+            Assert.False(publicationLeaseExists, "A publisher must wait for the root mutation lease before registering an artifact publication sidecar.");
+            Assert.False(duplicateTask.IsCompleted, "Duplicate persistence should wait while cleanup holds the shared root mutation gate.");
+            Assert.Equal(0, deletedWhileGateHeld.Count);
+
+            UnlockArtifactLease(mutationLease);
+            mutationLocked = false;
+            mutationLease.Dispose();
+            var duplicate = duplicateTask.GetAwaiter().GetResult();
+            Assert.Equal(artifact.Artifact.ArtifactId, duplicate.Artifact.ArtifactId);
+            Assert.True(Directory.Exists(Path.Combine(root, artifact.Artifact.ArtifactId)));
+        }
+        finally
+        {
+            if (mutationLease is not null)
+            {
+                if (mutationLocked)
+                {
+                    try { UnlockArtifactLease(mutationLease); }
+                    catch (IOException) { }
+                }
+                mutationLease.Dispose();
+            }
+            if (duplicateTask is not null)
+            {
+                try { duplicateTask.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult(); }
+                catch (Exception) { }
+            }
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void LockArtifactLease(FileStream lease)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            lease.Lock(0, 1);
+            return;
+        }
+
+        if ((OperatingSystem.IsLinux() || OperatingSystem.IsMacOS()) &&
+            Flock(lease.SafeFileHandle.DangerousGetHandle().ToInt32(), 2 | 4) == 0)
+            return;
+
+        throw new IOException("The test publication lease could not be locked.");
+    }
+
+    private static void UnlockArtifactLease(FileStream lease)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            lease.Unlock(0, 1);
+            return;
+        }
+
+        if ((OperatingSystem.IsLinux() || OperatingSystem.IsMacOS()) &&
+            Flock(lease.SafeFileHandle.DangerousGetHandle().ToInt32(), 8) == 0)
+            return;
+
+        throw new IOException("The test publication lease could not be unlocked.");
+    }
+
+    [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
+    private static extern int Flock(int fileDescriptor, int operation);
+
+    private sealed class PausedReadStream(byte[] bytes) : MemoryStream(bytes)
+    {
+        private readonly TaskCompletionSource _continue = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public ManualResetEventSlim ReadStarted { get; } = new(false);
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            ReadStarted.Set();
+            await _continue.Task.WaitAsync(cancellationToken);
+            return await base.ReadAsync(buffer, cancellationToken);
+        }
+
+        public void ContinueReading() => _continue.TrySetResult();
     }
 
     public static void ArtifactStoreRejectsChangedPdfOnReadback()
