@@ -221,6 +221,17 @@ internal static class SourceIntakeTests
         Assert.True(bigTiffResult.Diagnostics.All(diagnostic => diagnostic.Code != IntakeDiagnosticCode.MalformedContainer));
     }
 
+    internal static void PreflightRequiresPngIendAtEndOfFile()
+    {
+        using var validPng = new MemoryStream(PngBytes(), writable: false);
+        Assert.Equal(SourcePreflightStatus.Ready, SourceFormatPreflight.Inspect(validPng, ".png").Status);
+
+        var pngWithTrailingBytes = PngBytes().Concat(new byte[] { 0x01, 0x02 }).ToArray();
+        using var trailingDataPng = new MemoryStream(pngWithTrailingBytes, writable: false);
+        Assert.True(SourceFormatPreflight.Inspect(trailingDataPng, ".png").Diagnostics.Any(
+            diagnostic => diagnostic.Code == IntakeDiagnosticCode.MalformedContainer));
+    }
+
     internal static void PreflightRejectsMismatchMalformedEncryptionAndUnsafePackages()
     {
         using var empty = new MemoryStream([]);
