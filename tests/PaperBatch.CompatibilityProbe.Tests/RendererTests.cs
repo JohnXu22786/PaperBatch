@@ -913,6 +913,69 @@ internal static class RendererTests
         }
     }
 
+    public static void ArtifactStoreDeduplicatedPersistenceCoordinatesWithCleanup()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-deduplicated-cleanup-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var store = new RenderArtifactStore(root);
+        var pdfText = Encoding.ASCII.GetString(OnePagePdf());
+        var padding = new string(' ', 16 * 1024 * 1024);
+        var xrefIndex = pdfText.IndexOf("xref\n", StringComparison.Ordinal);
+        var paddedPdf = pdfText.Insert(xrefIndex, padding);
+        var startXrefValue = paddedPdf.LastIndexOf("startxref\n", StringComparison.Ordinal) + "startxref\n".Length;
+        var startXrefEnd = paddedPdf.IndexOf('\n', startXrefValue);
+        var xrefOffset = long.Parse(paddedPdf.AsSpan(startXrefValue, startXrefEnd - startXrefValue),
+            System.Globalization.CultureInfo.InvariantCulture);
+        paddedPdf = paddedPdf[..startXrefValue] + (xrefOffset + padding.Length)
+            .ToString(System.Globalization.CultureInfo.InvariantCulture) + paddedPdf[startXrefEnd..];
+        var pdfBytes = Encoding.ASCII.GetBytes(paddedPdf);
+        var artifact = store.PersistPdfAsync(new MemoryStream(pdfBytes), "test-engine", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        var artifactDirectory = Path.Combine(root, artifact.Artifact.ArtifactId);
+        var publicationPrefix = ".publish_" + artifact.Artifact.ArtifactId + "_";
+        Task<StoredPdfArtifact>? duplicateTask = null;
+        try
+        {
+            duplicateTask = store.PersistPdfAsync(new MemoryStream(pdfBytes), "test-engine", "1",
+                new Dictionary<string, string>());
+            var leaseDeadline = Stopwatch.GetTimestamp() + 10 * Stopwatch.Frequency;
+            var publicationLeaseObserved = false;
+            IReadOnlyList<string>? deleted = null;
+            while (!duplicateTask.IsCompleted && Stopwatch.GetTimestamp() < leaseDeadline)
+            {
+                if (Directory.EnumerateFiles(root, publicationPrefix + "*", SearchOption.TopDirectoryOnly).Any())
+                {
+                    publicationLeaseObserved = true;
+                    Thread.Sleep(25);
+                    deleted = store.DeleteUnreferencedArtifacts(new HashSet<string>());
+                    break;
+                }
+                Thread.Sleep(1);
+            }
+
+            StoredPdfArtifact? duplicate = null;
+            Exception? persistenceFailure = null;
+            try { duplicate = duplicateTask.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult(); }
+            catch (Exception exception) { persistenceFailure = exception; }
+
+            Assert.True(publicationLeaseObserved,
+                "Deduplicated persistence did not hold a publication lease while verifying an existing artifact.");
+            Assert.Equal(0, deleted!.Count);
+            Assert.True(Directory.Exists(artifactDirectory), "Concurrent cleanup deleted an artifact being verified by duplicate persistence.");
+            Assert.True(persistenceFailure is null, $"Duplicate persistence failed during concurrent cleanup: {persistenceFailure}");
+            Assert.Equal(artifact.Artifact.ArtifactId, duplicate!.Artifact.ArtifactId);
+        }
+        finally
+        {
+            if (duplicateTask is not null)
+            {
+                try { duplicateTask.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult(); }
+                catch (Exception) { }
+            }
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static void LockArtifactLease(FileStream lease)
     {
         if (OperatingSystem.IsWindows())

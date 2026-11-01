@@ -73,6 +73,8 @@ public sealed class RenderArtifactStore
             using (var persisted = new FileStream(temporaryContent, FileMode.Open, FileAccess.Read, FileShare.Read))
                 ValidatePdfStructure(persisted);
             var artifactId = "artifact_" + digest;
+            publicationLeasePath = PublicationLeasePath(artifactId, tempId[5..]);
+            publicationLease = CreateLeaseFile(publicationLeasePath);
             var artifact = new PdfArtifact(artifactId, digest, length);
             var receipt = new StoredPdfArtifact(artifact, engineId, engineVersion,
                 options.OrderBy(pair => pair.Key, StringComparer.Ordinal)
@@ -99,8 +101,6 @@ public sealed class RenderArtifactStore
                 await output.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            publicationLeasePath = PublicationLeasePath(artifactId, tempId[5..]);
-            publicationLease = CreateLeaseFile(publicationLeasePath);
             Directory.SetLastWriteTimeUtc(temporaryDirectory, DateTime.UtcNow);
             temporaryLease.Dispose();
             TryDelete(Path.Combine(temporaryDirectory, TemporaryLeaseName));
