@@ -171,6 +171,7 @@ var tests = new List<(string Name, Action Run)>
     ("watch readiness requires two stable observations", WatchFolderTests.ReadinessRequiresTwoMatchingObservations),
     ("watch idempotency keys survive restarts and change by generation", WatchFolderTests.IdempotencyKeyIsStableAcrossRestartsAndChangesOnGeneration),
     ("watch debouncer coalesces events and requires later scan", WatchFolderTests.DebouncerCoalescesHints),
+    ("watch debouncer caps continuous hints at maximum delay", WatchFolderTests.DebouncerCapsContinuousHintsAtMaximumDelay),
     ("watch processor only auto-submits supported trusted document types", WatchFolderTests.ProcessorRequiresReviewForOffice),
     ("watch preparation failure is reported without hiding prior runs or skipping later candidates", WatchFolderTests.PreparationFailureDoesNotHideEarlierResultsOrSkipLaterCandidates),
     ("watch rejects a parent directory symlink swap", WatchFolderTests.ParentDirectoryLinkSwapFailsClosed),

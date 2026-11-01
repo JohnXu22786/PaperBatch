@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace PaperBatch.Core.Watch;
 
 public sealed record WatchFolderPolicy(bool AutoSubmitTrustedRule = false, bool RuleIsTrusted = false);
@@ -42,27 +44,56 @@ public sealed class WatchFolderProcessor(WatchFolderScanner scanner, IWatchFolde
     }
 }
 
-/// <summary>Debounces filesystem hints; periodic callers must still invoke ReconcileAsync to recover missed events.</summary>
-public sealed class WatchFolderDebouncer(TimeSpan quietPeriod)
+/// <summary>Debounces filesystem hints while allowing a maximum delay for reconciliation.</summary>
+public sealed class WatchFolderDebouncer(TimeSpan quietPeriod, TimeSpan? maximumDelay = null)
 {
     private readonly object _gate = new();
+    private DateTimeOffset? _firstHint;
     private DateTimeOffset? _lastHint;
     public TimeSpan QuietPeriod { get; } = quietPeriod >= TimeSpan.Zero && quietPeriod <= TimeSpan.FromMinutes(1)
         ? quietPeriod : throw new ArgumentOutOfRangeException(nameof(quietPeriod));
+    public TimeSpan? MaximumDelay { get; } = maximumDelay is null || maximumDelay >= TimeSpan.Zero && maximumDelay <= TimeSpan.FromHours(1)
+        ? maximumDelay : throw new ArgumentOutOfRangeException(nameof(maximumDelay));
 
     public void NotifyChange(DateTimeOffset? at = null)
     {
-        lock (_gate) _lastHint = at ?? DateTimeOffset.UtcNow;
+        lock (_gate)
+        {
+            var hint = at ?? DateTimeOffset.UtcNow;
+            _firstHint ??= hint;
+            _lastHint = hint;
+        }
     }
 
     public bool TryTakeDueScan(DateTimeOffset? now = null)
     {
         lock (_gate)
         {
-            if (_lastHint is not { } hint || (now ?? DateTimeOffset.UtcNow) - hint < QuietPeriod) return false;
+            if (!IsDue(now ?? DateTimeOffset.UtcNow)) return false;
+            _firstHint = null;
             _lastHint = null;
             return true;
         }
+    }
+
+    public TimeSpan GetWaitTimeUntilDue(DateTimeOffset? now = null)
+    {
+        lock (_gate)
+        {
+            if (_firstHint is not { } firstHint || _lastHint is not { } lastHint) return TimeSpan.Zero;
+            var current = now ?? DateTimeOffset.UtcNow;
+            var quietRemaining = QuietPeriod - (current - lastHint);
+            if (MaximumDelay is not { } maximumDelay) return quietRemaining > TimeSpan.Zero ? quietRemaining : TimeSpan.Zero;
+            var maximumRemaining = maximumDelay - (current - firstHint);
+            var remaining = quietRemaining < maximumRemaining ? quietRemaining : maximumRemaining;
+            return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+        }
+    }
+
+    private bool IsDue(DateTimeOffset now)
+    {
+        if (_firstHint is not { } firstHint || _lastHint is not { } lastHint) return false;
+        return now - lastHint >= QuietPeriod || MaximumDelay is { } maximumDelay && now - firstHint >= maximumDelay;
     }
 }
 
@@ -90,6 +121,7 @@ public sealed class WatchFolderMonitor(string rootPath, WatchFolderProcessor pro
         watcher.EnableRaisingEvents = true;
 
         await processor.ReconcileAsync(cancellationToken: cancellationToken);
+        var lastReconciledAt = Stopwatch.GetTimestamp();
         while (!cancellationToken.IsCancellationRequested)
         {
             var hadHint = false;
@@ -100,16 +132,28 @@ public sealed class WatchFolderMonitor(string rootPath, WatchFolderProcessor pro
             }
             catch (TimeoutException) { }
 
-            if (hadHint && debounceWindow > TimeSpan.Zero)
+            var remainingUntilReconciliation = reconciliationInterval - Stopwatch.GetElapsedTime(lastReconciledAt);
+            if (hadHint && debounceWindow > TimeSpan.Zero && remainingUntilReconciliation > TimeSpan.Zero)
             {
+                var debouncer = new WatchFolderDebouncer(debounceWindow, remainingUntilReconciliation);
+                debouncer.NotifyChange();
                 while (true)
                 {
-                    while (hints.Reader.TryRead(out _)) { }
-                    try { await hints.Reader.ReadAsync(cancellationToken).AsTask().WaitAsync(debounceWindow, cancellationToken); }
+                    if (hints.Reader.TryRead(out _)) debouncer.NotifyChange();
+                    var waitTime = debouncer.GetWaitTimeUntilDue();
+                    remainingUntilReconciliation = reconciliationInterval - Stopwatch.GetElapsedTime(lastReconciledAt);
+                    if (waitTime == TimeSpan.Zero || remainingUntilReconciliation <= TimeSpan.Zero) break;
+                    if (waitTime > remainingUntilReconciliation) waitTime = remainingUntilReconciliation;
+                    try
+                    {
+                        await hints.Reader.ReadAsync(cancellationToken).AsTask().WaitAsync(waitTime, cancellationToken);
+                        debouncer.NotifyChange();
+                    }
                     catch (TimeoutException) { break; }
                 }
             }
             await processor.ReconcileAsync(cancellationToken: cancellationToken);
+            lastReconciledAt = Stopwatch.GetTimestamp();
         }
     }
 }
