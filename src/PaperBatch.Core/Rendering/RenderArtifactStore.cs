@@ -10,6 +10,7 @@ public sealed class RenderArtifactStore
 {
     private const string OwnerMarkerName = ".paperbatch-render-artifacts-v1";
     private const string OwnerMarker = "PaperBatch.RenderArtifacts.v1\n";
+    private const string RootMutationLeaseName = ".paperbatch-render-artifacts.lock";
     private const string TemporaryLeaseName = ".active";
     private const string PublicationLeasePrefix = ".publish_";
     private static readonly TimeSpan TemporaryDirectoryMaxAge = TimeSpan.FromDays(1);
@@ -73,8 +74,11 @@ public sealed class RenderArtifactStore
             using (var persisted = new FileStream(temporaryContent, FileMode.Open, FileAccess.Read, FileShare.Read))
                 ValidatePdfStructure(persisted);
             var artifactId = "artifact_" + digest;
-            publicationLeasePath = PublicationLeasePath(artifactId, tempId[5..]);
-            publicationLease = CreateLeaseFile(publicationLeasePath);
+            using (await AcquireRootMutationLeaseAsync(cancellationToken).ConfigureAwait(false))
+            {
+                publicationLeasePath = PublicationLeasePath(artifactId, tempId[5..]);
+                publicationLease = CreateLeaseFile(publicationLeasePath);
+            }
             var artifact = new PdfArtifact(artifactId, digest, length);
             var receipt = new StoredPdfArtifact(artifact, engineId, engineVersion,
                 options.OrderBy(pair => pair.Key, StringComparer.Ordinal)
@@ -170,6 +174,9 @@ public sealed class RenderArtifactStore
     {
         ArgumentNullException.ThrowIfNull(retainedArtifactIds);
         var deleted = new List<string>();
+        using var mutationLease = TryAcquireRootMutationLease();
+        if (mutationLease is null) return deleted;
+
         foreach (var path in Directory.EnumerateDirectories(_root))
         {
             var artifactId = Path.GetFileName(path);
@@ -318,6 +325,8 @@ public sealed class RenderArtifactStore
         if (File.Exists(marker))
         {
             if (File.ReadAllText(marker) != OwnerMarker) throw new IOException("The artifact root is not owned by PaperBatch.");
+            EnsureRootMutationLeaseFile();
+            using var mutationLease = AcquireRootMutationLease();
             ReclaimOrphanedPublicationLeases();
             ReclaimOrphanedTemporaryDirectories();
             return;
@@ -327,8 +336,84 @@ public sealed class RenderArtifactStore
         using var writer = new StreamWriter(output);
         writer.Write(OwnerMarker);
         writer.Flush();
+        EnsureRootMutationLeaseFile();
+        using var rootMutationLease = AcquireRootMutationLease();
         ReclaimOrphanedPublicationLeases();
         ReclaimOrphanedTemporaryDirectories();
+    }
+
+    private string RootMutationLeasePath => Path.Combine(_root, RootMutationLeaseName);
+
+    private void EnsureRootMutationLeaseFile()
+    {
+        var path = RootMutationLeasePath;
+        if (!File.Exists(path))
+        {
+            try
+            {
+                using var output = CreatePrivateFile(path);
+                output.WriteByte(0);
+                output.Flush();
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                // Another store instance created the stable root lease concurrently.
+            }
+        }
+
+        if ((File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            throw new IOException("The artifact root mutation lease cannot be a directory or reparse point.");
+    }
+
+    private FileStream AcquireRootMutationLease()
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+            throw new PlatformNotSupportedException("The artifact root mutation lease is not supported on this platform.");
+
+        while (true)
+        {
+            var lease = TryAcquireRootMutationLease();
+            if (lease is not null) return lease;
+            Thread.Sleep(10);
+        }
+    }
+
+    private async Task<FileStream> AcquireRootMutationLeaseAsync(CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+            throw new PlatformNotSupportedException("The artifact root mutation lease is not supported on this platform.");
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var lease = TryAcquireRootMutationLease();
+            if (lease is not null) return lease;
+            await Task.Delay(10, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private FileStream? TryAcquireRootMutationLease()
+    {
+        var path = RootMutationLeasePath;
+        if (!File.Exists(path)) throw new IOException("The artifact root mutation lease is missing.");
+
+        FileStream? lease = null;
+        try
+        {
+            lease = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, TemporaryLeaseShare);
+            if (!TryLockTemporaryLease(lease))
+            {
+                lease.Dispose();
+                return null;
+            }
+            return lease;
+        }
+        catch (IOException exception) when ((exception.HResult & 0xffff) is 11 or 32 or 33 or 35)
+        {
+            // EAGAIN or a sharing violation means another process currently holds the root gate.
+            lease?.Dispose();
+            return null;
+        }
     }
 
     private void ReclaimOrphanedPublicationLeases()

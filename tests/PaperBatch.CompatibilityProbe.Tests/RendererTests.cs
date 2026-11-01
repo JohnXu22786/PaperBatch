@@ -945,8 +945,8 @@ internal static class RendererTests
             {
                 if (Directory.EnumerateFiles(root, publicationPrefix + "*", SearchOption.TopDirectoryOnly).Any())
                 {
+                    if (duplicateTask.IsCompleted) continue;
                     publicationLeaseObserved = true;
-                    Thread.Sleep(25);
                     deleted = store.DeleteUnreferencedArtifacts(new HashSet<string>());
                     break;
                 }
@@ -967,6 +967,76 @@ internal static class RendererTests
         }
         finally
         {
+            if (duplicateTask is not null)
+            {
+                try { duplicateTask.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult(); }
+                catch (Exception) { }
+            }
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ArtifactStoreSerializesPublicationRegistrationWithCleanup()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-registration-gate-{Guid.NewGuid():N}");
+        RenderArtifactStore? store = null;
+        Task<StoredPdfArtifact>? duplicateTask = null;
+        FileStream? mutationLease = null;
+        var mutationLocked = false;
+        try
+        {
+            store = new RenderArtifactStore(root);
+            var pdf = OnePagePdf();
+            var artifact = store.PersistPdfAsync(new MemoryStream(pdf), "test-engine", "1",
+                new Dictionary<string, string>()).GetAwaiter().GetResult();
+            var lockName = typeof(RenderArtifactStore).GetField("RootMutationLeaseName",
+                BindingFlags.NonPublic | BindingFlags.Static)?.GetRawConstantValue() as string;
+            Assert.True(!string.IsNullOrWhiteSpace(lockName), "The artifact root must have a stable mutation lease for publication registration and cleanup.");
+            mutationLease = new FileStream(Path.Combine(root, lockName!), FileMode.Open, FileAccess.ReadWrite,
+                OperatingSystem.IsWindows() ? FileShare.Delete : FileShare.ReadWrite | FileShare.Delete);
+            LockArtifactLease(mutationLease);
+            mutationLocked = true;
+
+            duplicateTask = store.PersistPdfAsync(new MemoryStream(pdf), "test-engine", "1",
+                new Dictionary<string, string>());
+            var deadline = Stopwatch.GetTimestamp() + 5 * Stopwatch.Frequency;
+            var temporaryContentReady = false;
+            while (Stopwatch.GetTimestamp() < deadline)
+            {
+                temporaryContentReady = Directory.EnumerateDirectories(root, ".tmp_*", SearchOption.TopDirectoryOnly)
+                    .Any(path => File.Exists(Path.Combine(path, "content.pdf")) &&
+                        new FileInfo(Path.Combine(path, "content.pdf")).Length == pdf.Length);
+                if (temporaryContentReady) break;
+                Thread.Sleep(1);
+            }
+            Thread.Sleep(50);
+
+            var publicationLeaseExists = Directory.EnumerateFiles(root,
+                ".publish_" + artifact.Artifact.ArtifactId + "_*", SearchOption.TopDirectoryOnly).Any();
+            var deletedWhileGateHeld = store.DeleteUnreferencedArtifacts(new HashSet<string>());
+
+            Assert.True(temporaryContentReady, "The duplicate render did not finish staging its input PDF.");
+            Assert.False(publicationLeaseExists, "A publisher must wait for the root mutation lease before registering an artifact publication sidecar.");
+            Assert.False(duplicateTask.IsCompleted, "Duplicate persistence should wait while cleanup holds the shared root mutation gate.");
+            Assert.Equal(0, deletedWhileGateHeld.Count);
+
+            UnlockArtifactLease(mutationLease);
+            mutationLocked = false;
+            var duplicate = duplicateTask.GetAwaiter().GetResult();
+            Assert.Equal(artifact.Artifact.ArtifactId, duplicate.Artifact.ArtifactId);
+            Assert.True(Directory.Exists(Path.Combine(root, artifact.Artifact.ArtifactId)));
+        }
+        finally
+        {
+            if (mutationLease is not null)
+            {
+                if (mutationLocked)
+                {
+                    try { UnlockArtifactLease(mutationLease); }
+                    catch (IOException) { }
+                }
+                mutationLease.Dispose();
+            }
             if (duplicateTask is not null)
             {
                 try { duplicateTask.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult(); }
