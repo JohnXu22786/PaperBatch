@@ -301,6 +301,8 @@ var tests = new List<(string Name, Action Run)>
     ("recipe parser rejects invalid versions and unknown fields", CoreTests.RecipeParserRejectsInvalidVersionsAndUnknownFields),
     ("recipe serialization matches its golden fixture", CoreTests.RecipeSerializationMatchesGoldenFixture),
     ("recipe setting rules use first match then per-file override", CoreTests.RecipeRulesUseFirstMatchThenPerFileOverrideAndRoundTrip),
+    ("recipe glob late mismatches stay within a strict work bound", CoreTests.RecipeGlobLateMismatchStaysBounded),
+    ("recipe glob preserves wildcard semantics", CoreTests.RecipeGlobPreservesWildcardSemantics),
     ("auto-starting transport launches and observes host exit", CoreTests.AutoStartingTransportLaunchesAndExitsCoordinatorProcess),
     ("coordinator host serves production capabilities and exits cleanly", CoreTests.CoordinatorHostServesProductionStatusAndUnavailableOperations),
     ("watch preparation cancellation is not reported as a file failure", CoreTests.WatchPreparationCancellationIsNotReportedAsFileFailure),
