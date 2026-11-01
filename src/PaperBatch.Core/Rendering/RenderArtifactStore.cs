@@ -177,7 +177,7 @@ public sealed class RenderArtifactStore
                 try
                 {
                     lease = new FileStream(Path.Combine(path, TemporaryLeaseName), FileMode.Open, FileAccess.ReadWrite,
-                        FileShare.ReadWrite | FileShare.Delete);
+                        TemporaryLeaseShare);
                     if (!TryLockTemporaryLease(lease))
                     {
                         lease.Dispose();
@@ -349,7 +349,7 @@ public sealed class RenderArtifactStore
                     try
                     {
                         lease = new FileStream(leasePath, FileMode.Open, FileAccess.ReadWrite,
-                            FileShare.ReadWrite | FileShare.Delete);
+                            TemporaryLeaseShare);
                         if (!TryLockTemporaryLease(lease))
                         {
                             lease.Dispose();
@@ -388,11 +388,12 @@ public sealed class RenderArtifactStore
     {
         var path = Path.Combine(directory, TemporaryLeaseName);
         var lease = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite,
-            FileShare.ReadWrite | FileShare.Delete);
+            TemporaryLeaseShare);
         try
         {
             lease.SetLength(1);
-            if (!TryLockTemporaryLease(lease)) throw new IOException("The render temporary directory lease could not be acquired.");
+            if (!OperatingSystem.IsWindows() && !TryLockTemporaryLease(lease))
+                throw new IOException("The render temporary directory lease could not be acquired.");
             return lease;
         }
         catch
@@ -427,6 +428,10 @@ public sealed class RenderArtifactStore
 
         return false;
     }
+
+    private static FileShare TemporaryLeaseShare => OperatingSystem.IsWindows()
+        ? FileShare.Delete
+        : FileShare.ReadWrite | FileShare.Delete;
 
     [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
     private static extern int Flock(int fileDescriptor, int operation);
