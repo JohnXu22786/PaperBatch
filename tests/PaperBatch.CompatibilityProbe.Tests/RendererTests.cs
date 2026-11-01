@@ -13,6 +13,127 @@ using System.Security.Cryptography;
 
 internal static class RendererTests
 {
+    public static void LibreOfficeOwnedProcessDrainsDualStreamPressure()
+    {
+        var startInfo = CreateOwnedProcessTestStartInfo("--renderer-dual-stream-child");
+        var result = LibreOfficeRendererAdapter.RunOwnedProcessAsync(startInfo, TimeSpan.FromSeconds(5),
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Assert.Equal(LibreOfficeRendererAdapter.ConversionProcessStatus.Exited, result.Status);
+        Assert.Equal(0, result.ExitCode);
+        Assert.True(result.Output.Length <= 2 * 4096 + 1,
+            $"The diagnostic output exceeded its fixed character bound ({result.Output.Length} characters).");
+    }
+
+    public static void LibreOfficeOwnedProcessDeadlineIncludesDescendantHeldPipes()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-held-pipes-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var marker = Path.Combine(root, "holder.pid");
+        var run = LibreOfficeRendererAdapter.RunOwnedProcessAsync(
+            CreatePipeHolderParentStartInfo(marker), TimeSpan.FromMilliseconds(300), CancellationToken.None,
+            Path.Combine(root, "output.pdf"), 1024);
+        int holderPid = 0;
+        try
+        {
+            holderPid = WaitForChildPid(marker, TimeSpan.FromSeconds(3));
+            var result = run.WaitAsync(TimeSpan.FromSeconds(3)).GetAwaiter().GetResult();
+            Assert.Equal(LibreOfficeRendererAdapter.ConversionProcessStatus.TimedOut, result.Status);
+            Assert.True(result.Output.Contains("termination of all descendants could not be confirmed", StringComparison.Ordinal),
+                "Timeout results must not claim that the full descendant tree was stopped.");
+        }
+        finally
+        {
+            StopTestChild(holderPid);
+            if (File.Exists(marker))
+            {
+                try { run.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult(); }
+                catch (TimeoutException) { }
+            }
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void LibreOfficeOwnedProcessCancellationIncludesDescendantHeldPipes()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-held-pipes-cancel-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var marker = Path.Combine(root, "holder.pid");
+        using var cancellation = new CancellationTokenSource();
+        var run = LibreOfficeRendererAdapter.RunOwnedProcessAsync(
+            CreatePipeHolderParentStartInfo(marker), TimeSpan.FromSeconds(5), cancellation.Token,
+            Path.Combine(root, "output.pdf"), 1024);
+        int holderPid = 0;
+        try
+        {
+            holderPid = WaitForChildPid(marker, TimeSpan.FromSeconds(3));
+            cancellation.Cancel();
+            var result = run.WaitAsync(TimeSpan.FromSeconds(3)).GetAwaiter().GetResult();
+            Assert.Equal(LibreOfficeRendererAdapter.ConversionProcessStatus.Cancelled, result.Status);
+            Assert.True(result.Output.Contains("termination of all descendants could not be confirmed", StringComparison.Ordinal),
+                "Cancellation results must not claim that the full descendant tree was stopped.");
+        }
+        finally
+        {
+            StopTestChild(holderPid);
+            if (File.Exists(marker))
+            {
+                try { run.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult(); }
+                catch (TimeoutException) { }
+            }
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static ProcessStartInfo CreateOwnedProcessTestStartInfo(params string[] arguments)
+    {
+        var dotnet = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
+        if (string.IsNullOrWhiteSpace(dotnet)) dotnet = OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
+        var startInfo = new ProcessStartInfo(dotnet)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add(typeof(RendererTests).Assembly.Location);
+        foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
+        return startInfo;
+    }
+
+    private static ProcessStartInfo CreatePipeHolderParentStartInfo(string marker)
+    {
+        var startInfo = CreateOwnedProcessTestStartInfo("--renderer-pipe-holder-parent", marker);
+        return startInfo;
+    }
+
+    private static int WaitForChildPid(string marker, TimeSpan timeout)
+    {
+        var deadline = Stopwatch.GetTimestamp() + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
+        while (Stopwatch.GetTimestamp() < deadline)
+        {
+            if (File.Exists(marker))
+            {
+                try { return int.Parse(File.ReadAllText(marker), System.Globalization.CultureInfo.InvariantCulture); }
+                catch (FormatException) { }
+            }
+            Thread.Sleep(10);
+        }
+        throw new TimeoutException("The inherited-pipe child did not start.");
+    }
+
+    private static void StopTestChild(int processId)
+    {
+        if (processId == 0) return;
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            process.WaitForExit(2000);
+        }
+        catch (ArgumentException) { }
+        catch (InvalidOperationException) { }
+        catch (System.ComponentModel.Win32Exception) { }
+    }
+
     public static void LibreOfficeUsesThePackagedCommandLineLauncher()
     {
         var root = Path.Combine(Path.GetTempPath(), $"paperbatch-lo-launcher-{Guid.NewGuid():N}");

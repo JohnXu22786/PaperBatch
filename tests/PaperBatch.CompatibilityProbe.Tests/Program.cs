@@ -20,6 +20,35 @@ if (args.Length == 2 && args[0] == "--renderer-output-limit-child")
     }
 }
 
+if (args.Length == 1 && args[0] == "--renderer-dual-stream-child")
+{
+    var buffer = new string('x', 1024);
+    for (var i = 0; i < 512; i++)
+    {
+        Console.Out.Write(buffer);
+        Console.Error.Write(buffer);
+    }
+    return 0;
+}
+
+if (args.Length == 2 && args[0] == "--renderer-pipe-holder-parent")
+{
+    var startInfo = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ??
+        (OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet"));
+    startInfo.ArgumentList.Add(typeof(RendererTests).Assembly.Location);
+    startInfo.ArgumentList.Add("--renderer-pipe-holder-child");
+    startInfo.ArgumentList.Add(args[1]);
+    using var holder = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start pipe holder child.");
+    return 0;
+}
+
+if (args.Length == 2 && args[0] == "--renderer-pipe-holder-child")
+{
+    File.WriteAllText(args[1], Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    Thread.Sleep(TimeSpan.FromSeconds(15));
+    return 0;
+}
+
 if (args.Length == 4 && args[0] == "--libreoffice-conversion-lock-child")
     return RendererTests.RunLibreOfficeConversionLockChild(args[1], args[2], args[3]);
 
@@ -74,6 +103,9 @@ var tests = new List<(string Name, Action Run)>
     ("artifact store rejects changed PDF bytes on readback", RendererTests.ArtifactStoreRejectsChangedPdfOnReadback),
     ("artifact store rejects malformed receipts as invalid data", RendererTests.ArtifactStoreRejectsMalformedReceiptAsInvalidData),
     ("LibreOffice process stops when output size limit is exceeded", RendererTests.LibreOfficeProcessStopsWhenOutputLimitExceeded),
+    ("LibreOffice owned process drains dual-stream pressure with bounded diagnostics", RendererTests.LibreOfficeOwnedProcessDrainsDualStreamPressure),
+    ("LibreOffice owned process deadline includes descendant-held output pipes", RendererTests.LibreOfficeOwnedProcessDeadlineIncludesDescendantHeldPipes),
+    ("LibreOffice owned process cancellation includes descendant-held output pipes", RendererTests.LibreOfficeOwnedProcessCancellationIncludesDescendantHeldPipes),
     ("LibreOffice launches through its packaged command-line entry point", RendererTests.LibreOfficeUsesThePackagedCommandLineLauncher),
     ("LibreOffice prlimit wrapper preserves the sanitized environment", RendererTests.LibreOfficeFileSizeLimitWrapperPreservesSanitizedEnvironment),
     ("LibreOffice in-process conversion slot acquisition is bounded", RendererTests.LibreOfficeInProcessSlotWaitIsBounded),
@@ -382,6 +414,10 @@ if (OperatingSystem.IsLinux())
 if (args.Length == 1 && args[0] == "--office-probe-output-only")
     tests = tests.Where(test => test.Name.StartsWith("OfficeProbe ", StringComparison.Ordinal)).ToList();
 Console.WriteLine("SKIP native LibreOffice integration (not part of the pre-U10 print-path evidence lane)");
+
+var testFilter = Environment.GetEnvironmentVariable("PAPERBATCH_TEST_FILTER");
+if (!string.IsNullOrWhiteSpace(testFilter))
+    tests = tests.Where(test => test.Name.Contains(testFilter, StringComparison.OrdinalIgnoreCase)).ToList();
 
 var failures = 0;
 foreach (var (name, run) in tests)

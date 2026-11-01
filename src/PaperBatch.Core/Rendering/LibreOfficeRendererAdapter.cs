@@ -28,6 +28,7 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
     // enforced RLIMIT_FSIZE. Windows has no per-process file-size quota in this launch path.
     private const long OutputLimitKillThresholdBytes = MaximumOutputBytes;
     private const int MaximumDiagnosticCharacters = 4096;
+    private static readonly TimeSpan ProcessStopTimeout = TimeSpan.FromSeconds(2);
     private const string LinuxPrlimitExecutablePath = "/usr/bin/prlimit";
     private const string ConversionLockDirectoryName = "LibreOfficeConversionLocks";
     private const string ConversionLockFileName = "conversion.lock";
@@ -176,11 +177,13 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
             var result = await RunOwnedProcessAsync(startInfo, ProcessTimeout, cancellationToken,
                 pdfPath, OutputLimitKillThresholdBytes).ConfigureAwait(false);
             if (result.Status == ConversionProcessStatus.TimedOut)
-                return new RenderResult(RenderStatus.TimedOut, null, "LibreOffice exceeded its rendering time limit and was stopped.");
+                return new RenderResult(RenderStatus.TimedOut, null,
+                    $"LibreOffice exceeded its rendering time limit. {result.Output}");
             if (result.Status == ConversionProcessStatus.Cancelled)
-                return new RenderResult(RenderStatus.Cancelled, null, "LibreOffice rendering was cancelled and stopped.");
+                return new RenderResult(RenderStatus.Cancelled, null,
+                    $"LibreOffice rendering was cancelled. {result.Output}");
             if (result.Status == ConversionProcessStatus.OutputLimitExceeded)
-                return RenderResult.Failed("LibreOffice output crossed the monitored stop threshold and was terminated.");
+                return RenderResult.Failed($"LibreOffice output crossed the monitored stop threshold. {result.Output}");
             if (result.Status != ConversionProcessStatus.Exited || result.ExitCode != 0)
             {
                 if (Environment.GetEnvironmentVariable("PAPERBATCH_LO_DIAGNOSTICS") == "1")
@@ -619,60 +622,89 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
 
         var stdout = ReadBoundedAsync(process.StandardOutput, MaximumDiagnosticCharacters);
         var stderr = ReadBoundedAsync(process.StandardError, MaximumDiagnosticCharacters);
+        var timeoutTask = Task.Delay(timeout);
+        var cancellationTask = cancellationToken.CanBeCanceled
+            ? Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+            : Task.Delay(Timeout.InfiniteTimeSpan);
+        using var monitorCancellation = new CancellationTokenSource();
+        Task<bool>? outputLimit = null;
         try
         {
-            var waitForExit = process.WaitForExitAsync(cancellationToken);
+            var waitForExit = process.WaitForExitAsync();
             if (boundedOutputPath is not null && maximumOutputBytes is not null)
             {
-                using var monitorCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                var outputLimit = MonitorOutputSizeAsync(process, boundedOutputPath, maximumOutputBytes.Value,
+                outputLimit = MonitorOutputSizeAsync(process, boundedOutputPath, maximumOutputBytes.Value,
                     monitorCancellation.Token);
-                var timeoutTask = Task.Delay(timeout, cancellationToken);
-                var completed = await Task.WhenAny(waitForExit, outputLimit, timeoutTask).ConfigureAwait(false);
+                var completed = await Task.WhenAny(waitForExit, outputLimit, timeoutTask, cancellationTask).ConfigureAwait(false);
+                if (cancellationToken.IsCancellationRequested) throw new OperationCanceledException(cancellationToken);
+                if (timeoutTask.IsCompleted) throw new TimeoutException();
                 if (completed == outputLimit && await outputLimit.ConfigureAwait(false))
                 {
-                    await StopOwnedProcessAsync(process).ConfigureAwait(false);
+                    var rootStopped = await StopOwnedProcessAsync(process).ConfigureAwait(false);
                     monitorCancellation.Cancel();
-                    await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
-                    return (ConversionProcessStatus.OutputLimitExceeded, null, string.Empty);
-                }
-                if (completed == timeoutTask)
-                {
-                    await timeoutTask.ConfigureAwait(false);
-                    throw new TimeoutException();
+                    try { await outputLimit.ConfigureAwait(false); }
+                    catch (OperationCanceledException) { }
+                    await CloseOutputReadersAsync(process, stdout, stderr).ConfigureAwait(false);
+                    return (ConversionProcessStatus.OutputLimitExceeded, null,
+                        rootStopped ? "The process exited; termination of all descendants could not be confirmed." :
+                            "Termination of the process and all descendants could not be confirmed.");
                 }
                 await waitForExit.ConfigureAwait(false);
                 monitorCancellation.Cancel();
+                try { await outputLimit.ConfigureAwait(false); }
+                catch (OperationCanceledException) { }
                 if (IsOutputSizeOverLimit(boundedOutputPath, maximumOutputBytes.Value))
                 {
-                    await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
-                    return (ConversionProcessStatus.OutputLimitExceeded, null, string.Empty);
+                    await CloseOutputReadersAsync(process, stdout, stderr).ConfigureAwait(false);
+                    return (ConversionProcessStatus.OutputLimitExceeded, null,
+                        "The process exited; termination of all descendants could not be confirmed.");
                 }
             }
             else
             {
-                await waitForExit.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
+                var completed = await Task.WhenAny(waitForExit, timeoutTask, cancellationTask).ConfigureAwait(false);
+                if (cancellationToken.IsCancellationRequested) throw new OperationCanceledException(cancellationToken);
+                if (timeoutTask.IsCompleted) throw new TimeoutException();
+                await waitForExit.ConfigureAwait(false);
             }
-            await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
+
+            var drains = Task.WhenAll(stdout, stderr);
+            var drainsCompleted = await Task.WhenAny(drains, timeoutTask, cancellationTask).ConfigureAwait(false);
+            if (cancellationToken.IsCancellationRequested) throw new OperationCanceledException(cancellationToken);
+            if (timeoutTask.IsCompleted || drainsCompleted != drains) throw new TimeoutException();
+            await drains.ConfigureAwait(false);
             return (ConversionProcessStatus.Exited, process.ExitCode, stdout.Result + "\n" + stderr.Result);
         }
         catch (TimeoutException)
         {
-            await StopOwnedProcessAsync(process).ConfigureAwait(false);
-            await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
-            return (ConversionProcessStatus.TimedOut, null, string.Empty);
+            monitorCancellation.Cancel();
+            var rootStopped = await StopAndCloseOutputAsync(process, stdout, stderr).ConfigureAwait(false);
+            return (ConversionProcessStatus.TimedOut, null, rootStopped
+                ? "The owned process exited; termination of all descendants could not be confirmed."
+                : "Termination of the owned process and its descendants could not be confirmed.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            await StopOwnedProcessAsync(process).ConfigureAwait(false);
-            await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
-            return (ConversionProcessStatus.Cancelled, null, string.Empty);
+            monitorCancellation.Cancel();
+            var rootStopped = await StopAndCloseOutputAsync(process, stdout, stderr).ConfigureAwait(false);
+            return (ConversionProcessStatus.Cancelled, null, rootStopped
+                ? "The owned process exited; termination of all descendants could not be confirmed."
+                : "Termination of the owned process and its descendants could not be confirmed.");
         }
         catch
         {
-            await StopOwnedProcessAsync(process).ConfigureAwait(false);
-            await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
+            monitorCancellation.Cancel();
+            await StopAndCloseOutputAsync(process, stdout, stderr).ConfigureAwait(false);
             throw;
+        }
+        finally
+        {
+            monitorCancellation.Cancel();
+            if (outputLimit is not null)
+            {
+                try { await outputLimit.ConfigureAwait(false); }
+                catch { }
+            }
         }
     }
 
@@ -708,17 +740,43 @@ public sealed class LibreOfficeRendererAdapter : IRendererAdapter
         return output.ToString();
     }
 
-    private static async Task StopOwnedProcessAsync(Process process)
+    private static async Task<bool> StopOwnedProcessAsync(Process process)
     {
         try
         {
             if (!process.HasExited) process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync().ConfigureAwait(false);
+            await process.WaitForExitAsync().WaitAsync(ProcessStopTimeout).ConfigureAwait(false);
+            return process.HasExited;
         }
-        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException or TimeoutException)
         {
-            if (!process.HasExited) throw new IOException("The owned LibreOffice process could not be stopped safely.", exception);
+            return process.HasExited;
         }
+    }
+
+    private static async Task CloseOutputReadersAsync(Process process, Task stdout, Task stderr)
+    {
+        try { process.StandardOutput.Dispose(); }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException) { }
+        try { process.StandardError.Dispose(); }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException) { }
+
+        var drains = Task.WhenAll(stdout, stderr);
+        try { await drains.WaitAsync(TimeSpan.FromMilliseconds(100)).ConfigureAwait(false); }
+        catch (TimeoutException)
+        {
+            _ = drains.ContinueWith(static task => _ = task.Exception,
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+        catch { _ = drains.Exception; }
+    }
+
+    private static async Task<bool> StopAndCloseOutputAsync(Process process, Task stdout, Task stderr)
+    {
+        var rootStopped = await StopOwnedProcessAsync(process).ConfigureAwait(false);
+        await CloseOutputReadersAsync(process, stdout, stderr).ConfigureAwait(false);
+        return rootStopped;
     }
 
     private static string ExtensionFor(SourceFormat format) => format switch
