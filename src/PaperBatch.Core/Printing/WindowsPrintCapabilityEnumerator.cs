@@ -11,6 +11,7 @@ public static class WindowsPrintCapabilityEnumerator
 {
     private const uint PrinterEnumLocal = 0x00000002;
     private const int ErrorInsufficientBuffer = 122;
+    internal const uint MaximumEnumerationBufferSize = 16 * 1024 * 1024;
     private const int MaximumEnumeratedValues = 4096;
     private const ushort DcPapers = 2;
     private const ushort DcBins = 6;
@@ -24,16 +25,24 @@ public static class WindowsPrintCapabilityEnumerator
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Local print capability enumeration requires Windows.");
 
-        var sizingSucceeded = EnumPrinters(PrinterEnumLocal, null, 2, IntPtr.Zero, 0, out var needed, out _);
+        return EnumerateLocalQueues(EnumPrinters);
+    }
+
+    internal static ImmutableArray<PrinterCapabilitySnapshot> EnumerateLocalQueues(EnumPrintersCall enumerate)
+    {
+        var sizingSucceeded = enumerate(PrinterEnumLocal, null, 2, IntPtr.Zero, 0, out var needed, out var sizingReturned);
         var sizingError = Marshal.GetLastWin32Error();
+        if (needed == 0 && sizingReturned > 0)
+            throw new InvalidDataException("Local print queue enumeration returned entries without a sizing buffer.");
         needed = GetInitialEnumerationBufferSize(sizingSucceeded, sizingError, needed);
         if (needed == 0) return [];
         var buffer = Marshal.AllocHGlobal(checked((int)needed));
         try
         {
-            if (!EnumPrinters(PrinterEnumLocal, null, 2, buffer, needed, out _, out var returned))
+            if (!enumerate(PrinterEnumLocal, null, 2, buffer, needed, out var returnedNeeded, out var returned))
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Local print queue enumeration failed.");
             var size = Marshal.SizeOf<PrinterInfo2>();
+            ValidateReturnedEnumerationSize(returnedNeeded, returned, needed, size);
             var result = ImmutableArray.CreateBuilder<PrinterCapabilitySnapshot>(checked((int)returned));
             for (var index = 0; index < returned; index++)
             {
@@ -62,10 +71,20 @@ public static class WindowsPrintCapabilityEnumerator
 
     internal static uint GetInitialEnumerationBufferSize(bool succeeded, int errorCode, uint needed)
     {
+        if (needed > MaximumEnumerationBufferSize)
+            throw new InvalidDataException("Local print queue enumeration reported a buffer larger than the safe limit.");
         if (succeeded) return needed;
         if (errorCode == ErrorInsufficientBuffer && needed > 0) return needed;
         throw new Win32Exception(errorCode, "Local print queue enumeration failed.");
     }
+
+    private static void ValidateReturnedEnumerationSize(uint returnedNeeded, uint returned, uint bufferSize, int entrySize)
+    {
+        if (returnedNeeded > bufferSize || returned > bufferSize / (uint)entrySize)
+            throw new InvalidDataException("Local print queue enumeration returned counts or sizing data outside its allocated buffer.");
+    }
+
+    internal delegate bool EnumPrintersCall(uint flags, string? name, uint level, IntPtr buffer, uint bufferSize, out uint needed, out uint returned);
 
     private static PrinterCapabilitySnapshot Query(string name, string driver, string port)
     {

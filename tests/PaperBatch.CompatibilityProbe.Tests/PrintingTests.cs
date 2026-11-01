@@ -6,7 +6,9 @@ using PaperBatch.Core.Persistence;
 using PaperBatch.Core.Preparation;
 using PaperBatch.Core.Printing;
 using PaperBatch.Core.Rendering;
+using PaperBatch.CompatibilityProbe;
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 
 internal static class PrintingTests
@@ -52,6 +54,96 @@ internal static class PrintingTests
         Assert.Equal(128u, WindowsPrintCapabilityEnumerator.GetInitialEnumerationBufferSize(false, 122, 128));
         Assert.Throws<Win32Exception>(() =>
             WindowsPrintCapabilityEnumerator.GetInitialEnumerationBufferSize(false, 122, 0));
+    }
+
+    internal static void CoreEnumerationRejectsOversizedBufferBeforeAllocation()
+    {
+        var calls = 0;
+        WindowsPrintCapabilityEnumerator.EnumPrintersCall enumerate =
+            (uint flags, string? name, uint level, IntPtr buffer, uint bufferSize, out uint needed, out uint returned) =>
+            {
+                calls++;
+                needed = WindowsPrintCapabilityEnumerator.MaximumEnumerationBufferSize + 1;
+                returned = 0;
+                Marshal.SetLastPInvokeError(122);
+                return false;
+            };
+
+        Assert.Throws<InvalidDataException>(() => WindowsPrintCapabilityEnumerator.EnumerateLocalQueues(enumerate));
+        Assert.Equal(1, calls);
+    }
+
+    internal static void CoreEnumerationRejectsInconsistentResultsBeforeUnmarshalling()
+    {
+        foreach (var inconsistentCount in new[] { true, false })
+        {
+            var calls = 0;
+            WindowsPrintCapabilityEnumerator.EnumPrintersCall enumerate =
+                (uint flags, string? name, uint level, IntPtr buffer, uint bufferSize, out uint needed, out uint returned) =>
+                {
+                    calls++;
+                    if (buffer == IntPtr.Zero)
+                    {
+                        needed = 4096;
+                        returned = 0;
+                        Marshal.SetLastPInvokeError(122);
+                        return false;
+                    }
+
+                    needed = inconsistentCount ? 4096 : bufferSize + 1;
+                    returned = inconsistentCount ? uint.MaxValue : 0;
+                    Marshal.SetLastPInvokeError(0);
+                    return true;
+                };
+
+            Assert.Throws<InvalidDataException>(() => WindowsPrintCapabilityEnumerator.EnumerateLocalQueues(enumerate));
+            Assert.Equal(2, calls);
+        }
+    }
+
+    internal static void ProbeEnumerationRejectsOversizedBufferBeforeAllocation()
+    {
+        var calls = 0;
+        WindowsPrintProbe.EnumPrintersCall enumerate =
+            (uint flags, string? name, uint level, IntPtr buffer, uint bufferSize, out uint needed, out uint returned) =>
+            {
+                calls++;
+                needed = WindowsPrintProbe.MaximumEnumerationBufferSize + 1;
+                returned = 0;
+                Marshal.SetLastPInvokeError(122);
+                return false;
+            };
+
+        Assert.Throws<InvalidDataException>(() => WindowsPrintProbe.EnumerateLocalQueues(enumerate));
+        Assert.Equal(1, calls);
+    }
+
+    internal static void ProbeEnumerationRejectsInconsistentResultsBeforeUnmarshalling()
+    {
+        foreach (var inconsistentCount in new[] { true, false })
+        {
+            var calls = 0;
+            WindowsPrintProbe.EnumPrintersCall enumerate =
+                (uint flags, string? name, uint level, IntPtr buffer, uint bufferSize, out uint needed, out uint returned) =>
+                {
+                    calls++;
+                    if (buffer == IntPtr.Zero)
+                    {
+                        needed = 4096;
+                        returned = 0;
+                        Marshal.SetLastPInvokeError(122);
+                        return false;
+                    }
+
+                    needed = inconsistentCount ? 4096 : bufferSize + 1;
+                    returned = inconsistentCount ? uint.MaxValue : 0;
+                    Marshal.SetLastPInvokeError(0);
+                    return true;
+                };
+
+            Assert.Throws<InvalidDataException>(() => WindowsPrintProbe.EnumerateLocalQueues(enumerate));
+            Assert.Equal(2, calls);
+        }
     }
 
     internal static void NativeGdiCapabilityBoundaryIsReadOnly()

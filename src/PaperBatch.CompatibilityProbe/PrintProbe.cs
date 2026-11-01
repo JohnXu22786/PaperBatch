@@ -39,6 +39,7 @@ internal static class WindowsPrintProbe
 {
     private const uint PrinterEnumLocal = 0x00000002;
     private const int ErrorInsufficientBuffer = 122;
+    internal const uint MaximumEnumerationBufferSize = 16 * 1024 * 1024;
 
     public static PrintProbeResult Collect(bool includeLocalQueues)
     {
@@ -79,7 +80,7 @@ internal static class WindowsPrintProbe
             {
                 try
                 {
-                    var enumerate = Marshal.GetDelegateForFunctionPointer<EnumPrintersDelegate>(NativeLibrary.GetExport(library, "EnumPrintersW"));
+                    var enumerate = Marshal.GetDelegateForFunctionPointer<EnumPrintersCall>(NativeLibrary.GetExport(library, "EnumPrintersW"));
                     var localQueues = EnumerateLocalQueues(enumerate);
                     queues = localQueues.Count == 0
                         ? ProbeEvidence.Unavailable(EvidenceSource.Native, "EnumPrintersW(PRINTER_ENUM_LOCAL)", "Windows returned no local print queues.")
@@ -96,6 +97,11 @@ internal static class WindowsPrintProbe
                 catch (Win32Exception exception)
                 {
                     queues = ProbeEvidence.Blocked(EvidenceSource.Native, "local queue enumeration", $"Winspool returned error {exception.NativeErrorCode}.");
+                    drivers = queues;
+                }
+                catch (InvalidDataException exception)
+                {
+                    queues = ProbeEvidence.Blocked(EvidenceSource.Native, "local queue enumeration", exception.Message);
                     drivers = queues;
                 }
             }
@@ -167,10 +173,15 @@ internal static class WindowsPrintProbe
         }
     }
 
-    private static List<PrintQueueMeasurement> EnumerateLocalQueues(EnumPrintersDelegate enumerate)
+    internal static List<PrintQueueMeasurement> EnumerateLocalQueues(EnumPrintersCall enumerate)
     {
         _ = enumerate(PrinterEnumLocal, null, 2, IntPtr.Zero, 0, out var bytesNeeded, out var returned);
         var firstError = Marshal.GetLastWin32Error();
+        if (bytesNeeded == 0 && returned > 0)
+        {
+            throw new InvalidDataException("Local print queue enumeration returned entries without a sizing buffer.");
+        }
+
         if (bytesNeeded == 0 && returned == 0)
         {
             if (firstError is 0 or ErrorInsufficientBuffer)
@@ -181,6 +192,11 @@ internal static class WindowsPrintProbe
             throw new Win32Exception(firstError);
         }
 
+        if (bytesNeeded > MaximumEnumerationBufferSize)
+        {
+            throw new InvalidDataException("Local print queue enumeration reported a buffer larger than the safe limit.");
+        }
+
         if (firstError != ErrorInsufficientBuffer && bytesNeeded == 0)
         {
             throw new Win32Exception(firstError);
@@ -189,13 +205,18 @@ internal static class WindowsPrintProbe
         var buffer = Marshal.AllocHGlobal(checked((int)bytesNeeded));
         try
         {
-            if (!enumerate(PrinterEnumLocal, null, 2, buffer, bytesNeeded, out _, out returned))
+            if (!enumerate(PrinterEnumLocal, null, 2, buffer, bytesNeeded, out var returnedNeeded, out returned))
             {
                 throw new Win32Exception(Marshal.GetLastWin32Error());
             }
 
-            var results = new List<PrintQueueMeasurement>(checked((int)returned));
             var entrySize = Marshal.SizeOf<PrinterInfo2>();
+            if (returnedNeeded > bytesNeeded || returned > bytesNeeded / (uint)entrySize)
+            {
+                throw new InvalidDataException("Local print queue enumeration returned counts or sizing data outside its allocated buffer.");
+            }
+
+            var results = new List<PrintQueueMeasurement>(checked((int)returned));
             for (var index = 0; index < returned; index++)
             {
                 var address = IntPtr.Add(buffer, checked((int)index * entrySize));
@@ -286,7 +307,7 @@ internal static class WindowsPrintProbe
     };
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi, CharSet = CharSet.Unicode, SetLastError = true)]
-    private delegate bool EnumPrintersDelegate(uint flags, string? name, uint level, IntPtr buffer, uint bufferSize, out uint bytesNeeded, out uint returned);
+    internal delegate bool EnumPrintersCall(uint flags, string? name, uint level, IntPtr buffer, uint bufferSize, out uint bytesNeeded, out uint returned);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct PrinterInfo2
