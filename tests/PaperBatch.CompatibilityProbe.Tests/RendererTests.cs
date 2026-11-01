@@ -774,6 +774,10 @@ internal static class RendererTests
             Directory.CreateDirectory(malformed);
             File.WriteAllText(Path.Combine(malformed, "content.pdf"), "preserve");
             Directory.SetLastWriteTimeUtc(malformed, DateTime.UtcNow.AddDays(-2));
+            var uppercase = Path.Combine(root, ".tmp_" + Guid.NewGuid().ToString("N").ToUpperInvariant());
+            Directory.CreateDirectory(uppercase);
+            File.WriteAllBytes(Path.Combine(uppercase, "content.pdf"), [1]);
+            Directory.SetLastWriteTimeUtc(uppercase, DateTime.UtcNow.AddDays(-2));
             string? linked = null;
             var symlinkTarget = Path.Combine(root, "outside.pdf");
             if (!OperatingSystem.IsWindows())
@@ -790,6 +794,7 @@ internal static class RendererTests
             Assert.True(Directory.Exists(recent));
             Assert.Equal("preserve", File.ReadAllText(Path.Combine(unknown, "foreign.txt")));
             Assert.True(Directory.Exists(malformed));
+            Assert.True(Directory.Exists(uppercase), "Cleanup must leave GUID names outside the canonical lowercase format untouched.");
             if (linked is not null)
             {
                 Assert.True(Directory.Exists(linked), "Cleanup must leave a temporary directory containing a symbolic link untouched.");

@@ -328,7 +328,8 @@ public sealed class RenderArtifactStore
         {
             var name = Path.GetFileName(directory);
             if (name.Length != 37 || !name.StartsWith(".tmp_", StringComparison.Ordinal) ||
-                !Guid.TryParseExact(name[5..], "N", out _))
+                !Guid.TryParseExact(name[5..], "N", out var id) ||
+                !string.Equals(name[5..], id.ToString("N"), StringComparison.Ordinal))
                 continue;
 
             try
