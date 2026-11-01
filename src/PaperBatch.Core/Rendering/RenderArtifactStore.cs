@@ -168,10 +168,35 @@ public sealed class RenderArtifactStore
             if ((attributes & FileAttributes.ReparsePoint) != 0)
                 throw new IOException("An artifact directory cannot be a reparse point.");
             var entries = Directory.GetFileSystemEntries(path);
-            if (entries.Any(entry => Path.GetFileName(entry) is not ("content.pdf" or "receipt.json")))
+            if (entries.Any(entry => Path.GetFileName(entry) is not ("content.pdf" or "receipt.json" or TemporaryLeaseName)))
                 throw new IOException("An artifact directory contains unexpected entries.");
             foreach (var entry in entries) EnsureNoReparsePoints(entry);
-            Directory.Delete(path, recursive: true);
+            FileStream? lease = null;
+            if (entries.Any(entry => Path.GetFileName(entry) == TemporaryLeaseName))
+            {
+                try
+                {
+                    lease = new FileStream(Path.Combine(path, TemporaryLeaseName), FileMode.Open, FileAccess.ReadWrite,
+                        FileShare.ReadWrite | FileShare.Delete);
+                    if (!TryLockTemporaryLease(lease))
+                    {
+                        lease.Dispose();
+                        continue;
+                    }
+                }
+                catch (IOException)
+                {
+                    lease?.Dispose();
+                    continue;
+                }
+                catch (PlatformNotSupportedException)
+                {
+                    lease?.Dispose();
+                    continue;
+                }
+            }
+
+            using (lease) Directory.Delete(path, recursive: true);
             deleted.Add(artifactId);
         }
         return deleted;

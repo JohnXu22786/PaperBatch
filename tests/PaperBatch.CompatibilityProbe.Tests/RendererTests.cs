@@ -9,6 +9,7 @@ using System.Security.Principal;
 using System.Runtime.Versioning;
 using System.Text;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 
 internal static class RendererTests
@@ -850,6 +851,68 @@ internal static class RendererTests
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
+
+    public static void ArtifactStoreDeletionHandlesPublicationLeaseAfterCrash()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-publication-lease-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new RenderArtifactStore(root);
+            var artifact = store.PersistPdfAsync(new MemoryStream(OnePagePdf()), "test-engine", "1",
+                new Dictionary<string, string>()).GetAwaiter().GetResult();
+            var artifactDirectory = Path.Combine(root, artifact.Artifact.ArtifactId);
+            var leasePath = Path.Combine(artifactDirectory, ".active");
+            using var lease = new FileStream(leasePath, FileMode.CreateNew, FileAccess.ReadWrite,
+                FileShare.ReadWrite | FileShare.Delete);
+            lease.SetLength(1);
+            LockArtifactLease(lease);
+
+            Assert.Equal(0, store.DeleteUnreferencedArtifacts(new HashSet<string>()).Count);
+            Assert.True(Directory.Exists(artifactDirectory), "Cleanup must preserve a published artifact whose writer still holds its lease.");
+
+            UnlockArtifactLease(lease);
+            Assert.Equal(artifact.Artifact.ArtifactId,
+                store.DeleteUnreferencedArtifacts(new HashSet<string>()).Single());
+            Assert.False(Directory.Exists(artifactDirectory), "Cleanup should remove an abandoned publication lease with its unreferenced artifact.");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void LockArtifactLease(FileStream lease)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            lease.Lock(0, 1);
+            return;
+        }
+
+        if ((OperatingSystem.IsLinux() || OperatingSystem.IsMacOS()) &&
+            Flock(lease.SafeFileHandle.DangerousGetHandle().ToInt32(), 2 | 4) == 0)
+            return;
+
+        throw new IOException("The test publication lease could not be locked.");
+    }
+
+    private static void UnlockArtifactLease(FileStream lease)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            lease.Unlock(0, 1);
+            return;
+        }
+
+        if ((OperatingSystem.IsLinux() || OperatingSystem.IsMacOS()) &&
+            Flock(lease.SafeFileHandle.DangerousGetHandle().ToInt32(), 8) == 0)
+            return;
+
+        throw new IOException("The test publication lease could not be unlocked.");
+    }
+
+    [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
+    private static extern int Flock(int fileDescriptor, int operation);
 
     private sealed class PausedReadStream(byte[] bytes) : MemoryStream(bytes)
     {
