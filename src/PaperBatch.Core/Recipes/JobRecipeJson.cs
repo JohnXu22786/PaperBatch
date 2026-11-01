@@ -84,16 +84,93 @@ public static class RecipeSettingsResolver
     public static bool IsMatch(string fileName, string glob)
     {
         if (fileName.Length > 2048 || fileName.Contains('/') || fileName.Contains('\\') || glob.Length > 128) return false;
-        var f = 0; var g = 0; var star = -1; var retry = 0;
-        while (f < fileName.Length)
+        // Simulate the glob as a bitset NFA; collapsing adjacent stars makes one epsilon-closure shift sufficient.
+        Span<char> literalChars = stackalloc char[128];
+        Span<UInt128> literalMasks = stackalloc UInt128[128];
+        UInt128 starMask = 0;
+        UInt128 questionMask = 0;
+        var literalCount = 0;
+        var globLength = 0;
+        var previousWasStar = false;
+        foreach (var token in glob)
         {
-            if (g < glob.Length && (glob[g] == '?' || char.ToUpperInvariant(glob[g]) == char.ToUpperInvariant(fileName[f]))) { f++; g++; }
-            else if (g < glob.Length && glob[g] == '*') { star = g++; retry = f; }
-            else if (star >= 0) { g = star + 1; f = ++retry; }
-            else return false;
+            if (token == '*' && previousWasStar) continue;
+            var bit = UInt128.One << globLength++;
+            if (token == '*')
+            {
+                starMask |= bit;
+                previousWasStar = true;
+            }
+            else if (token == '?')
+            {
+                questionMask |= bit;
+                previousWasStar = false;
+            }
+            else
+            {
+                var literal = char.ToUpperInvariant(token);
+                var insertionIndex = 0;
+                while (insertionIndex < literalCount && literalChars[insertionIndex] < literal) insertionIndex++;
+                if (insertionIndex < literalCount && literalChars[insertionIndex] == literal)
+                {
+                    literalMasks[insertionIndex] |= bit;
+                }
+                else
+                {
+                    for (var index = literalCount; index > insertionIndex; index--)
+                    {
+                        literalChars[index] = literalChars[index - 1];
+                        literalMasks[index] = literalMasks[index - 1];
+                    }
+                    literalChars[insertionIndex] = literal;
+                    literalMasks[insertionIndex] = bit;
+                    literalCount++;
+                }
+                previousWasStar = false;
+            }
         }
-        while (g < glob.Length && glob[g] == '*') g++;
-        return g == glob.Length;
+
+        // The 129th state for a 128-token glob is tracked separately from the UInt128 state set.
+        const int highestStateBit = 127;
+        var finalBit = UInt128.One << highestStateBit;
+        var states = UInt128.One;
+        var acceptedAtEnd = false;
+        var activeStars = states & starMask;
+        if (activeStars != 0)
+        {
+            acceptedAtEnd = (activeStars & finalBit) != 0;
+            states |= activeStars << 1;
+        }
+
+        foreach (var fileCharacter in fileName)
+        {
+            if (states == 0) return false;
+
+            var literal = char.ToUpperInvariant(fileCharacter);
+            var low = 0;
+            var high = literalCount - 1;
+            UInt128 literalMask = 0;
+            while (low <= high)
+            {
+                var middle = low + ((high - low) / 2);
+                if (literalChars[middle] == literal)
+                {
+                    literalMask = literalMasks[middle];
+                    break;
+                }
+                if (literalChars[middle] < literal) low = middle + 1;
+                else high = middle - 1;
+            }
+
+            var matchingStates = states & (questionMask | literalMask);
+            acceptedAtEnd = (matchingStates & finalBit) != 0;
+            var nextStates = (matchingStates << 1) | (states & starMask);
+            activeStars = nextStates & starMask;
+            acceptedAtEnd |= (activeStars & finalBit) != 0;
+            states = nextStates | (activeStars << 1);
+        }
+
+        return globLength == 128 ? acceptedAtEnd : (states & (UInt128.One << globLength)) != 0;
     }
 
     private static RecipePrintSettings Apply(RecipePrintSettings current, RecipeSettingsOverride value) => current with

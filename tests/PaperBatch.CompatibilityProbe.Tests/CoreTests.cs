@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -860,6 +861,42 @@ internal static class CoreTests
         {
             Rules = [new RecipeSettingRule("bad", "../*.pdf", null, new RecipeSettingsOverride(Copies: 2))]
         }));
+    }
+
+    internal static void RecipeGlobLateMismatchStaysBounded()
+    {
+        var lateMismatch = "*" + new string('a', 126) + "b";
+        var fileName = new string('a', 2048);
+        var recipe = CreateRecipe() with
+        {
+            Rules = Enumerable.Range(0, 100)
+                .Select(index => new RecipeSettingRule($"late-{index}", lateMismatch, null, new RecipeSettingsOverride()))
+                .ToImmutableArray()
+        };
+        var source = new RecipeSource("source", fileName);
+        var started = Stopwatch.GetTimestamp();
+        var completedSources = 0;
+
+        for (var index = 0; index < 500; index++)
+        {
+            if (Stopwatch.GetElapsedTime(started) >= TimeSpan.FromSeconds(15)) break;
+            var resolved = RecipeSettingsResolver.Resolve(recipe, source, "pdf", recipe.Settings);
+            Assert.True(resolved.MatchingRuleId is null);
+            completedSources++;
+        }
+
+        Assert.Equal(500, completedSources);
+    }
+
+    internal static void RecipeGlobPreservesWildcardSemantics()
+    {
+        Assert.True(RecipeSettingsResolver.IsMatch("Annual.PDF", "a?nu*l.*"));
+        Assert.True(RecipeSettingsResolver.IsMatch("annual.pdf", "**annual**.p?f"));
+        Assert.False(RecipeSettingsResolver.IsMatch("annual.pdf", "annual.??"));
+        Assert.True(RecipeSettingsResolver.IsMatch("", "*"));
+        Assert.False(RecipeSettingsResolver.IsMatch("", "?"));
+        Assert.False(RecipeSettingsResolver.IsMatch(new string('a', 2049), "*"));
+        Assert.False(RecipeSettingsResolver.IsMatch("a", new string('*', 129)));
     }
 
     internal static void AutoStartingTransportLaunchesAndExitsCoordinatorProcess()
