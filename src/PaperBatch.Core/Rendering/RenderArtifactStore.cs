@@ -11,6 +11,7 @@ public sealed class RenderArtifactStore
     private const string OwnerMarkerName = ".paperbatch-render-artifacts-v1";
     private const string OwnerMarker = "PaperBatch.RenderArtifacts.v1\n";
     private const string TemporaryLeaseName = ".active";
+    private const string PublicationLeasePrefix = ".publish_";
     private static readonly TimeSpan TemporaryDirectoryMaxAge = TimeSpan.FromDays(1);
     private const int BufferSize = 64 * 1024;
     private readonly string _root;
@@ -44,6 +45,8 @@ public sealed class RenderArtifactStore
         var temporaryLease = CreateTemporaryLease(temporaryDirectory);
         var temporaryContent = Path.Combine(temporaryDirectory, "content.pdf");
         var temporaryReceipt = Path.Combine(temporaryDirectory, "receipt.json");
+        FileStream? publicationLease = null;
+        string? publicationLeasePath = null;
         try
         {
             long length = 0;
@@ -95,11 +98,16 @@ public sealed class RenderArtifactStore
                 await JsonSerializer.SerializeAsync(output, receipt, cancellationToken: cancellationToken).ConfigureAwait(false);
                 await output.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
+
+            publicationLeasePath = PublicationLeasePath(artifactId, tempId[5..]);
+            publicationLease = CreateLeaseFile(publicationLeasePath);
+            Directory.SetLastWriteTimeUtc(temporaryDirectory, DateTime.UtcNow);
+            temporaryLease.Dispose();
+            TryDelete(Path.Combine(temporaryDirectory, TemporaryLeaseName));
+            Directory.SetLastWriteTimeUtc(temporaryDirectory, DateTime.UtcNow);
             try
             {
                 Directory.Move(temporaryDirectory, artifactDirectory);
-                temporaryLease.Dispose();
-                TryDelete(Path.Combine(artifactDirectory, TemporaryLeaseName));
                 return receipt;
             }
             catch (IOException) when (Directory.Exists(artifactDirectory))
@@ -118,6 +126,8 @@ public sealed class RenderArtifactStore
         {
             temporaryLease.Dispose();
             TryDeleteDirectory(temporaryDirectory);
+            publicationLease?.Dispose();
+            if (publicationLeasePath is not null) TryDelete(publicationLeasePath);
         }
     }
 
@@ -171,6 +181,7 @@ public sealed class RenderArtifactStore
             if (entries.Any(entry => Path.GetFileName(entry) is not ("content.pdf" or "receipt.json" or TemporaryLeaseName)))
                 throw new IOException("An artifact directory contains unexpected entries.");
             foreach (var entry in entries) EnsureNoReparsePoints(entry);
+            if (HasActivePublicationLease(artifactId)) continue;
             FileStream? lease = null;
             if (entries.Any(entry => Path.GetFileName(entry) == TemporaryLeaseName))
             {
@@ -307,6 +318,7 @@ public sealed class RenderArtifactStore
         if (File.Exists(marker))
         {
             if (File.ReadAllText(marker) != OwnerMarker) throw new IOException("The artifact root is not owned by PaperBatch.");
+            ReclaimOrphanedPublicationLeases();
             ReclaimOrphanedTemporaryDirectories();
             return;
         }
@@ -315,7 +327,90 @@ public sealed class RenderArtifactStore
         using var writer = new StreamWriter(output);
         writer.Write(OwnerMarker);
         writer.Flush();
+        ReclaimOrphanedPublicationLeases();
         ReclaimOrphanedTemporaryDirectories();
+    }
+
+    private void ReclaimOrphanedPublicationLeases()
+    {
+        foreach (var path in Directory.EnumerateFiles(_root, PublicationLeasePrefix + "*", SearchOption.TopDirectoryOnly))
+        {
+            if (!TryGetPublicationLeaseArtifactId(Path.GetFileName(path), out _)) continue;
+
+            try
+            {
+                if ((File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0) continue;
+                using var lease = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, TemporaryLeaseShare);
+                if (!TryLockTemporaryLease(lease)) continue;
+                File.Delete(path);
+            }
+            catch (IOException)
+            {
+                // An active publication or an inaccessible lease is left alone.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Cleanup must not prevent the store from opening for unrelated artifacts.
+            }
+        }
+    }
+
+    private bool HasActivePublicationLease(string artifactId)
+    {
+        foreach (var path in Directory.EnumerateFiles(_root, PublicationLeasePrefix + artifactId + "_*", SearchOption.TopDirectoryOnly))
+        {
+            if (!TryGetPublicationLeaseArtifactId(Path.GetFileName(path), out var leasedArtifactId) ||
+                !string.Equals(leasedArtifactId, artifactId, StringComparison.Ordinal))
+                continue;
+
+            FileStream? lease = null;
+            try
+            {
+                if ((File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                    return true;
+                lease = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, TemporaryLeaseShare);
+                if (!TryLockTemporaryLease(lease))
+                {
+                    lease.Dispose();
+                    return true;
+                }
+                using (lease) File.Delete(path);
+            }
+            catch (IOException)
+            {
+                lease?.Dispose();
+                return true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                lease?.Dispose();
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private string PublicationLeasePath(string artifactId, string temporaryGuid) =>
+        Path.Combine(_root, PublicationLeasePrefix + artifactId + "_" + temporaryGuid);
+
+    private static bool TryGetPublicationLeaseArtifactId(string name, out string artifactId)
+    {
+        artifactId = string.Empty;
+        var separator = PublicationLeasePrefix.Length + 73;
+        if (name.Length != separator + 1 + 32 || !name.StartsWith(PublicationLeasePrefix, StringComparison.Ordinal) ||
+            name[separator] != '_')
+            return false;
+
+        var candidate = name.Substring(PublicationLeasePrefix.Length, 73);
+        var temporaryGuid = name[(separator + 1)..];
+        if (!IsArtifactId(candidate) || !string.Equals(candidate[9..], candidate[9..].ToLowerInvariant(), StringComparison.Ordinal) ||
+            !Guid.TryParseExact(temporaryGuid, "N", out var id) ||
+            !string.Equals(temporaryGuid, id.ToString("N"), StringComparison.Ordinal))
+            return false;
+
+        artifactId = candidate;
+        return true;
     }
 
     private void ReclaimOrphanedTemporaryDirectories()
@@ -387,7 +482,11 @@ public sealed class RenderArtifactStore
 
     private static FileStream CreateTemporaryLease(string directory)
     {
-        var path = Path.Combine(directory, TemporaryLeaseName);
+        return CreateLeaseFile(Path.Combine(directory, TemporaryLeaseName));
+    }
+
+    private static FileStream CreateLeaseFile(string path)
+    {
         var lease = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite,
             TemporaryLeaseShare);
         try

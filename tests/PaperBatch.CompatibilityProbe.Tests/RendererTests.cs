@@ -866,9 +866,9 @@ internal static class RendererTests
             var artifact = store.PersistPdfAsync(new MemoryStream(OnePagePdf()), "test-engine", "1",
                 new Dictionary<string, string>()).GetAwaiter().GetResult();
             var artifactDirectory = Path.Combine(root, artifact.Artifact.ArtifactId);
-            var leasePath = Path.Combine(artifactDirectory, ".active");
+            var leasePath = Path.Combine(root, ".publish_" + artifact.Artifact.ArtifactId + "_" + Guid.NewGuid().ToString("N"));
             using var lease = new FileStream(leasePath, FileMode.CreateNew, FileAccess.ReadWrite,
-                FileShare.ReadWrite | FileShare.Delete);
+                OperatingSystem.IsWindows() ? FileShare.Delete : FileShare.ReadWrite | FileShare.Delete);
             lease.SetLength(1);
             LockArtifactLease(lease);
 
@@ -876,6 +876,7 @@ internal static class RendererTests
             Assert.True(Directory.Exists(artifactDirectory), "Cleanup must preserve a published artifact whose writer still holds its lease.");
 
             UnlockArtifactLease(lease);
+            lease.Dispose();
             Assert.Equal(artifact.Artifact.ArtifactId,
                 store.DeleteUnreferencedArtifacts(new HashSet<string>()).Single());
             Assert.False(Directory.Exists(artifactDirectory), "Cleanup should remove an abandoned publication lease with its unreferenced artifact.");
