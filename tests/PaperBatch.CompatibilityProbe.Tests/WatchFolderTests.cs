@@ -261,8 +261,26 @@ internal static class WatchFolderTests
         debouncer.NotifyChange(start);
         debouncer.NotifyChange(start.AddSeconds(1));
         Assert.Equal(false, debouncer.TryTakeDueScan(start.AddSeconds(2)));
+        Assert.Equal(TimeSpan.FromSeconds(1), debouncer.GetWaitTimeUntilDue(start.AddSeconds(2)));
         Assert.Equal(true, debouncer.TryTakeDueScan(start.AddSeconds(3)));
         Assert.Equal(false, debouncer.TryTakeDueScan(start.AddSeconds(4)));
+    }
+
+    public static void DebouncerCapsContinuousHintsAtMaximumDelay()
+    {
+        var debouncer = new WatchFolderDebouncer(TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5));
+        var start = DateTimeOffset.Parse("2026-10-20T12:00:00Z");
+        debouncer.NotifyChange(start);
+        debouncer.NotifyChange(start.AddSeconds(1));
+        Assert.Equal(false, debouncer.TryTakeDueScan(start.AddSeconds(2)));
+
+        debouncer.NotifyChange(start.AddSeconds(2.5));
+        debouncer.NotifyChange(start.AddSeconds(3.5));
+        debouncer.NotifyChange(start.AddSeconds(4.5));
+        Assert.Equal(TimeSpan.FromMilliseconds(500), debouncer.GetWaitTimeUntilDue(start.AddSeconds(4.5)));
+        Assert.Equal(TimeSpan.Zero, debouncer.GetWaitTimeUntilDue(start.AddSeconds(5)));
+        Assert.Equal(true, debouncer.TryTakeDueScan(start.AddSeconds(5)));
+        Assert.Equal(false, debouncer.TryTakeDueScan(start.AddSeconds(6)));
     }
 
     public static void DiagnosticsRedactSensitiveFields()
