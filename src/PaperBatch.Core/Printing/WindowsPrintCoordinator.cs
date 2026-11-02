@@ -214,7 +214,7 @@ public sealed class WindowsPrintCoordinator(
             {
                 if (_activeSubmissionKeys.TryGetValue(jobId, out var activeSubmission) &&
                     string.Equals(activeSubmission.IdempotencyKey, idempotencyKey, StringComparison.Ordinal))
-                    return new PrintSubmissionResult(PrintSubmissionStatus.Accepted, intent.Job,
+                    return new PrintSubmissionResult(PrintSubmissionStatus.InProgress, intent.Job,
                         "The matching submission is still in progress.");
 
                 var unknown = store.TransitionJob(jobId, JobState.NeedsReviewUnknown,

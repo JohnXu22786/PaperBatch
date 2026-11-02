@@ -131,7 +131,8 @@ public enum PrintSubmissionStatus
     Accepted,
     Rejected,
     FailedBeforeSubmit,
-    NeedsReviewUnknown
+    NeedsReviewUnknown,
+    InProgress
 }
 
 public sealed record PrintSubmissionResult(PrintSubmissionStatus Status, StoredJob? Job, string? Reason);

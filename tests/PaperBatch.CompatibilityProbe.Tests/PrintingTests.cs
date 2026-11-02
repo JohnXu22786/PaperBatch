@@ -343,7 +343,7 @@ internal static class PrintingTests
             first = firstTask.GetAwaiter().GetResult();
         }
 
-        Assert.Equal(PrintSubmissionStatus.Accepted, duplicate!.Status);
+        Assert.Equal(PrintSubmissionStatus.InProgress, duplicate!.Status);
         Assert.Equal(JobState.Submitting, duplicate.Job!.State);
         Assert.Equal(PrintSubmissionStatus.Accepted, first!.Status);
         Assert.Equal(JobState.AcceptedByOs, first.Job!.State);
@@ -351,6 +351,62 @@ internal static class PrintingTests
         Assert.Equal(1, backend.OsSubmissionCount);
         Assert.Equal(1, backend.Receipts.Count);
         Assert.Equal(backend.Receipts.Single(), fixture.Store.GetJob(fixture.Job.JobId)!.OsReceipt);
+    }
+
+    internal static void ConcurrentDuplicateBatchStopsAtActiveSubmission()
+    {
+        using var seed = new Fixture();
+        var firstItem = seed.PreparedRun.Items[0];
+        var secondItem = firstItem with { ItemId = "item-2" };
+        var twoPagePdf = PdfCompositionTests.TwoPagePdf();
+        var stored = seed.Artifacts.PersistPdfAsync(new MemoryStream(twoPagePdf), "test-renderer", "1",
+            new Dictionary<string, string>()).GetAwaiter().GetResult();
+        var finalArtifact = new FinalPdfArtifact(stored.Artifact.ArtifactId, stored.Artifact.Sha256,
+            stored.Artifact.LengthBytes, 2);
+        var run = PreparedRun.Create("run-concurrent-batch", FixedTime, Hash, [firstItem, secondItem],
+            [new CompatibleSegment("segment-1", 0, [firstItem.ItemId], "compat-1", Settings(), [1]),
+             new CompatibleSegment("segment-2", 1, [secondItem.ItemId], "compat-2", Settings(), [2])], finalArtifact);
+        using var fixture = new Fixture(run, twoPagePdf, 2);
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.PendingSubmissionRelease = release;
+        var capabilityRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.PauseCapabilityRead = 1;
+        backend.PendingCapabilityRelease = capabilityRelease;
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "concurrent-batch", fixture.Artifacts);
+        Task<IReadOnlyList<PrintSubmissionResult>>? firstBatch = null;
+        Task<IReadOnlyList<PrintSubmissionResult>>? duplicateBatch = null;
+        try
+        {
+            firstBatch = coordinator.SubmitRunAsync(run, "concurrent-batch-key", FixedTime);
+            Assert.True(backend.PausedCapabilityRead.Task.Wait(TimeSpan.FromSeconds(5)),
+                "The first batch did not reach its deterministic capability gate.");
+            duplicateBatch = coordinator.SubmitRunAsync(run, "concurrent-batch-key", FixedTime);
+            Assert.True(backend.SubmissionStarted.Task.Wait(TimeSpan.FromSeconds(5)),
+                "The concurrent batch did not reach its deterministic backend gate.");
+            capabilityRelease.TrySetResult();
+
+            Assert.True(firstBatch.Wait(TimeSpan.FromSeconds(5)),
+                "The duplicate batch should stop at the active first segment instead of submitting the next segment.");
+            var firstResults = firstBatch.GetAwaiter().GetResult();
+
+            Assert.Equal(1, firstResults.Count);
+            Assert.Equal(PrintSubmissionStatus.InProgress, firstResults[0].Status);
+            Assert.Equal(JobState.Submitting, firstResults[0].Job!.State);
+            Assert.Equal(1, backend.SubmissionCount);
+            Assert.Equal(JobState.Ready, fixture.Store.GetJobs(run.RunId)[1].State);
+        }
+        finally
+        {
+            capabilityRelease.TrySetResult();
+            release.TrySetResult();
+            if (firstBatch is not null) _ = firstBatch.GetAwaiter().GetResult();
+            if (duplicateBatch is not null) _ = duplicateBatch.GetAwaiter().GetResult();
+        }
+
+        Assert.Equal(2, backend.SubmissionCount);
+        Assert.Equal(JobState.AcceptedByOs, fixture.Store.GetJobs(run.RunId)[0].State);
+        Assert.Equal(JobState.AcceptedByOs, fixture.Store.GetJobs(run.RunId)[1].State);
     }
 
     internal static void CoordinatorStatusRemainsAvailableDuringLongSubmission()
@@ -1547,6 +1603,9 @@ internal static class PrintingTests
         public Task<PrintBackendJobStatus>? PendingStatusResponse { get; set; }
         public TaskCompletionSource StatusRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource? PendingSubmissionRelease { get; set; }
+        public int? PauseCapabilityRead { get; set; }
+        public TaskCompletionSource? PendingCapabilityRelease { get; set; }
+        public TaskCompletionSource PausedCapabilityRead { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource SubmissionStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public System.Collections.Concurrent.ConcurrentBag<OsJobReceipt> Receipts { get; } = [];
         public List<int[]> SubmittedPageNumbers { get; } = [];
@@ -1554,11 +1613,23 @@ internal static class PrintingTests
         public Task<PrinterCapabilitySnapshot> GetCapabilitiesAsync(string queueIdentity, CancellationToken cancellationToken = default)
         {
             var capabilityRead = Interlocked.Increment(ref _capabilityReads);
+            if (capabilityRead == PauseCapabilityRead && PendingCapabilityRelease is { } pendingCapabilityRelease)
+            {
+                PausedCapabilityRead.TrySetResult();
+                return WaitForCapabilitiesAsync(pendingCapabilityRelease.Task, capabilities, cancellationToken);
+            }
             if (capabilityRead == Win32CapabilityFailureOnRead)
                 return Task.FromException<PrinterCapabilitySnapshot>(new Win32Exception("Winspool capability enumeration failed."));
             if (capabilityRead == MissingQueueOnCapabilityRead)
                 return Task.FromException<PrinterCapabilitySnapshot>(new KeyNotFoundException("The selected local printer queue is no longer present."));
             return Task.FromResult(capabilityRead >= 2 ? CapabilitiesOnSecondRead ?? capabilities : capabilities);
+        }
+
+        private static async Task<PrinterCapabilitySnapshot> WaitForCapabilitiesAsync(
+            Task release, PrinterCapabilitySnapshot capabilities, CancellationToken cancellationToken)
+        {
+            await release.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return capabilities;
         }
 
         public async Task<OsJobReceipt> SubmitAsync(WindowsPrintSubmission submission, CancellationToken cancellationToken = default)

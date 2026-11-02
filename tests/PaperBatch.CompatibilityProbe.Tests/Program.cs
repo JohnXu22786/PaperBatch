@@ -295,6 +295,7 @@ var tests = new List<(string Name, Action Run)>
     ("mutated prepared run with same id is rejected before backend access", PrintingTests.SameRunIdWithMutatedPreparedRunIsRejectedBeforeCapabilityOrSubmission),
     ("ambiguous print submission remains unknown across restart", PrintingTests.AmbiguousSubmissionIsNotRetriedAfterRestart),
     ("concurrent duplicate submit preserves active intent until receipt", PrintingTests.ConcurrentDuplicateSubmissionKeepsActiveIntent),
+    ("concurrent duplicate batch stops at an active segment until receipt", PrintingTests.ConcurrentDuplicateBatchStopsAtActiveSubmission),
     ("coordinator status remains available during long print submission", PrintingTests.CoordinatorStatusRemainsAvailableDuringLongSubmission),
     ("queue capability lookup failure is failed before submit and retryable", PrintingTests.CapabilityLookupFailureIsFailedBeforeSubmitAndRetryable),
     ("removed queue during capability lookup is rejected before submission", PrintingTests.RemovedQueueDuringCapabilityLookupIsRejectedBeforeSubmission),
