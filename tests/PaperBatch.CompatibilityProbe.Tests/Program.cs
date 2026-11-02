@@ -301,6 +301,7 @@ var tests = new List<(string Name, Action Run)>
     ("removed queue during submit returns a structured IPC rejection", PrintingTests.RemovedQueueDuringSubmitReturnsStructuredIpcRejection),
     ("Win32 capability enumeration failures are rejected before submission", PrintingTests.Win32CapabilityEnumerationFailuresAreRejectedBeforeSubmission),
     ("Win32 capability enumeration failure returns a structured IPC response", PrintingTests.Win32CapabilityEnumerationFailureReturnsStructuredIpcResponse),
+    ("Win32 status and cancel failures return sanitized IPC errors and keep the server alive", PrintingTests.Win32StatusAndCancelFailuresReturnSanitizedIpcErrorsAndKeepServerAlive),
     ("print status and cancellation use exact owned job receipt", PrintingTests.StatusAndCancellationAreScopedToOwnedReceipt),
     ("accepted cancellation is observed only after a cancelled status", PrintingTests.AcceptedCancellationIsObservedOnlyAfterCancelledStatus),
     ("unknown print status after a cancel request does not confirm cancellation", PrintingTests.UnknownStatusDoesNotConfirmCancellationAfterRequest),
