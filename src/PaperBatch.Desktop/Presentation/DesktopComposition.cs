@@ -199,6 +199,17 @@ internal sealed class ProductionPresentationSources :
     public bool CanInspectPrinterCapabilities => _printerCapabilityReader is not null && OperatingSystem.IsWindows();
     public bool CanSubmitPrintJobs => _printAvailable && OperatingSystem.IsWindows();
 
+    internal static PrintJobSnapshot CreateSubmissionSnapshot(string jobId, int segmentIndex, string persistedState,
+        string responseStatus, string? detail)
+    {
+        var knownNoEffect = responseStatus is nameof(PrintSubmissionStatus.Rejected) or nameof(PrintSubmissionStatus.FailedBeforeSubmit);
+        var retryablePersistedState = persistedState is nameof(JobState.Ready) or nameof(JobState.FailedBeforeSubmit);
+        var state = knownNoEffect && retryablePersistedState ? persistedState : responseStatus;
+        return new(jobId, segmentIndex, state,
+            string.IsNullOrWhiteSpace(detail) ? "Submission was not accepted; later segments were not submitted." : detail,
+            false, responseStatus);
+    }
+
     public async Task<IReadOnlyList<PrintJobSnapshot>> SubmitPreparedRunAsync(string queueItemId, CancellationToken cancellationToken = default)
     {
         if (!CanSubmitPrintJobs || _runStore is null ||
@@ -228,7 +239,12 @@ internal sealed class ProductionPresentationSources :
             }
         }
         var refreshed = await RefreshPrintJobsAsync(queueItemId, cancellationToken).ConfigureAwait(false);
-        return refreshedJobs.Count == 0 ? refreshed : refreshed.Select(job => refreshedJobs.FirstOrDefault(rejected => rejected.JobId == job.JobId) ?? job).ToArray();
+        return refreshedJobs.Count == 0 ? refreshed : refreshed.Select(job =>
+        {
+            var submissionOutcome = refreshedJobs.FirstOrDefault(outcome => outcome.JobId == job.JobId);
+            return submissionOutcome is null ? job : CreateSubmissionSnapshot(job.JobId, job.SegmentIndex,
+                job.State, submissionOutcome.DisplayState, submissionOutcome.Detail);
+        }).ToArray();
     }
 
     private void RememberSubmittedRun(string queueItemId, string runId)
