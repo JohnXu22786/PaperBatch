@@ -51,6 +51,7 @@ var tests = new (string Name, Action Run)[]
     ("preparation controls forward requested layout settings and invalidate previews", PreparationControlsForwardRequestedSettingsAndInvalidate),
     ("preparation errors follow the selected language", PreparationErrorsFollowSelectedLanguage),
     ("recipe device-profile conflicts do not persist or compose an artifact", RecipeDeviceConflictCreatesNoRunOrFinalArtifact),
+    ("loading a monochrome recipe notifies the bound color setting", LoadingMonochromeRecipeNotifiesBoundColorSetting),
     ("recipe duplex requests change compiled physical-face layout while remaining unvalidated", RecipeDuplexRequestChangesCompiledLayout),
     ("corrupt saved recipes leave production shell available with an error state", CorruptSavedRecipesRemainVisibleAsAnError),
     ("recipe lifecycle strictly imports, renames, exports without overwrite, and deletes", RecipeLifecycleIsExplicitAndBounded),
@@ -1207,6 +1208,38 @@ static void PreparationErrorsFollowSelectedLanguage()
     viewModel.PageRange = "bad";
     viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
     Assert.Contains("请输入页码范围", viewModel.OperationError);
+}
+
+static void LoadingMonochromeRecipeNotifiesBoundColorSetting()
+{
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-recipe-monochrome-notify-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
+        var cache = new SourceSnapshotCache(new SourceSnapshotCacheOptions { RootPath = Path.Combine(root, "cache") });
+        var intake = new SourceIntakeService(cache);
+        var source = new ProductionPresentationSources(intake, runStore: store);
+        var recipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "mono", "Monochrome recipe",
+            [new RecipeSource("missing-source", Path.Combine(root, "missing.pdf"))],
+            new RecipePrintSettings(1, ColorMode.Monochrome, DuplexMode.Simplex, Orientation.Auto, ScalingMode.ShrinkToFit, "Letter"));
+        source.SaveRecipe(new JobRecipeSnapshot(recipe.SchemaVersion, recipe.RecipeId, recipe.Name, recipe.Sources, recipe.Settings));
+        var viewModel = new DesktopShellViewModel(source, source, source, source, source, source,
+            new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+        var requestedColorIndexNotifications = 0;
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(DesktopShellViewModel.RequestedColorIndex))
+                requestedColorIndexNotifications++;
+        };
+
+        viewModel.LoadRecipeSourcesAsync(viewModel.Templates.Single(), replaceQueue: false).GetAwaiter().GetResult();
+
+        Assert.Equal(1, viewModel.RequestedColorIndex);
+        Assert.Equal(1, requestedColorIndexNotifications);
+    }
+    finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
 }
 
 static void RecipeDuplexRequestChangesCompiledLayout()
