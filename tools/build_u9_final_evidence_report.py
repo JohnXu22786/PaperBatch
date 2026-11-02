@@ -45,7 +45,7 @@ def build_report(
     if not workflow:
         raise ValueError("workflow name is required with a candidate commit")
     results = {name: job_results.get(name, "not_run") for name in JOB_NAMES}
-    allowed = {"success", "failure", "cancelled", "skipped", "not_run"}
+    allowed = {"success", "failure", "cancelled", "abandoned", "skipped", "not_run"}
     if any(result not in allowed for result in results.values()):
         raise ValueError("unknown CI job result")
     outcome = "passed" if all(result == "success" for result in results.values()) else "failed"
