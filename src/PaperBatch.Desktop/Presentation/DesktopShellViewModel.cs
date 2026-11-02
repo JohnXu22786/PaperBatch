@@ -623,10 +623,11 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         if (savedRecipe.Settings.Media is not ("Letter" or "A4"))
             throw new InvalidOperationException("This recipe requests a sheet size not supported by the desktop layout controls. Its sources were not loaded.");
         var paths = manager.GetRecipeSourceLocations(recipe.RecipeId);
-        _activeRecipe = new PaperBatch.Core.Recipes.JobRecipe(savedRecipe.SchemaVersion, savedRecipe.RecipeId,
+        var activeRecipe = new PaperBatch.Core.Recipes.JobRecipe(savedRecipe.SchemaVersion, savedRecipe.RecipeId,
             savedRecipe.Name, savedRecipe.Sources, savedRecipe.Settings) { Rules = savedRecipe.Rules };
-        OnPropertyChanged(nameof(PreparationResolutionNote));
         var imported = await importer.ImportAsync(paths, cancellationToken).ConfigureAwait(true);
+        _activeRecipe = activeRecipe;
+        OnPropertyChanged(nameof(PreparationResolutionNote));
         RequestedCopies = savedRecipe.Settings.Copies;
         OrientationIndex = savedRecipe.Settings.Orientation switch { Orientation.Portrait => 1, Orientation.Landscape => 2, _ => 0 };
         ScalingIndex = savedRecipe.Settings.ScalingMode == ScalingMode.ActualSize ? 1 : 0;
