@@ -80,7 +80,7 @@ internal static class PdfiumSmoke
         apiResults = CreateFormExportResults(exports, executionStatuses)
     };
 
-    private static object[] BuildApiExportResults(IReadOnlySet<string> exports, IReadOnlyDictionary<string, string>? executionStatuses = null, bool exportsChecked = true) => CompositionExports.Concat(FormExports).Concat(PageEditExports).Distinct(StringComparer.Ordinal)
+    internal static object[] CreateApiExportResults(IReadOnlySet<string> exports, IReadOnlyDictionary<string, string>? executionStatuses = null, bool exportsChecked = true) => CompositionExports.Concat(FormExports).Concat(PageEditExports).Distinct(StringComparer.Ordinal)
         .Select(name => (object)new
         {
             name,
@@ -92,13 +92,35 @@ internal static class PdfiumSmoke
         })
         .ToArray();
 
+    internal static T TrackNativeResult<T>(string name, Func<T> call, IDictionary<string, string> statuses, Action saveCheckpoint)
+    {
+        statuses[name] = "started";
+        saveCheckpoint();
+        try
+        {
+            var result = call();
+            statuses[name] = IsSuccessfulApiResult(name, result) ? "verified" : "failed";
+            saveCheckpoint();
+            return result;
+        }
+        catch
+        {
+            statuses[name] = "failed";
+            saveCheckpoint();
+            throw;
+        }
+    }
+
+    private static bool IsSuccessfulApiResult<T>(string name, T result) =>
+        name != "FPDF_ImportPages" || result is int importPagesResult && importPagesResult != 0;
+
     public static string CreateUnavailableReport(string reason, string expectedSha256) => JsonSerializer.Serialize(new
     {
         schemaVersion = "1.0",
         status = "blocked",
         reason,
         assetSha256Expected = expectedSha256,
-        apiExports = BuildApiExportResults(new HashSet<string>(StringComparer.Ordinal), exportsChecked: false),
+        apiExports = CreateApiExportResults(new HashSet<string>(StringComparer.Ordinal), exportsChecked: false),
         composition = new { status = "blocked", reason },
         pageEdit = new
         {
@@ -153,23 +175,7 @@ internal static class PdfiumSmoke
         var probeAssembly = DescribeProbeAssembly();
 
         T TrackApiResult<T>(string name, Func<T> call)
-        {
-            apiExecutionStatuses[name] = "started";
-            SaveCheckpoint();
-            try
-            {
-                var result = call();
-                apiExecutionStatuses[name] = "verified";
-                SaveCheckpoint();
-                return result;
-            }
-            catch
-            {
-                apiExecutionStatuses[name] = "failed";
-                SaveCheckpoint();
-                throw;
-            }
-        }
+            => TrackNativeResult(name, call, apiExecutionStatuses, SaveCheckpoint);
 
         void TrackApi(string name, Action call) => TrackApiResult(name, () => { call(); return true; });
         IntPtr TrackPointer(string name, Func<IntPtr> call) => TrackApiResult(name, call);
@@ -187,7 +193,7 @@ internal static class PdfiumSmoke
             var checkpoint = new
             {
                 runner = new { probeAssembly },
-                apiExports = BuildApiExportResults(exportNames, CurrentExecutionStatuses()),
+                apiExports = CreateApiExportResults(exportNames, CurrentExecutionStatuses()),
                 binary,
                 composition,
                 pageEditFixtureStarted = pageEditStarted,
@@ -252,7 +258,7 @@ internal static class PdfiumSmoke
                     fileVersion = FileVersionInfo.GetVersionInfo(fullDllPath).FileVersion
                 };
                 SaveCheckpoint();
-                exports.AddRange(BuildApiExportResults(parsed.ExportNames, apiExecutionStatuses));
+                exports.AddRange(CreateApiExportResults(parsed.ExportNames, apiExecutionStatuses));
                 var missingComposition = CompositionExports.Where(name => !parsed.ExportNames.Contains(name)).ToArray();
                 if (missingComposition.Length > 0)
                 {
@@ -350,7 +356,7 @@ internal static class PdfiumSmoke
         }
 
         exports.Clear();
-        exports.AddRange(BuildApiExportResults(exportNames, CurrentExecutionStatuses(), exportsChecked));
+        exports.AddRange(CreateApiExportResults(exportNames, CurrentExecutionStatuses(), exportsChecked));
 
         var report = new
         {

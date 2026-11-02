@@ -6,6 +6,7 @@ foreach (var (name, run) in new (string Name, Action Run)[]
 {
     ("synthetic PDF fixtures are deterministic", FixturesAreDeterministic),
     ("composition fixture has two distinct render targets", CompositionFixtureHasDistinctTargets),
+    ("failed page import never becomes verified evidence", FailedPageImportNeverBecomesVerifiedEvidence),
     ("vector page-edit fixture is deterministic with distinct objects", PageEditFixtureIsDeterministic),
     ("page-edit API results preserve unavailable and not-run states", PageEditApiResultsPreserveStatuses),
     ("page-edit proof cannot pass without verified native behavior", PageEditUnavailableFailsProof),
@@ -67,6 +68,37 @@ static void CompositionFixtureHasDistinctTargets()
     var insert = SyntheticPdf.CreateCompositionInsert();
     Assert.Contains("1 0 0 rg", System.Text.Encoding.ASCII.GetString(source));
     Assert.Contains("0 0 1 rg", System.Text.Encoding.ASCII.GetString(insert));
+}
+
+static void FailedPageImportNeverBecomesVerifiedEvidence()
+{
+    var statuses = new Dictionary<string, string>(StringComparer.Ordinal);
+    var checkpoints = new List<string>();
+    var result = PdfiumSmoke.TrackNativeResult(
+        "FPDF_ImportPages",
+        () => 0,
+        statuses,
+        () => checkpoints.Add(statuses["FPDF_ImportPages"]));
+
+    Assert.Equal(0, result);
+    Assert.Equal("failed", statuses["FPDF_ImportPages"]);
+    Assert.True(!checkpoints.Contains("verified"));
+
+    var exports = new HashSet<string>(["FPDF_ImportPages"], StringComparer.Ordinal);
+    using var report = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(
+        PdfiumSmoke.CreateApiExportResults(exports, statuses)));
+    var import = report.RootElement.EnumerateArray().Single(x => x.GetProperty("name").GetString() == "FPDF_ImportPages");
+    Assert.Equal("failed", import.GetProperty("executionStatus").GetString());
+    Assert.True(PdfiumSmoke.ShouldFailNativeProof(new PdfiumSmokeRun("", "composition: failed", false, "blocked", "blocked")));
+
+    statuses.Clear();
+    var successful = PdfiumSmoke.TrackNativeResult(
+        "FPDF_ImportPages",
+        () => 1,
+        statuses,
+        () => checkpoints.Add(statuses["FPDF_ImportPages"]));
+    Assert.Equal(1, successful);
+    Assert.Equal("verified", statuses["FPDF_ImportPages"]);
 }
 
 static void PageEditFixtureIsDeterministic()
