@@ -107,6 +107,21 @@ class FinalEvidenceReportTests(unittest.TestCase):
         )
         self.assertEqual(report["currentRun"]["exactHeadCiOutcome"], "failed")
 
+    def test_abandoned_exact_head_job_is_preserved_and_never_reports_green(self):
+        jobs = {name: "success" for name in report_builder.JOB_NAMES}
+        jobs["build-and-test"] = "abandoned"
+        report = report_builder.build_report(
+            self.evidence,
+            candidate_sha="c" * 40,
+            run_id="12348",
+            run_attempt="1",
+            workflow="CI",
+            job_results=jobs,
+        )
+        current = report["currentRun"]
+        self.assertEqual(current["jobResults"]["build-and-test"], "abandoned")
+        self.assertEqual(current["exactHeadCiOutcome"], "failed")
+
     def test_local_report_without_ci_context_does_not_invent_a_candidate(self):
         report = report_builder.build_report(
             self.evidence,
