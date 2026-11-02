@@ -632,7 +632,11 @@ internal sealed class DesktopShellViewModel : INotifyPropertyChanged
         ScalingIndex = savedRecipe.Settings.ScalingMode == ScalingMode.ActualSize ? 1 : 0;
         MediaIndex = savedRecipe.Settings.Media == "A4" ? 1 : 0;
         DuplexIndex = savedRecipe.Settings.DuplexMode switch { DuplexMode.LongEdge => 1, DuplexMode.ShortEdge => 2, _ => 0 };
-        _requestedColorMode = savedRecipe.Settings.ColorMode;
+        if (_requestedColorMode != savedRecipe.Settings.ColorMode)
+        {
+            _requestedColorMode = savedRecipe.Settings.ColorMode;
+            OnPropertyChanged(nameof(RequestedColorIndex));
+        }
         if (replaceQueue)
         {
             var importedIds = imported.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
