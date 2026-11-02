@@ -532,6 +532,60 @@ internal static class PrintingTests
         }
     }
 
+    internal static void Win32StatusAndCancelFailuresReturnSanitizedIpcErrorsAndKeepServerAlive()
+    {
+        using var fixture = new Fixture();
+        var backend = new TestOnlySimulatedPrintBackend(Capabilities());
+        var coordinator = new WindowsPrintCoordinator(fixture.Store, backend, static () => "status-cancel-win32-nonce", fixture.Artifacts);
+        var submitted = coordinator.SubmitAsync(fixture.Job.JobId, fixture.PreparedRun,
+            "status-cancel-win32-submit", FixedTime).GetAwaiter().GetResult();
+        Assert.Equal(PrintSubmissionStatus.Accepted, submitted.Status);
+
+        var handler = new ProductionCoordinatorRequestHandler(fixture.Store, coordinator);
+        var pipeName = "paperbatch-test-" + Guid.NewGuid().ToString("N");
+        var server = new NamedPipeCoordinatorServer(pipeName, handler.HandleAsync);
+        using var shutdown = new CancellationTokenSource();
+        var serverTask = server.RunAsync(shutdown.Token);
+        try
+        {
+            var transport = new NamedPipeLocalCoordinatorTransport(pipeName);
+            backend.StatusFailure = new Win32Exception(5, "Winspool status failed at C:\\private\\print\\queue");
+            var statusResponse = Send(transport, "cli.status", fixture.Job.JobId);
+            AssertWin32Error(statusResponse, "The Windows print backend could not read the requested job status.");
+
+            backend.CancelFailure = new Win32Exception(5, "Winspool cancel failed at C:\\private\\print\\queue");
+            var cancelResponse = Send(transport, "cli.cancel", fixture.Job.JobId);
+            AssertWin32Error(cancelResponse, "The Windows print backend could not cancel the requested job.");
+
+            var recoveredStatus = Send(transport, "cli.status", fixture.Job.JobId);
+            Assert.True(recoveredStatus.Error is null, "The named-pipe server should keep serving requests after mapped backend errors.");
+            Assert.Equal(JobState.CancelRequested.ToString(), recoveredStatus.Payload!.Value.GetProperty("status").GetString());
+        }
+        finally
+        {
+            shutdown.Cancel();
+            try { serverTask.GetAwaiter().GetResult(); }
+            catch (OperationCanceledException) { }
+            server.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+
+        static IpcResponseEnvelope Send(NamedPipeLocalCoordinatorTransport transport, string operation, string jobId)
+        {
+            using var payload = JsonDocument.Parse(JsonSerializer.Serialize(new { arguments = new[] { jobId } }));
+            return transport.SendAsync(new IpcRequestEnvelope(IpcJson.CurrentProtocolVersion, Guid.NewGuid(),
+                operation, null, payload.RootElement.Clone())).AsTask().GetAwaiter().GetResult();
+        }
+
+        static void AssertWin32Error(IpcResponseEnvelope response, string expectedMessage)
+        {
+            Assert.Equal("unavailable", response.Error!.Code);
+            Assert.Equal(expectedMessage, response.Error.Message);
+            Assert.True(response.Error.Message.Length <= IpcJson.MaximumErrorMessageLength);
+            Assert.False(response.Error.Message.Contains("Winspool", StringComparison.Ordinal));
+            Assert.False(response.Error.Message.Contains("C:\\private", StringComparison.Ordinal));
+        }
+    }
+
     internal static void RemovedQueueDuringSubmitReturnsStructuredIpcRejection()
     {
         using var fixture = new Fixture();
@@ -1477,6 +1531,8 @@ internal static class PrintingTests
         public int ThrowCancellationOnSubmissionNumber { get; init; }
         public bool ThrowCapabilityAfterSubmit { get; init; }
         public bool CancelReturnsFalse { get; set; }
+        public Win32Exception? StatusFailure { get; set; }
+        public Win32Exception? CancelFailure { get; set; }
         public int SubmissionCount => Volatile.Read(ref _submissionCount);
         public int OsSubmissionCount => Volatile.Read(ref _osSubmissionCount);
         public int CancelCount => Volatile.Read(ref _cancelCount);
@@ -1539,6 +1595,11 @@ internal static class PrintingTests
             LastQueueIdentity = receipt.QueueIdentity;
             LastJobId = receipt.OsJobId;
             LastRunNonce = receipt.RunNonce;
+            if (StatusFailure is { } statusFailure)
+            {
+                StatusFailure = null;
+                return Task.FromException<PrintBackendJobStatus>(statusFailure);
+            }
             if (PendingStatusResponse is { } pendingStatus)
             {
                 StatusRequested.TrySetResult();
@@ -1554,6 +1615,11 @@ internal static class PrintingTests
             LastJobId = receipt.OsJobId;
             LastRunNonce = receipt.RunNonce;
             OnCancel?.Invoke();
+            if (CancelFailure is { } cancelFailure)
+            {
+                CancelFailure = null;
+                return Task.FromException<bool>(cancelFailure);
+            }
             return Task.FromResult(!CancelReturnsFalse);
         }
     }

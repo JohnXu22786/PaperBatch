@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.ComponentModel;
 using System.Reflection;
 using System.Text.Json;
 using System.Collections.Immutable;
@@ -491,7 +492,16 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
         var jobId = GetArguments(request, 1)[0];
         var job = _runs.GetJob(jobId) ?? throw new ArgumentException("The requested job does not exist.");
         if (_printing is not null && job.OsReceipt is not null)
-            job = await _printing.RefreshStatusAsync(jobId, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+        {
+            try
+            {
+                job = await _printing.RefreshStatusAsync(jobId, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Win32Exception)
+            {
+                return Unavailable(request, "The Windows print backend could not read the requested job status.");
+            }
+        }
         return Success(request, new { job.JobId, job.RunId, status = job.State.ToString(), hasOsReceipt = job.OsReceipt is not null });
     }
 
@@ -499,7 +509,15 @@ public sealed class ProductionCoordinatorRequestHandler : ICoordinatorRequestHan
     {
         if (_printing is null) return Unavailable(request, "Cancellation requires a configured Windows print backend.");
         var jobId = GetArguments(request, 1)[0];
-        var job = await _printing.CancelAsync(jobId, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+        PaperBatch.Core.Persistence.StoredJob job;
+        try
+        {
+            job = await _printing.CancelAsync(jobId, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Win32Exception)
+        {
+            return Unavailable(request, "The Windows print backend could not cancel the requested job.");
+        }
         return Success(request, new { status = job.State.ToString(), jobId });
     }
 
