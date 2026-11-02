@@ -52,6 +52,7 @@ var tests = new (string Name, Action Run)[]
     ("preparation errors follow the selected language", PreparationErrorsFollowSelectedLanguage),
     ("recipe device-profile conflicts do not persist or compose an artifact", RecipeDeviceConflictCreatesNoRunOrFinalArtifact),
     ("loading a monochrome recipe notifies the bound color setting", LoadingMonochromeRecipeNotifiesBoundColorSetting),
+    ("failed recipe source imports preserve the active recipe, queue, and settings", FailedRecipeSourceImportPreservesActiveRecipeAndQueue),
     ("recipe duplex requests change compiled physical-face layout while remaining unvalidated", RecipeDuplexRequestChangesCompiledLayout),
     ("corrupt saved recipes leave production shell available with an error state", CorruptSavedRecipesRemainVisibleAsAnError),
     ("recipe lifecycle strictly imports, renames, exports without overwrite, and deletes", RecipeLifecycleIsExplicitAndBounded),
@@ -1242,6 +1243,50 @@ static void LoadingMonochromeRecipeNotifiesBoundColorSetting()
     finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
 }
 
+static void FailedRecipeSourceImportPreservesActiveRecipeAndQueue()
+{
+    var root = Path.Combine(GetTestTempRoot(), "paperbatch-recipe-import-atomic-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var store = new SqliteRunStore(Path.Combine(root, "runs.db"));
+        store.Initialize();
+        var manager = new ProductionPresentationSources(runStore: store);
+        var previousRecipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "previous", "Previous recipe",
+            [new RecipeSource("previous-source", Path.Combine(root, "previous.pdf"))],
+            new RecipePrintSettings(3, ColorMode.Monochrome, DuplexMode.LongEdge, Orientation.Landscape, ScalingMode.ActualSize, "A4"));
+        var nextRecipe = new JobRecipe(JobRecipeJson.CurrentSchemaVersion, "next", "Next recipe",
+            [new RecipeSource("next-source", Path.Combine(root, "next.pdf"))],
+            new RecipePrintSettings(7, ColorMode.Color, DuplexMode.Simplex, Orientation.Portrait, ScalingMode.ShrinkToFit, "Letter"));
+        manager.SaveRecipe(new JobRecipeSnapshot(previousRecipe.SchemaVersion, previousRecipe.RecipeId, previousRecipe.Name, previousRecipe.Sources, previousRecipe.Settings));
+        manager.SaveRecipe(new JobRecipeSnapshot(nextRecipe.SchemaVersion, nextRecipe.RecipeId, nextRecipe.Name, nextRecipe.Sources, nextRecipe.Settings));
+        var queue = new FailingRecipeQueueSource();
+        var viewModel = new DesktopShellViewModel(queue, new FakeSettingsSource(), new FakePreparedPreviewSource(),
+            new FakePreflightSource(), new FakeHistorySource(), manager,
+            new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+
+        viewModel.LoadRecipeSourcesAsync(viewModel.Templates.Single(item => item.RecipeId == previousRecipe.RecipeId), replaceQueue: false).GetAwaiter().GetResult();
+        Assert.Equal(3, viewModel.RequestedCopies);
+        Assert.Equal(1, viewModel.RequestedColorIndex);
+        Assert.Equal(1, viewModel.MediaIndex);
+        Assert.Equal("previous-row", viewModel.QueueItems.Single().Id);
+
+        Assert.Throws<InvalidOperationException>(() => viewModel.LoadRecipeSourcesAsync(
+            viewModel.Templates.Single(item => item.RecipeId == nextRecipe.RecipeId), replaceQueue: false).GetAwaiter().GetResult());
+
+        Assert.Equal(3, viewModel.RequestedCopies);
+        Assert.Equal(1, viewModel.RequestedColorIndex);
+        Assert.Equal(1, viewModel.MediaIndex);
+        Assert.Equal("previous-row", viewModel.QueueItems.Single().Id);
+        SelectSupportedPrinter(viewModel);
+        viewModel.PrepareQueueAsync().GetAwaiter().GetResult();
+        Assert.Equal(previousRecipe.RecipeId, queue.LastPreparedRecipe!.RecipeId);
+        Assert.Equal(3, queue.LastPreparedOptions!.Copies);
+        Assert.Equal("A4", queue.LastPreparedSettings!.Media);
+    }
+    finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+}
+
 static void RecipeDuplexRequestChangesCompiledLayout()
 {
     var root = Path.Combine(GetTestTempRoot(), "paperbatch-recipe-duplex-" + Guid.NewGuid().ToString("N"));
@@ -1601,6 +1646,36 @@ sealed class FakePreparationSource(IReadOnlyList<QueueItemSnapshot> items) : IQu
     public void InvalidatePreparedRun(string queueItemId) => InvalidatedIds.Add(queueItemId);
     public Task<PreviewSnapshot> GetPreviewAsync(string queueItemId, CancellationToken cancellationToken = default) =>
         Task.FromResult(new PreviewSnapshot(queueItemId, "Preview", 1, 1));
+}
+
+sealed class FailingRecipeQueueSource : IQueueEditingPresentationSource, IQueueImportPresentationSource, IQueuePreparationPresentationSource
+{
+    private readonly List<QueueItemSnapshot> _items = [];
+    private int _importCount;
+    public bool IsAvailable => true;
+    public bool CanPrepare => true;
+    public IReadOnlyList<string> ResolutionSummaries => [];
+    public JobRecipe? LastPreparedRecipe { get; private set; }
+    public LayoutOptions? LastPreparedOptions { get; private set; }
+    public PrintSettings? LastPreparedSettings { get; private set; }
+    public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => _items.ToArray();
+    public void Move(string queueItemId, int delta) { }
+    public void Remove(string queueItemId) => _items.RemoveAll(item => item.Id == queueItemId);
+    public Task<IReadOnlyList<QueueItemSnapshot>> ImportAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default)
+    {
+        if (++_importCount == 2) throw new InvalidOperationException("simulated import failure");
+        var row = new QueueItemSnapshot("previous-row", "Previous source.pdf", "1 page", "Ready");
+        _items.Add(row);
+        return Task.FromResult<IReadOnlyList<QueueItemSnapshot>>([row]);
+    }
+    public Task<PreparedArtifactResult> PrepareQueueAsync(PrintSettings requestedSettings, LayoutOptions layoutOptions,
+        JobRecipe? recipe = null, CancellationToken cancellationToken = default)
+    {
+        LastPreparedRecipe = recipe;
+        LastPreparedOptions = layoutOptions;
+        LastPreparedSettings = requestedSettings;
+        return Task.FromResult(new PreparedArtifactResult(null, null, ["test capture"], false));
+    }
 }
 
 sealed class FakeSharedPreparedBatchSource : IQueueEditingPresentationSource, IQueuePreparationPresentationSource,
