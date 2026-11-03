@@ -918,17 +918,15 @@ internal static class RendererTests
         var root = Path.Combine(Path.GetTempPath(), $"paperbatch-artifacts-deduplicated-cleanup-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
         var store = new RenderArtifactStore(root);
-        var pdfText = Encoding.ASCII.GetString(OnePagePdf());
-        var padding = new string(' ', 16 * 1024 * 1024);
-        var xrefIndex = pdfText.IndexOf("xref\n", StringComparison.Ordinal);
-        var paddedPdf = pdfText.Insert(xrefIndex, padding);
-        var startXrefValue = paddedPdf.LastIndexOf("startxref\n", StringComparison.Ordinal) + "startxref\n".Length;
-        var startXrefEnd = paddedPdf.IndexOf('\n', startXrefValue);
-        var xrefOffset = long.Parse(paddedPdf.AsSpan(startXrefValue, startXrefEnd - startXrefValue),
-            System.Globalization.CultureInfo.InvariantCulture);
-        paddedPdf = paddedPdf[..startXrefValue] + (xrefOffset + padding.Length)
-            .ToString(System.Globalization.CultureInfo.InvariantCulture) + paddedPdf[startXrefEnd..];
-        var pdfBytes = Encoding.ASCII.GetBytes(paddedPdf);
+        using var verificationReady = new ManualResetEventSlim();
+        using var releaseVerification = new ManualResetEventSlim();
+        var duplicateStore = new RenderArtifactStore(root, 512L * 1024 * 1024, () =>
+        {
+            verificationReady.Set();
+            if (!releaseVerification.Wait(TimeSpan.FromSeconds(10)))
+                throw new TimeoutException("The deduplicated persistence test did not release artifact verification.");
+        });
+        var pdfBytes = OnePagePdf();
         var artifact = store.PersistPdfAsync(new MemoryStream(pdfBytes), "test-engine", "1",
             new Dictionary<string, string>()).GetAwaiter().GetResult();
         var artifactDirectory = Path.Combine(root, artifact.Artifact.ArtifactId);
@@ -936,37 +934,28 @@ internal static class RendererTests
         Task<StoredPdfArtifact>? duplicateTask = null;
         try
         {
-            duplicateTask = store.PersistPdfAsync(new MemoryStream(pdfBytes), "test-engine", "1",
-                new Dictionary<string, string>());
-            var leaseDeadline = Stopwatch.GetTimestamp() + 10 * Stopwatch.Frequency;
-            var publicationLeaseObserved = false;
-            IReadOnlyList<string>? deleted = null;
-            while (!duplicateTask.IsCompleted && Stopwatch.GetTimestamp() < leaseDeadline)
-            {
-                if (Directory.EnumerateFiles(root, publicationPrefix + "*", SearchOption.TopDirectoryOnly).Any())
-                {
-                    if (duplicateTask.IsCompleted) continue;
-                    publicationLeaseObserved = true;
-                    deleted = store.DeleteUnreferencedArtifacts(new HashSet<string>());
-                    break;
-                }
-                Thread.Sleep(1);
-            }
+            duplicateTask = Task.Run(() => duplicateStore.PersistPdfAsync(new MemoryStream(pdfBytes), "test-engine", "1",
+                new Dictionary<string, string>()));
+            Assert.True(verificationReady.Wait(TimeSpan.FromSeconds(5)),
+                "Deduplicated persistence did not reach existing artifact verification.");
+            Assert.True(Directory.EnumerateFiles(root, publicationPrefix + "*", SearchOption.TopDirectoryOnly).Any(),
+                "The publication lease was not visible while duplicate persistence was paused before verification.");
+            var deleted = store.DeleteUnreferencedArtifacts(new HashSet<string>());
+            releaseVerification.Set();
 
             StoredPdfArtifact? duplicate = null;
             Exception? persistenceFailure = null;
             try { duplicate = duplicateTask.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult(); }
             catch (Exception exception) { persistenceFailure = exception; }
 
-            Assert.True(publicationLeaseObserved,
-                "Deduplicated persistence did not hold a publication lease while verifying an existing artifact.");
-            Assert.Equal(0, deleted!.Count);
+            Assert.Equal(0, deleted.Count);
             Assert.True(Directory.Exists(artifactDirectory), "Concurrent cleanup deleted an artifact being verified by duplicate persistence.");
             Assert.True(persistenceFailure is null, $"Duplicate persistence failed during concurrent cleanup: {persistenceFailure}");
             Assert.Equal(artifact.Artifact.ArtifactId, duplicate!.Artifact.ArtifactId);
         }
         finally
         {
+            releaseVerification.Set();
             if (duplicateTask is not null)
             {
                 try { duplicateTask.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult(); }
