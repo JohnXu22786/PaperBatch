@@ -24,6 +24,7 @@ var tests = new (string Name, Action Run)[]
     ("printer inspection is explicit, read-only, and keeps demo mode disabled", PrinterInspectionIsReadOnly),
     ("print status and cancellation failures remain visible and block unsafe submission", PrintStatusFailuresAreVisibleAndBlockSubmission),
     ("known no-effect print failures can be retried from the desktop", KnownNoEffectPrintFailuresCanBeRetried),
+    ("known rejected print submissions preserve retryable persisted state while unknown outcomes stay blocked", RejectedSubmissionRetryStateIsPreserved),
     ("a newly prepared run can be submitted while canceled historical jobs remain visible", RepreparedRunCanSubmitAlongsideCancelledHistory),
     ("print job refresh returns status persisted by the coordinator in the same refresh", PrintJobRefreshReturnsPersistedCoordinatorStatus),
     ("preparation refreshes newly persisted ready print jobs", PreparationRefreshesReadyPrintJobs),
@@ -369,6 +370,62 @@ static void KnownNoEffectPrintFailuresCanBeRetried()
     uncertainViewModel.RefreshPreviewAsync().GetAwaiter().GetResult();
     uncertainViewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
     Assert.True(!uncertainViewModel.CanSubmitPreparedRun);
+}
+
+static void RejectedSubmissionRetryStateIsPreserved()
+{
+    var readyRejected = ProductionPresentationSources.CreateSubmissionSnapshot("ready-job", 0, "Ready", "Rejected",
+        "Queue rejected the job before submission.");
+    Assert.Equal("Ready", readyRejected.State);
+    Assert.Equal("Rejected", readyRejected.DisplayState);
+
+    var readySource = new FakeSubmissionOutcomePrintSource(
+        [new QueueItemSnapshot("queue-item", "Prepared.pdf", "1 page", "Ready")],
+        [new PrintJobSnapshot("ready-job", 0, "Ready", "Prepared and ready", false)], [readyRejected]);
+    var readyViewModel = new DesktopShellViewModel(readySource, new FakeSettingsSource(), new FakePrintablePreviewSource(),
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    SelectSupportedPrinter(readyViewModel);
+    readyViewModel.RefreshPreviewAsync().GetAwaiter().GetResult();
+    readyViewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
+
+    readyViewModel.SubmitPreparedRunAsync().GetAwaiter().GetResult();
+    Assert.True(readyViewModel.CanSubmitPreparedRun);
+    Assert.Equal("Ready", readyViewModel.PrintJobs.Single().State);
+    readyViewModel.SubmitPreparedRunAsync().GetAwaiter().GetResult();
+    Assert.Equal(2, readySource.SubmissionCalls);
+
+    var failedRejected = ProductionPresentationSources.CreateSubmissionSnapshot("failed-job", 0, "FailedBeforeSubmit",
+        "FailedBeforeSubmit", "Submission failed before the operating system accepted it.");
+    Assert.Equal("FailedBeforeSubmit", failedRejected.State);
+    var failedSource = new FakeSubmissionOutcomePrintSource(
+        [new QueueItemSnapshot("queue-item", "Prepared.pdf", "1 page", "Ready")],
+        [new PrintJobSnapshot("failed-job", 0, "FailedBeforeSubmit", "No OS submission occurred", false)], [failedRejected]);
+    var failedViewModel = new DesktopShellViewModel(failedSource, new FakeSettingsSource(), new FakePrintablePreviewSource(),
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    SelectSupportedPrinter(failedViewModel);
+    failedViewModel.RefreshPreviewAsync().GetAwaiter().GetResult();
+    failedViewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
+    failedViewModel.SubmitPreparedRunAsync().GetAwaiter().GetResult();
+    Assert.True(failedViewModel.CanSubmitPreparedRun);
+    Assert.Equal("FailedBeforeSubmit", failedViewModel.PrintJobs.Single().State);
+
+    var unknown = ProductionPresentationSources.CreateSubmissionSnapshot("unknown-job", 0, "Ready", "NeedsReviewUnknown",
+        "Outcome unknown.");
+    Assert.Equal("NeedsReviewUnknown", unknown.State);
+    var unknownSource = new FakeSubmissionOutcomePrintSource(
+        [new QueueItemSnapshot("queue-item", "Prepared.pdf", "1 page", "Ready")],
+        [new PrintJobSnapshot("unknown-job", 0, "Ready", "Prepared and ready", false)], [unknown]);
+    var unknownViewModel = new DesktopShellViewModel(unknownSource, new FakeSettingsSource(), new FakePrintablePreviewSource(),
+        new FakePreflightSource(), new FakeHistorySource(), new FakeTemplateSource(),
+        new WorkspaceStatusSnapshot("PRODUCTION MODE", "Test", false));
+    SelectSupportedPrinter(unknownViewModel);
+    unknownViewModel.RefreshPreviewAsync().GetAwaiter().GetResult();
+    unknownViewModel.RefreshPrintJobsAsync().GetAwaiter().GetResult();
+    unknownViewModel.SubmitPreparedRunAsync().GetAwaiter().GetResult();
+    Assert.True(!unknownViewModel.CanSubmitPreparedRun);
+    Assert.Equal("NeedsReviewUnknown", unknownViewModel.PrintJobs.Single().State);
 }
 
 static void RepreparedRunCanSubmitAlongsideCancelledHistory()
@@ -1599,6 +1656,23 @@ sealed class FakeRetryablePrintSource(IReadOnlyList<QueueItemSnapshot> items, IR
     }
     public Task<IReadOnlyList<PrintJobSnapshot>> RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken = default) =>
         Task.FromResult(initialJobs);
+    public Task<bool> CancelPrintJobAsync(string jobId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+}
+
+sealed class FakeSubmissionOutcomePrintSource(IReadOnlyList<QueueItemSnapshot> items,
+    IReadOnlyList<PrintJobSnapshot> persistedJobs, IReadOnlyList<PrintJobSnapshot> submissionResult) :
+    IQueuePresentationSource, IPrintSubmissionPresentationSource
+{
+    public bool CanSubmitPrintJobs => true;
+    public int SubmissionCalls { get; private set; }
+    public IReadOnlyList<QueueItemSnapshot> GetQueueItems() => items;
+    public Task<IReadOnlyList<PrintJobSnapshot>> SubmitPreparedRunAsync(string queueItemId, CancellationToken cancellationToken = default)
+    {
+        SubmissionCalls++;
+        return Task.FromResult(submissionResult);
+    }
+    public Task<IReadOnlyList<PrintJobSnapshot>> RefreshPrintJobsAsync(string queueItemId, CancellationToken cancellationToken = default) =>
+        Task.FromResult(persistedJobs);
     public Task<bool> CancelPrintJobAsync(string jobId, CancellationToken cancellationToken = default) => Task.FromResult(false);
 }
 

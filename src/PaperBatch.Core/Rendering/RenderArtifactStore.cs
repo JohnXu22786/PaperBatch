@@ -17,13 +17,20 @@ public sealed class RenderArtifactStore
     private const int BufferSize = 64 * 1024;
     private readonly string _root;
     private readonly long _maximumArtifactBytes;
+    private readonly Action? _beforeExistingArtifactVerification;
 
     public RenderArtifactStore(string rootPath, long maximumArtifactBytes = 512L * 1024 * 1024)
+        : this(rootPath, maximumArtifactBytes, null)
+    {
+    }
+
+    internal RenderArtifactStore(string rootPath, long maximumArtifactBytes, Action? beforeExistingArtifactVerification)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
         if (maximumArtifactBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maximumArtifactBytes));
         _root = Path.GetFullPath(rootPath);
         _maximumArtifactBytes = maximumArtifactBytes;
+        _beforeExistingArtifactVerification = beforeExistingArtifactVerification;
         InitializeRoot();
     }
 
@@ -87,6 +94,7 @@ public sealed class RenderArtifactStore
             var artifactDirectory = ArtifactDirectory(artifactId);
             if (Directory.Exists(artifactDirectory))
             {
+                _beforeExistingArtifactVerification?.Invoke();
                 var existing = ReadReceipt(artifactId);
                 using var verified = OpenRead(artifactId);
                 if (existing.Artifact.Sha256 != digest || existing.Artifact.LengthBytes != length)
