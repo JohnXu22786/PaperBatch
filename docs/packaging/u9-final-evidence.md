@@ -52,3 +52,16 @@ The fuller package and dependency descriptions remain in [core runtime inventory
 **No-go for end-user beta distribution or public release on the current evidence.** Keep the ZIP and reports as an unsigned development candidate. Q2, Q3 and Q5 remain partial; native Office/WPS is blocked; the artifact bodies could not be inspected here; and U10 real-user trials are deferred. The current evidence does not establish clean-PC behavior, a historical package upgrade lifecycle, physical output, Office/WPS compatibility, OEM driver support, or publisher trust.
 
 Reconsider only after artifact contents and exact versions have been reviewed, the remaining Q2/Q3/Q5 boundary has either been completed or explicitly accepted by the project owner, and U10 has separate authorization. Do not create a release or tag, make a paid commitment, buy a certificate, print physically, or start U10 under this unit.
+
+## PR #108 post-merge verification (2026-11-04)
+
+PR [#108](https://github.com/JohnXu22786/PaperBatch/pull/108) merged to `main` at `2026-11-04T16:11:45Z` as squash commit `2a820251041987f67374452cad5dbf6da96a9a35`. Both post-merge workflows below are bound to that exact SHA:
+
+| Workflow | Run / attempt | Result | Relevant job evidence |
+|---|---|---|---|
+| Main CI | [41864881668](https://github.com/JohnXu22786/PaperBatch/actions/runs/41864881668), attempt 4 | Success; all 7 jobs passed | Managed macOS job `126805419695` passed at 19:23:00Z on hosted runner `GitHub Actions 1000055827`. |
+| U9 simulation matrix | [41864881481](https://github.com/JohnXu22786/PaperBatch/actions/runs/41864881481), attempt 1 | Success; all 6 jobs passed | macOS synthetic IPP smoke job `126696454308` passed. |
+
+Main CI attempt 4 is the final successful retry after earlier hosted macOS runner acquisition cancellations; those earlier attempts are not passes. The U9 result is a separate workflow and must not be conflated with main CI. Its macOS job exercised a synthetic IPP protocol smoke only: it does not establish PaperBatch macOS support or physical printing. Existing qualification remains unchanged: Q2/Q3/Q5 are partial; native Office/WPS validation is blocked; PaperBatch macOS is unsupported; physical pages were not run; U10 real-user trials remain deferred. A successful run means its configured checks passed and does not close these evidence gaps.
+
+For the completed AUTO project audit convergence on the pre-#108 candidate, see [AUTO rounds 49–50](auto-convergence.md). Those reviews preceded the #108 merge and did not include its commit.
