@@ -10,6 +10,7 @@ using PaperBatch.CompatibilityProbe;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 internal static class PrintingTests
 {
@@ -907,26 +908,47 @@ internal static class PrintingTests
             return;
         }
 
-        using var batch = new BatchFixture(runtimePath, runtimeHash);
-        var firstPrepared = batch.Prepare("checked-in-batch-contract-key");
+        var reportPath = Environment.GetEnvironmentVariable("PAPERBATCH_PRINT_PATH_REPORT");
+        var includeLibreOffice = OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true";
+        if (includeLibreOffice && string.IsNullOrWhiteSpace(reportPath))
+            reportPath = Path.Combine(RequiredEnvironment("RUNNER_TEMP"), "windows-batch-print-contract.json");
+        using var batch = new BatchFixture(runtimePath, runtimeHash, includeLibreOffice);
+        var firstPrepared = batch.Prepare("checked-in-batch-contract-key", sourceCount: includeLibreOffice ? 3 : 2);
         Assert.True(firstPrepared.Succeeded, string.Join("; ", firstPrepared.Diagnostics));
         var run = firstPrepared.Run!;
         var finalArtifact = run.FinalArtifact!;
-        Assert.Equal(2, run.Items.Length);
+        Assert.Equal(includeLibreOffice ? 3 : 2, run.Items.Length);
         Assert.Equal(batch.SourceHashes[0], run.Items[0].Source.Sha256);
         Assert.Equal(batch.SourceHashes[1], run.Items[1].Source.Sha256);
         Assert.Equal("paperbatch.pdf-pass-through", run.Items[0].Render.RendererId);
         Assert.Equal("paperbatch.builtin-image", run.Items[1].Render.RendererId);
+        if (includeLibreOffice)
+        {
+            Assert.Equal(batch.SourceHashes[2], run.Items[2].Source.Sha256);
+            Assert.Equal("libreoffice", run.Items[2].Render.RendererId);
+            var conversionReceipt = batch.Artifacts.GetReceipt(run.Items[2].Render.ArtifactId);
+            Assert.Equal("libreoffice", conversionReceipt.EngineId);
+            Assert.Equal(batch.LibreOfficeEngineSha256, conversionReceipt.Options["engine-sha256"]);
+            var expectedLibreOfficeVersion = batch.LibreOfficeExpectedVersion!;
+            Assert.True(conversionReceipt.EngineVersion == expectedLibreOfficeVersion ||
+                Regex.IsMatch(conversionReceipt.EngineVersion,
+                    @"\A" + Regex.Escape(expectedLibreOfficeVersion) + @"(?: Build [0-9]+| [0-9]+\(Build:[0-9]+\)| [0-9a-f]{7,40})\z",
+                    RegexOptions.CultureInvariant),
+                "The converted DOCX receipt did not preserve the configured pinned LibreOffice version.");
+            Assert.True(run.Items[2].PageMap.SequenceEqual(
+                    Enumerable.Range(1, run.Items[2].Render.PageCount).Select(page => new PageMapping(page, page))),
+                "The prepared batch omitted one or more converted DOCX pages.");
+        }
         Assert.True(run.Items[0].PageMap.SequenceEqual([new PageMapping(1, 1), new PageMapping(2, 2)]));
         Assert.True(run.Items[1].PageMap.SequenceEqual([new PageMapping(1, 1)]));
-        Assert.Equal(3, finalArtifact.PageCount);
-        Assert.Equal(3, batch.GetSavedPageCount(finalArtifact));
+        Assert.Equal(run.Items.Sum(item => item.Render.PageCount), finalArtifact.PageCount);
+        Assert.Equal(finalArtifact.PageCount, batch.GetSavedPageCount(finalArtifact));
         Assert.True(batch.SavedPageContainsRedMarker(finalArtifact, 3),
             "The final page should contain the checked-in PNG marker after the two ordered PDF pages.");
         var persistedPageSizes = batch.GetSavedPageSizes(finalArtifact);
         Assert.Equal(1, run.Segments.Length);
         Assert.True(run.Segments[0].ItemIds.SequenceEqual(run.Items.Select(item => item.ItemId)));
-        Assert.True(run.Segments[0].FinalPageNumbers.SequenceEqual([1, 2, 3]));
+        Assert.True(run.Segments[0].FinalPageNumbers.SequenceEqual(Enumerable.Range(1, finalArtifact.PageCount)));
         var jobs = firstPrepared.Persistence!.Jobs;
         Assert.Equal(1, jobs.Length);
         Assert.Equal(0, jobs[0].SegmentIndex);
@@ -957,9 +979,9 @@ internal static class PrintingTests
         Assert.Equal("LongEdge", submission.Options.Duplex);
         Assert.Equal(1, submission.Segment.PrintSettings.Copies);
         var document = native.Documents.Single();
-        Assert.Equal(3, document.StartPageCount);
-        Assert.Equal(3, document.WritePageCount);
-        Assert.Equal(3, document.EndPageCount);
+        Assert.Equal(finalArtifact.PageCount, document.StartPageCount);
+        Assert.Equal(finalArtifact.PageCount, document.WritePageCount);
+        Assert.Equal(finalArtifact.PageCount, document.EndPageCount);
         Assert.Equal(1, document.EndDocCount);
         Assert.True(document.Disposed);
         var storedJob = batch.Runs.GetJob(jobs[0].JobId)!;
@@ -1030,7 +1052,6 @@ internal static class PrintingTests
         Assert.Equal(2, partialNative.StartDocCount);
         Assert.Equal(JobState.NeedsReviewUnknown, partial.Runs.GetJob(partialJobs[1].JobId)!.State);
 
-        var reportPath = Environment.GetEnvironmentVariable("PAPERBATCH_PRINT_PATH_REPORT");
         if (!string.IsNullOrWhiteSpace(reportPath))
         {
             var report = new
@@ -1053,7 +1074,9 @@ internal static class PrintingTests
                     dotnetSdk = RequiredEnvironment("PAPERBATCH_DOTNET_SDK_VERSION"),
                     dotnetRuntime = Environment.Version.ToString(),
                     pdfiumVersion = RequiredEnvironment("PAPERBATCH_PDFIUM_TEST_VERSION"),
-                    pdfiumSha256 = RequiredEnvironment("PAPERBATCH_PDFIUM_TEST_SHA256")
+                    pdfiumSha256 = RequiredEnvironment("PAPERBATCH_PDFIUM_TEST_SHA256"),
+                    libreOfficeVersion = includeLibreOffice ? batch.LibreOfficeExpectedVersion : null,
+                    libreOfficeEngineSha256 = includeLibreOffice ? batch.LibreOfficeEngineSha256 : null
                 },
                 sourceFixtures = batch.SourceFixtures.Select((fixture, index) => new
                 {
@@ -1062,12 +1085,29 @@ internal static class PrintingTests
                     sha256 = batch.SourceHashes[index],
                     lengthBytes = batch.SourceBytes[index].LongLength,
                     format = fixture.format,
-                    renderer = index == 0 ? "paperbatch.pdf-pass-through" : "paperbatch.builtin-image"
+                    renderer = run.Items[index].Render.RendererId,
+                    convertedArtifact = run.Items[index].Render.RendererId == "libreoffice"
+                        ? new
+                        {
+                            artifactSha256 = run.Items[index].Render.ArtifactSha256,
+                            lengthBytes = run.Items[index].Render.ArtifactLengthBytes,
+                            pageCount = run.Items[index].Render.PageCount,
+                            engineVersion = batch.Artifacts.GetReceipt(run.Items[index].Render.ArtifactId).EngineVersion,
+                            engineSha256 = batch.Artifacts.GetReceipt(run.Items[index].Render.ArtifactId).Options["engine-sha256"]
+                        }
+                        : null
                 }),
                 batchPrint = new
                 {
                     sourceCount = run.Items.Length,
                     sourceOrder = run.Items.Select(item => item.Source.Sha256).ToArray(),
+                    segments = run.Segments.Select(segment => new
+                    {
+                        segment.Index,
+                        itemIds = segment.ItemIds,
+                        pages = segment.FinalPageNumbers
+                    }),
+                    jobs = jobs.Select(job => new { job.JobId, job.SegmentIndex, state = job.State.ToString() }),
                     finalArtifact = new { sha256 = finalArtifact.Sha256, lengthBytes = finalArtifact.LengthBytes, pageCount = finalArtifact.PageCount },
                     segmentCount = run.Segments.Length,
                     jobCount = jobs.Length,
@@ -1093,6 +1133,7 @@ internal static class PrintingTests
                         endDoc = document.EndDocCount
                     },
                     receipt = new { storedJobId = storedJob.JobId, osJobId = receipt.OsJobId, receipt.RunNonce, receipt.QueueIdentity },
+                    receiptContract = "The simulated GDI job receipt is persisted for the selected fake queue and run nonce; it describes the injected boundary only.",
                     reportedCompleteState = completed.State.ToString()
                 },
                 partialFailure = new
@@ -1136,10 +1177,17 @@ internal static class PrintingTests
                 },
                 evidenceLimits = new[]
                 {
-                    "The batch test exercises two checked-in sources: a two-page PDF followed by a one-page RGB PNG.",
+                    includeLibreOffice
+                        ? "The batch test exercises a two-page PDF, a one-page RGB PNG, and a checked-in DOCX converted by the pinned LibreOffice engine before PDFium composition."
+                        : "The batch test exercises two checked-in sources: a two-page PDF followed by a one-page RGB PNG.",
                     "The current model groups these matching printer settings into one segment and one job; per-item layout copy expansion is separately tested as two ordered segments/jobs.",
                     PageSelectionEvidenceLimit,
-                    "Production renderer formats are PDF, JPEG and PNG; this batch sample directly exercises PDF and PNG, not JPEG or office document conversion.",
+                    includeLibreOffice
+                        ? "The batch sample exercises PDF pass-through, PNG rendering, and a DOCX conversion through the production LibreOffice adapter."
+                        : "Production renderer formats are PDF, JPEG and PNG; this batch sample directly exercises PDF and PNG, not JPEG or office document conversion.",
+                    includeLibreOffice
+                        ? "Windows LibreOffice output monitoring is best-effort and may overshoot before the final 512 MiB artifact check; it is not a hard per-process quota."
+                        : null,
                     "The test proves PaperBatch orchestration to an injected fake boundary only; it does not prove OS queue acceptance or physical paper output."
                 }
             };
@@ -1234,18 +1282,32 @@ internal static class PrintingTests
         private readonly PreparedArtifactCoordinator _preparation;
         private readonly PdfiumArtifactInspector _inspector;
 
-        public BatchFixture(string runtimePath, string runtimeHash)
+        public BatchFixture(string runtimePath, string runtimeHash, bool includeLibreOffice = false)
         {
             Directory.CreateDirectory(_temporary);
-            SourceFixtures =
-            [
+            var sourceFixtures = new List<(string path, string fullPath, string format, string expectedSha256, long expectedLength)>
+            {
                 ("tests/fixtures/synthetic_documents/synthetic_two_page.pdf",
                     Path.Combine(AppContext.BaseDirectory, "Fixtures", "synthetic_two_page.pdf"), "PDF",
                     "ab35f052c3792879195636d8f69d356e66c3f026ec246d31ebc73e00527caeee", 958L),
                 ("tests/fixtures/print_batch/synthetic_batch_marker.png",
                     Path.Combine(AppContext.BaseDirectory, "Fixtures", "synthetic_batch_marker.png"), "PNG",
                     "9f1d47567cf62d3c3998f12f998afc0bd787ea4ffdc979e5d1f7fc46c17c10e7", 173L)
-            ];
+            };
+            if (includeLibreOffice)
+            {
+                var enginePath = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_PATH");
+                LibreOfficeEngineSha256 = Environment.GetEnvironmentVariable("PAPERBATCH_LO_ENGINE_SHA256");
+                LibreOfficeExpectedVersion = Environment.GetEnvironmentVariable("PAPERBATCH_LO_EXPECTED_VERSION");
+                if (string.IsNullOrWhiteSpace(enginePath) || string.IsNullOrWhiteSpace(LibreOfficeEngineSha256) ||
+                    string.IsNullOrWhiteSpace(LibreOfficeExpectedVersion))
+                    throw new InvalidOperationException("The Windows print report requires the verified pinned LibreOffice runtime.");
+                var docxPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "synthetic_sections_table.docx");
+                sourceFixtures.Add(("tests/fixtures/synthetic_documents/synthetic_sections_table.docx", docxPath,
+                    "DOCX", "3e0cbc2a26f4b31ae8444d7646da0aed49eb68b16616a8f582fd27fd5f0c987a", 1790L));
+                _libreOfficeEngine = enginePath;
+            }
+            SourceFixtures = sourceFixtures.ToArray();
             SourceBytes = SourceFixtures.Select(fixture => File.ReadAllBytes(fixture.Item2)).ToArray();
             SourceHashes = SourceBytes.Select(bytes => Convert.ToHexString(
                 System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant()).ToArray();
@@ -1255,12 +1317,16 @@ internal static class PrintingTests
             Artifacts = new RenderArtifactStore(Path.Combine(_temporary, "artifacts"));
             Runs = new SqliteRunStore(Path.Combine(_temporary, "runs.db"));
             Runs.Initialize();
-            var renderer = new RendererCoordinator(
-            [
+            var rendererAdapters = new List<IRendererAdapter>
+            {
                 new PdfPassThroughRendererAdapter(new PdfPassThroughArtifactService(Snapshots, Artifacts)),
                 new BuiltInImageRendererAdapter(Snapshots, Artifacts)
-            ]);
+            };
             _inspector = new PdfiumArtifactInspector(runtimePath, runtimeHash);
+            if (_libreOfficeEngine is not null)
+                rendererAdapters.Add(new LibreOfficeRendererAdapter(Snapshots, Artifacts, _inspector,
+                    _libreOfficeEngine, LibreOfficeEngineSha256!));
+            var renderer = new RendererCoordinator(rendererAdapters);
             _preparation = new PreparedArtifactCoordinator(new SourceIntakeService(Snapshots), Snapshots, renderer,
                 _inspector, _inspector, new PdfiumPageCompositionAdapter(runtimePath, runtimeHash), Artifacts, Runs);
         }
@@ -1268,6 +1334,9 @@ internal static class PrintingTests
         public (string path, string fullPath, string format, string expectedSha256, long expectedLength)[] SourceFixtures { get; }
         public byte[][] SourceBytes { get; }
         public string[] SourceHashes { get; }
+        public string? LibreOfficeEngineSha256 { get; }
+        public string? LibreOfficeExpectedVersion { get; }
+        private string? _libreOfficeEngine;
         public SourceSnapshotCache Snapshots { get; }
         public RenderArtifactStore Artifacts { get; }
         public SqliteRunStore Runs { get; }

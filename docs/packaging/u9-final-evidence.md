@@ -2,6 +2,14 @@
 
 Reviewed 2026-10-24 at the U7 main commit `700adaffa5f4ab38a23eda27de8b3fea400290d2`. The machine-readable record is [u9-final-evidence.json](u9-final-evidence.json). On every CI run, the `u9-final-evidence-report` job adds the exact candidate commit, workflow run ID, attempt, and package/test/protocol job conclusions to a 14-day artifact. On pull requests, the report binds to the PR head SHA, not GitHub's synthetic merge ref.
 
+## Pre-U10 Unit 1 post-merge evidence (PR #110)
+
+PR #110 (`test(printing): exercise converted DOCX in batch path`) merged as `5d7ecd2cd65c7420fad2fdab340073531e5f64b3`; its exact PR head was `2ab72068c43f39fcfaebdb1e2881fa42f4b2c5ae`. The exact-head CI run [44981874302](https://github.com/JohnXu22786/PaperBatch/actions/runs/44981874302) and U9 run [44981874294](https://github.com/JohnXu22786/PaperBatch/actions/runs/44981874294) both completed successfully. On the merge SHA, U9 run [44984254223](https://github.com/JohnXu22786/PaperBatch/actions/runs/44984254223) and post-merge CI run [44984254303](https://github.com/JohnXu22786/PaperBatch/actions/runs/44984254303) both completed successfully. The CI run targets the exact merge SHA and reports success for the Windows package, Windows .NET 10/Avalonia/Python, Linux, macOS, Linux protocol, and Windows PDFium jobs. Run/job metadata was refreshed on 2026-11-22. Archived report and package artifact bodies remain uninspected.
+
+The Unit 1 contract is evidenced by the exact-head CI result and the test/workflow source. Its uploaded batch report body and package artifacts were not inspected. The contract uses an injected fake GDI/Winspool boundary; its report source records real queue inventory and real submission as `not_run`, and physical paper output as `unavailable`. A hosted Windows runner queue observation is separate from the test and does not establish a user's queue or physical output.
+
+The U9 delivery PR series #33–#40 comprises eight completed PR units. Its simulation scenario table remains seven rows, U1–U7 (PRs #33–#39); PR #40 (`0521e6e80a0fd02b851890012029b912404f72e2`) is consolidated evidence/report infrastructure, not another simulation scenario row.
+
 ## Exact-commit evidence
 
 Each listed commit is the corresponding unit's merge commit on `main`. Both workflow runs completed successfully against that exact SHA. The U7 post-merge CI run ultimately passed on its third attempt: the Windows PDFium verification step failed on attempts 1 and 2 and passed on attempt 3 without a source change; the U9 simulation matrix passed on the first run.
