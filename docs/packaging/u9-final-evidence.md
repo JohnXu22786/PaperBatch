@@ -8,7 +8,7 @@ PR #110 (`test(printing): exercise converted DOCX in batch path`) merged as `5d7
 
 The Unit 1 contract is evidenced by the exact-head CI result and the test/workflow source. Its uploaded batch report body and package artifacts were not inspected. The contract uses an injected fake GDI/Winspool boundary; its report source records real queue inventory and real submission as `not_run`, and physical paper output as `unavailable`. A hosted Windows runner queue observation is separate from the test and does not establish a user's queue or physical output.
 
-PR #40 (`0521e6e80a0fd02b851890012029b912404f72e2`) is evidence-consolidation/report infrastructure, not an eighth U9 simulation scenario row. The U9 scenario table remains U1–U7 (PRs #33–#39).
+The U9 delivery PR series #33–#40 comprises eight completed PR units. Its simulation scenario table remains seven rows, U1–U7 (PRs #33–#39); PR #40 (`0521e6e80a0fd02b851890012029b912404f72e2`) is consolidated evidence/report infrastructure, not another simulation scenario row.
 
 ## Exact-commit evidence
 

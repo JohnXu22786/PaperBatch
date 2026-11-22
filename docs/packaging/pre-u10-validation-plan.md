@@ -43,7 +43,7 @@ U10 real-user testing remains deferred. This plan does not authorize a release, 
 ## Execution record
 
 - The existing general matrix keeps its hosted Ubuntu/Windows/macOS builds, tests, and application-import report. It is not PaperBatch print support evidence for non-Windows systems.
-- The Windows batch-print report is produced by the managed test runner and records exact-run identity, the two checked-in fixture identities and order, batch/page/segment/job counts, persisted final artifact identity, Windows runner image, .NET and pinned PDFium identity, fake boundary path, partial ambiguous outcome, and evidence limits.
+- The Windows batch-print report is produced by the managed test runner and records exact-run identity, the two checked-in PDF/PNG fixture identities plus the converted synthetic DOCX input/output identities and their batch order, batch/page/segment/job counts, persisted final artifact identity, Windows runner image, .NET and pinned PDFium identity, fake boundary path, partial ambiguous outcome, and evidence limits.
 - The print contract uses an injected fake GDI boundary. Native queue inventory is a separate read-only observation; native real-queue submission is `not_run` without a safe verified queue; physical paper output is `unavailable` without a physical device and direct confirmation.
 - Unit 2 remains satisfied on `main` by PR #42 / commit `9e7fc231c8341a8ba45dbfd7fde177f5c7a5a105`.
 - Unit 1 is satisfied on `main` by PR #110; its exact-head and post-merge run identities and the post-merge CI status are recorded above and in [U9 final evidence](u9-final-evidence.md). Unit 3's evidence disposition is recorded in the linked readiness report. U10 real-user testing remains deferred.
