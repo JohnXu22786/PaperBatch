@@ -10,6 +10,12 @@ The Unit 1 contract is evidenced by the exact-head CI result and the test/workfl
 
 The U9 delivery PR series #33–#40 comprises eight completed PR units. Its simulation scenario table remains seven rows, U1–U7 (PRs #33–#39); PR #40 (`0521e6e80a0fd02b851890012029b912404f72e2`) is consolidated evidence/report infrastructure, not another simulation scenario row.
 
+## Deduplicated persistence test stabilization (PR #112)
+
+PR #112 (`test(artifacts): remove observer timeout race`) merged as `7e6e716b7f34ca0a36fc48475842cae71e5fdd5a`; its exact PR head was `596d2be502cf7c82c84a192fa1c00612371d0605`. Push CI [44995590769](https://github.com/JohnXu22786/PaperBatch/actions/runs/44995590769) and U9 [44995593257](https://github.com/JohnXu22786/PaperBatch/actions/runs/44995593257) passed at the PR head. PR CI [44995593242](https://github.com/JohnXu22786/PaperBatch/actions/runs/44995593242) failed its Windows managed job on attempt 1; a user-authorized retry of that failed job passed on attempt 2. Post-merge CI [44998307175](https://github.com/JohnXu22786/PaperBatch/actions/runs/44998307175) and U9 [44998307243](https://github.com/JohnXu22786/PaperBatch/actions/runs/44998307243) passed against the exact merge SHA.
+
+The change only makes the deduplicated-persistence test's verification callback wait until the test releases it in `finally`. A local controlled 11-second observer delay reproduced the lease-not-visible assertion with the old timeout and passed with the callback released by the test. This establishes a test synchronization race; it is not a product persistence change. Archived Actions failure details were not inspected, so the first PR run's underlying assertion is not claimed here.
+
 ## Exact-commit evidence
 
 Each listed commit is the corresponding unit's merge commit on `main`. Both workflow runs completed successfully against that exact SHA. The U7 post-merge CI run ultimately passed on its third attempt: the Windows PDFium verification step failed on attempts 1 and 2 and passed on attempt 3 without a source change; the U9 simulation matrix passed on the first run.
