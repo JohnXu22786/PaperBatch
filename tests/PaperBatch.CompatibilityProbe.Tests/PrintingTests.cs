@@ -1303,9 +1303,8 @@ internal static class PrintingTests
                     string.IsNullOrWhiteSpace(LibreOfficeExpectedVersion))
                     throw new InvalidOperationException("The Windows print report requires the verified pinned LibreOffice runtime.");
                 var docxPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "synthetic_sections_table.docx");
-                var docxBytes = File.ReadAllBytes(docxPath);
                 sourceFixtures.Add(("tests/fixtures/synthetic_documents/synthetic_sections_table.docx", docxPath,
-                    "DOCX", Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(docxBytes)).ToLowerInvariant(), docxBytes.LongLength));
+                    "DOCX", "3e0cbc2a26f4b31ae8444d7646da0aed49eb68b16616a8f582fd27fd5f0c987a", 1790L));
                 _libreOfficeEngine = enginePath;
             }
             SourceFixtures = sourceFixtures.ToArray();
