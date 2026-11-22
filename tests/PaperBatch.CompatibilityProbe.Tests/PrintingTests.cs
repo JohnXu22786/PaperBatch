@@ -908,7 +908,9 @@ internal static class PrintingTests
         }
 
         var reportPath = Environment.GetEnvironmentVariable("PAPERBATCH_PRINT_PATH_REPORT");
-        var includeLibreOffice = OperatingSystem.IsWindows() && !string.IsNullOrWhiteSpace(reportPath);
+        var includeLibreOffice = OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true";
+        if (includeLibreOffice && string.IsNullOrWhiteSpace(reportPath))
+            reportPath = Path.Combine(RequiredEnvironment("RUNNER_TEMP"), "windows-batch-print-contract.json");
         using var batch = new BatchFixture(runtimePath, runtimeHash, includeLibreOffice);
         var firstPrepared = batch.Prepare("checked-in-batch-contract-key", sourceCount: includeLibreOffice ? 3 : 2);
         Assert.True(firstPrepared.Succeeded, string.Join("; ", firstPrepared.Diagnostics));
