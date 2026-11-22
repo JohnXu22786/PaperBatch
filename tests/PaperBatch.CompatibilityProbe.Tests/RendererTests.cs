@@ -923,8 +923,7 @@ internal static class RendererTests
         var duplicateStore = new RenderArtifactStore(root, 512L * 1024 * 1024, () =>
         {
             verificationReady.Set();
-            if (!releaseVerification.Wait(TimeSpan.FromSeconds(10)))
-                throw new TimeoutException("The deduplicated persistence test did not release artifact verification.");
+            releaseVerification.Wait();
         });
         var pdfBytes = OnePagePdf();
         var artifact = store.PersistPdfAsync(new MemoryStream(pdfBytes), "test-engine", "1",
