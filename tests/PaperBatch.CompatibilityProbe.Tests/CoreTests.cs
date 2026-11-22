@@ -1309,7 +1309,7 @@ internal static class CoreTests
                 reason TEXT NULL
             );
             INSERT INTO runs (run_id, request_key, created_utc, state, prepared_run_json, retention_expires_utc)
-            VALUES ('legacy-run', 'legacy-key', '2026-10-17T12:00:00.0000000+00:00', 'Ready', '{}', '2026-11-17T12:00:00.0000000+00:00');
+            VALUES ('legacy-run', 'legacy-key', '2026-10-17T12:00:00.0000000+00:00', 'Ready', '{}', '2099-11-17T12:00:00.0000000+00:00');
             PRAGMA user_version = 1;
             """;
         command.ExecuteNonQuery();
