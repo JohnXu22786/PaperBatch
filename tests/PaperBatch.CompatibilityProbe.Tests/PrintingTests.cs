@@ -10,6 +10,7 @@ using PaperBatch.CompatibilityProbe;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 internal static class PrintingTests
 {
@@ -928,8 +929,11 @@ internal static class PrintingTests
             var conversionReceipt = batch.Artifacts.GetReceipt(run.Items[2].Render.ArtifactId);
             Assert.Equal("libreoffice", conversionReceipt.EngineId);
             Assert.Equal(batch.LibreOfficeEngineSha256, conversionReceipt.Options["engine-sha256"]);
-            Assert.True(conversionReceipt.EngineVersion == batch.LibreOfficeExpectedVersion ||
-                conversionReceipt.EngineVersion.StartsWith(batch.LibreOfficeExpectedVersion! + " Build ", StringComparison.Ordinal),
+            var expectedLibreOfficeVersion = batch.LibreOfficeExpectedVersion!;
+            Assert.True(conversionReceipt.EngineVersion == expectedLibreOfficeVersion ||
+                Regex.IsMatch(conversionReceipt.EngineVersion,
+                    @"\A" + Regex.Escape(expectedLibreOfficeVersion) + @"(?: Build [0-9]+| [0-9]+\(Build:[0-9]+\)| [0-9a-f]{7,40})\z",
+                    RegexOptions.CultureInvariant),
                 "The converted DOCX receipt did not preserve the configured pinned LibreOffice version.");
             Assert.True(run.Items[2].PageMap.SequenceEqual(
                     Enumerable.Range(1, run.Items[2].Render.PageCount).Select(page => new PageMapping(page, page))),
