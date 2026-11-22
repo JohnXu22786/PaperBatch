@@ -16,11 +16,13 @@ U10 real-user testing remains deferred. This plan does not authorize a release, 
 
 ## Ordered PLAN2AUTO units
 
-### 1. `pre_u10_windows_print_path_ci` — current unit
+### 1. `pre_u10_windows_print_path_ci` — satisfied on main
 
 **Work:** Keep the repository's general locked restore, .NET core/probe/Avalonia builds, desktop and managed tests, Python checks, and application import evidence on hosted Ubuntu, Windows, and macOS. On hosted Ubuntu and Windows only, install the pinned and signature-verified LibreOffice build and run synthetic supported document inputs through the production renderer configured by exact path and executable digest. On Windows, include converted document fixtures in mixed batch preparation, persistence, and print orchestration with an injected fake GDI boundary. Keep the single-PDF contract as regression coverage, and publish bounded exact-run renderer and batch reports. macOS checks retain protocol and unsupported-platform coverage only.
 
 **Acceptance:** The general cross-platform matrix passes and remains described as build/test and application-import evidence. Ubuntu and Windows reports bind to the exact commit and workflow/run/attempt and include fixture identities/order, source formats, renderer outcomes, actual LibreOffice version and executable SHA-256, runner identity, and evidence limits. The Windows batch report also includes batch/page/segment/job counts, final artifact hash/length, PDFium identity, simulated outcomes, and evidence limits. The batch test proves source order and mapping, persisted combined artifact integrity, exact submitted bytes/options, job/segment grouping, receipt ownership, and stop/no-auto-resubmit behavior after an ambiguous later segment. It never claims real queue acceptance or paper output. Native queue inventory, native real-queue submission, and physical paper output remain separate statuses; this test records real submission as `not_run` and paper output as `unavailable`.
+
+**Disposition:** Satisfied on `main` by PR #110, merged as `5d7ecd2cd65c7420fad2fdab340073531e5f64b3` (`test(printing): exercise converted DOCX in batch path`). Exact-head CI run [44981874302](https://github.com/JohnXu22786/PaperBatch/actions/runs/44981874302) and U9 run [44981874294](https://github.com/JohnXu22786/PaperBatch/actions/runs/44981874294) passed against PR head `2ab72068c43f39fcfaebdb1e2881fa42f4b2c5ae`. Post-merge U9 run [44984254223](https://github.com/JohnXu22786/PaperBatch/actions/runs/44984254223) passed against merge commit `5d7ecd2...`; post-merge CI run [44984254303](https://github.com/JohnXu22786/PaperBatch/actions/runs/44984254303) is recorded in [U9 final evidence](u9-final-evidence.md) with its latest observed status and conclusion, if reported. The CI workflow configures the Windows package integrity/notice checks and Windows mixed-batch contract report. Archived artifact bodies were not inspected, so runner/report field values and package contents are not independently verified by this disposition.
 
 ### 2. `pre_u10_exact_commit_evidence_access` — satisfied on main
 
@@ -28,19 +30,21 @@ U10 real-user testing remains deferred. This plan does not authorize a release, 
 
 **Disposition:** Satisfied by the existing main commit. Do not create duplicate work.
 
-### 3. `pre_u10_readiness_and_go_no_go` — downstream
+### 3. `pre_u10_readiness_and_go_no_go` — evidence reconciled
 
 **Depends on:** Unit 1 and the satisfied Unit 2 evidence.
 
-**Work:** Batch will refresh the readiness/go-no-go evidence after this unit merges. Reconcile exact-commit evidence against package provenance/contents and notices, print queue safety and ambiguous completion/recovery, privacy/redaction, offline behavior, and known migration/device gaps. Keep U10 deferred for separate authorization.
+**Work:** Reconcile exact-commit evidence against package provenance/contents and notices, print queue safety and ambiguous completion/recovery, privacy/redaction, offline behavior, and known migration/device gaps. Keep U10 deferred for separate authorization.
 
 **Acceptance:** Every claim maps to inspectable exact-run evidence and states what it cannot prove. Package, print safety, privacy, and recovery gates are individually dispositioned. No queue completion or protocol result is treated as proof of physical output. No release/tag, paid commitment, physical print, or U10 trial is initiated.
+
+**Disposition:** This report is recorded in [Pre-U10 readiness and go/no-go](pre-u10-readiness-and-go-no-go.md). Its overall decision is no-go for beta/public release and U10 while Q2, Q3, and Q5 remain partial and the package artifact body, native Office/WPS, physical output, and platform/device gaps remain unresolved. It permits continued internal synthetic development within the approved plan. This documentation change does not initiate release, purchase, physical print, or U10 activity.
 
 ## Execution record
 
 - The existing general matrix keeps its hosted Ubuntu/Windows/macOS builds, tests, and application-import report. It is not PaperBatch print support evidence for non-Windows systems.
-- The Windows batch-print report is produced by the managed test runner and records exact-run identity, the two checked-in fixture identities and order, batch/page/segment/job counts, persisted final artifact identity, Windows runner image, .NET and pinned PDFium identity, fake boundary path, partial ambiguous outcome, and evidence limits.
+- The Windows batch-print report is produced by the managed test runner and records exact-run identity, the two checked-in PDF/PNG fixture identities plus the converted synthetic DOCX input/output identities and their batch order, batch/page/segment/job counts, persisted final artifact identity, Windows runner image, .NET and pinned PDFium identity, fake boundary path, partial ambiguous outcome, and evidence limits.
 - The print contract uses an injected fake GDI boundary. Native queue inventory is a separate read-only observation; native real-queue submission is `not_run` without a safe verified queue; physical paper output is `unavailable` without a physical device and direct confirmation.
 - Unit 2 remains satisfied on `main` by PR #42 / commit `9e7fc231c8341a8ba45dbfd7fde177f5c7a5a105`.
-- Unit 3 remains downstream for Batch to refresh after this unit merges. U10 real-user testing remains deferred.
+- Unit 1 is satisfied on `main` by PR #110; its exact-head and post-merge run identities and the post-merge CI status are recorded above and in [U9 final evidence](u9-final-evidence.md). Unit 3's evidence disposition is recorded in the linked readiness report. U10 real-user testing remains deferred.
 - Windows conversion output monitoring is best-effort and may temporarily overshoot; Linux `RLIMIT_FSIZE` applies per file, not aggregate profile/cache/temp storage. The final PDF ceiling, two-minute timeout, cancellation, process-tree reaping, and cleanup are checked separately. Do not report a strict total disk bound.
