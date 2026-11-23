@@ -1,6 +1,25 @@
 # PaperBatch
 
-PaperBatch is an AGPL-3.0 project for preparing and printing ordered batches of mixed documents. Work starts with U0: a reproducible compatibility lab that records which native assumptions have evidence and which still need a licensed Windows and printer test environment.
+PaperBatch is an AGPL-3.0 project for assembling mixed documents into an ordered batch, preparing a reviewable PDF, and deliberately submitting it to a selected printer. It keeps source files unchanged and records preparation and print-job state locally. The desktop shell and print path are still prototypes; the qualification notes below describe what has and has not been verified.
+
+## Start here
+
+The desktop app has a synthetic demo mode for exploring its screens. On a machine with the .NET 10 SDK, from the repository root run:
+
+```powershell
+dotnet restore src/PaperBatch.Desktop/PaperBatch.Desktop.csproj --locked-mode -p:NuGetAudit=false
+dotnet run --project src/PaperBatch.Desktop/PaperBatch.Desktop.csproj -- --demo
+```
+
+Demo mode displays sample rows only: it does not open files, render documents, connect to printers, or create print jobs. To use the production shell, omit `--demo`. Add files to the queue, review their order and preflight results, then prepare and inspect the combined PDF. Preparation and final preview require a separately obtained PDFium runtime configured with `PAPERBATCH_PDFIUM_RUNTIME_PATH` and its independently trusted `PAPERBATCH_PDFIUM_RUNTIME_SHA256`. Printing additionally requires Windows, that runtime, and an explicitly selected supported queue; the Print action is deliberate. A spooler status is not confirmation that pages reached paper.
+
+| Platform | What this repository supports or verifies |
+| --- | --- |
+| Windows x64 | Supported desktop printing target. The current package is an unsigned development prototype; renderer and printer prerequisites still apply. |
+| Linux | Used for CI builds, protocol exercises, and synthetic checks. These do not establish a supported production desktop or printing target. |
+| macOS | No PaperBatch printing support is established. Document conversion is unsupported. |
+
+PaperBatch does not claim Microsoft Office or WPS compatibility, a clean-PC package experience, or release readiness. Its current qualification state and evidence limits are in the [U0 compatibility matrix](docs/compatibility/u0-measured-matrix.md), [Windows x64 package notes](docs/packaging/windows-x64-lite-prototype.md), and [U9 simulation qualification](docs/packaging/u9-simulation-qualification.md).
 
 ## Windows x64 packaging prototype
 
