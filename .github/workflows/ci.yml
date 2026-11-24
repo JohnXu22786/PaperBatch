@@ -185,6 +185,23 @@ jobs:
           PAPERBATCH_LO_DIAGNOSTICS: '1'
         run: python tools/capture_bounded_command_output.py --output "${{ runner.temp }}/paperbatch-desktop-test-output.txt" -- dotnet run --project tests/PaperBatch.Desktop.Tests/PaperBatch.Desktop.Tests.csproj --no-restore -p:NuGetAudit=false
 
+      - name: Install headless desktop capture tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb xdotool imagemagick
+
+      - name: Capture the real PaperBatch demo window on Xvfb
+        if: runner.os == 'Linux'
+        run: bash tools/capture_demo_ui.sh "${{ runner.temp }}/paperbatch-demo-ui.png"
+
+      - name: Upload the Avalonia demo UI capture
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: paperbatch-demo-ui-capture
+          path: ${{ runner.temp }}/paperbatch-demo-ui.png
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload bounded focused desktop test output
         if: always()
         uses: actions/upload-artifact@v4
