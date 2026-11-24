@@ -53,7 +53,7 @@ The Avalonia app starts in production mode. “Add documents” captures selecte
 
 ![PaperBatch's synthetic demo queue, preparation settings, and status panels.](docs/assets/paperbatch-demo-ui.png)
 
-*Synthetic demo render (actual PaperBatch Avalonia UI, captured on Xvfb at 1440 × 1120). The built-in sample rows and illustrative page face are UI examples only: no source documents were opened, no PDF was rendered, and no printer was contacted. On Linux, first build with `dotnet build src/PaperBatch.Desktop/PaperBatch.Desktop.csproj --no-restore -p:NuGetAudit=false`, then run `bash tools/capture_demo_ui.sh docs/assets/paperbatch-demo-ui.png` with Xvfb, xdotool, and ImageMagick installed to reproduce the capture.*
+*Synthetic demo render (actual PaperBatch Avalonia UI, captured on Xvfb at 1440 × 1120). The built-in sample rows and illustrative page face are UI examples only: no source documents were opened, no PDF was rendered, and no printer was contacted. To reproduce on Linux, first complete the desktop build command in the next section, then run `bash tools/capture_demo_ui.sh docs/assets/paperbatch-demo-ui.png` with Xvfb, xdotool, and ImageMagick installed.*
 
 Build the desktop app and run its focused headless presentation checks with the .NET 10 SDK:
 
